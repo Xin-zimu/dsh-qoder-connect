@@ -518,6 +518,16 @@ describe('Qoder Host settings integration', () => {
     expect(Qoder.Config({})).toMatchObject({ quotaPollMs: Qoder.QUOTA_POLL_DEFAULT_MS })
     expect(() => Qoder.Config({ quotaPollMs: 1_000 })).toThrow()
     expect(Qoder.Config({ quotaPollMs: Qoder.QUOTA_POLL_MIN_MS })).toMatchObject({ quotaPollMs: Qoder.QUOTA_POLL_MIN_MS })
+
+    // The check-in floor is the schema's as well: 10:00 UTC+8 is when the
+    // upstream opens the day's benefit, so a moment before it cannot claim and
+    // is refused outright rather than stored and later blamed on the plugin.
+    expect(() => Qoder.Config({ checkInMinuteCN: 599 })).toThrow()
+    expect(() => Qoder.Config({ checkInMinuteCN: 0 })).toThrow()
+    expect(() => Qoder.Config({ checkInMinuteGlobal: 540 })).toThrow()
+    expect(() => Qoder.Config({ checkInMinuteCN: 1440 })).toThrow()
+    expect(Qoder.Config({ checkInMinuteCN: 600 })).toMatchObject({ checkInMinuteCN: 600 })
+    expect(Qoder.Config({ checkInMinuteCN: 870 })).toMatchObject({ checkInMinuteCN: 870 })
   })
 
   it('defaults its model rows to the live-catalog shape the stores fingerprint', async () => {

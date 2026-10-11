@@ -119,11 +119,17 @@ const POLL_DEFAULT_MS = 300_000
 const POLL_MIN_MS = 60_000
 /** 10:00 UTC+8, the moment the upstream resets the daily campaign. */
 const CHECK_IN_MINUTE_DEFAULT = 600
+/**
+ * Floor the Host schema also enforces: the daily benefit window opens at 10:00,
+ * so an earlier moment can never claim anything. Mirrored here for immediate UI
+ * feedback, the same way `POLL_MIN_MS` mirrors the poll floor.
+ */
+const EARLIEST_CHECK_IN_MINUTE = 600
 
 /** Minutes past midnight (UTC+8), split for the two number fields. */
 function splitMinutes(minutes: number): { hours: number; minutes: number } {
   const safe = Number.isFinite(minutes) ? Math.trunc(minutes) : CHECK_IN_MINUTE_DEFAULT
-  const clamped = safe < 0 || safe > 1439 ? CHECK_IN_MINUTE_DEFAULT : safe
+  const clamped = safe < EARLIEST_CHECK_IN_MINUTE || safe > 1439 ? CHECK_IN_MINUTE_DEFAULT : safe
   return { hours: Math.floor(clamped / 60), minutes: clamped % 60 }
 }
 
@@ -300,11 +306,15 @@ function TimeRow({ label, hint, value, disabled, onPick }: {
     const parsedMinutes = Number.parseInt(minuteDraft, 10)
     const hours = Number.isFinite(parsedHours) ? Math.min(23, Math.max(0, parsedHours)) : split.hours
     const minutes = Number.isFinite(parsedMinutes) ? Math.min(59, Math.max(0, parsedMinutes)) : split.minutes
-    const next = hours * 60 + minutes
+    // A moment before the window opens can never claim, so the field lifts it to
+    // the opening instead of storing something the plugin cannot honour.
+    const next = Math.max(EARLIEST_CHECK_IN_MINUTE, hours * 60 + minutes)
     if (next === value) {
-      // Nothing to write, but normalize what is on screen ("9" -> "09").
-      setHourDraft(String(hours))
-      setMinuteDraft(String(minutes).padStart(2, '0'))
+      // Nothing to write, but normalize what is on screen ("9" -> "09", and a
+      // typed 09:30 back to the earliest moment the plugin will actually run).
+      const settled = splitMinutes(next)
+      setHourDraft(String(settled.hours))
+      setMinuteDraft(String(settled.minutes).padStart(2, '0'))
       return
     }
     onPick(next)

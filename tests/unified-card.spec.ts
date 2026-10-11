@@ -570,4 +570,59 @@ describe('Unified Qoder Plugin Card', () => {
     expect(part('minute', 1).props.disabled).toBe(true)
     act(() => renderer?.unmount())
   })
+
+  it('refuses a check-in time before the 10:00 window opening', async () => {
+    // A moment before 10:00 can never claim anything — the upstream has not
+    // opened the day's benefit yet — so the field must not be able to store one
+    // and leave the plugin looking broken for a reason the user chose.
+    const mockSet = vi.fn()
+    const fakeScope = {
+      getSnapshot: () => ({
+        status: 'ready' as const,
+        writable: true,
+        value: {
+          sidebarQuotaCN: false,
+          sidebarQuotaGlobal: false,
+          autoCheckInCN: true,
+          autoCheckInGlobal: false,
+          checkInMinuteCN: 600,
+          checkInMinuteGlobal: 600,
+          quotaPollMs: 300_000,
+        },
+      }),
+      subscribe: () => () => {},
+      set: mockSet,
+    }
+    let renderer: ReactTestRenderer | undefined
+    await act(async () => {
+      renderer = create(createElement(QuotaSettingsContent, {
+        t: t as any,
+        scope: fakeScope as any,
+        signedIn: () => ({ cn: true, global: false }),
+      }))
+    })
+
+    const part = (name: string, index = 0) =>
+      renderer!.root.findAll(n => n.props['data-checkin-part'] === name)[index]!
+
+    await act(async () => { part('hour').props.onChange({ target: { value: '9' } }) })
+    await act(async () => { part('minute').props.onChange({ target: { value: '30' } }) })
+    await act(async () => { part('hour').props.onBlur() })
+
+    // Nothing was written, and the fields snapped back to the earliest moment
+    // the plugin will actually run.
+    expect(mockSet).not.toHaveBeenCalled()
+    expect(part('hour').props.value).toBe('10')
+    expect(part('minute').props.value).toBe('00')
+
+    // Midnight is refused the same way.
+    await act(async () => { part('hour').props.onChange({ target: { value: '0' } }) })
+    await act(async () => { part('minute').props.onChange({ target: { value: '0' } }) })
+    await act(async () => { part('hour').props.onBlur() })
+    expect(mockSet).not.toHaveBeenCalled()
+    expect(part('hour').props.value).toBe('10')
+    expect(part('minute').props.value).toBe('00')
+
+    act(() => renderer?.unmount())
+  })
 })

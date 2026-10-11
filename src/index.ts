@@ -31,7 +31,7 @@ import { getMachineId } from './qoder/transport/machine-id.ts'
 import { qoderMachineIdPath } from './paths.ts'
 import { registerQoderStatusRoute } from './web-status.ts'
 import { createProbeKey, registerQoderProbeRoute } from './probe-route.ts'
-import { CheckInScheduler, DEFAULT_CHECK_IN_MINUTE, JsonFileCheckInStore, normalizeCheckInMinute } from './checkin-scheduler.ts'
+import { CheckInScheduler, DEFAULT_CHECK_IN_MINUTE, EARLIEST_CHECK_IN_MINUTE, JsonFileCheckInStore, normalizeCheckInMinute } from './checkin-scheduler.ts'
 import type { QoderModelInfo } from './catalog.ts'
 import type { QoderWebCatalog, QoderWebProbeSection } from './status-paths.ts'
 import { QODER_SETTINGS_FACE_PATH } from './status-paths.ts'
@@ -372,12 +372,18 @@ const AUTO_CHECK_IN_FIELD = volatileField(z.boolean().default(false)
  * itself rejects an impossible time: a browser time input yields 0–1439, and
  * anything outside that range fails Host validation instead of silently
  * scheduling a request at a moment that never arrives.
+ *
+ * The floor is the window's own opening rather than midnight, because a moment
+ * before 10:00 is impossible in the same sense: the upstream has not opened the
+ * day's benefit yet, so the run can only read the *previous* window's status
+ * and settle a day that was never claimed. Refusing the value is the point — it
+ * is not a time this plugin could honour.
  */
 const CHECK_IN_MINUTE_FIELD = volatileField(z.number()
   .default(DEFAULT_CHECK_IN_MINUTE)
-  .min(0)
+  .min(EARLIEST_CHECK_IN_MINUTE)
   .max(1439)
-  .description('每日自动签到的时刻（自 UTC+8 午夜起的分钟数，600 = 10:00）'))
+  .description('每日自动签到的时刻（自 UTC+8 午夜起的分钟数，600 = 10:00；最早 10:00，即活动窗口开启时刻）'))
 /**
  * Quota poll interval: default 5 minutes, floor 1 minute. The status route
  * performs a live upstream billing call per request with no cache, so an

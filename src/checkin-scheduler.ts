@@ -4,6 +4,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { QoderCheckInResult } from './qoder/transport/checkin.ts'
 import { qoderPluginDataDir } from './paths.ts'
+import { formatUtc8Date, utc8WallClock } from './utc8.ts'
 
 export interface VariantCheckInTarget {
   variantId: string
@@ -116,19 +117,6 @@ export class JsonFileCheckInStore implements CheckInStatusStore {
 }
 
 /**
- * Returns the current date in YYYY-MM-DD standardized on UTC+8 (Beijing Time).
- */
-export function getUtc8DateString(nowMs: number = Date.now()): string {
-  const d = new Date(nowMs)
-  // Shift by timezone offset to UTC, then +8 hours (480 mins)
-  const utc8 = new Date(d.getTime() + (d.getTimezoneOffset() + 480) * 60_000)
-  const y = utc8.getFullYear()
-  const m = String(utc8.getMonth() + 1).padStart(2, '0')
-  const day = String(utc8.getDate()).padStart(2, '0')
-  return `${y}-${m}-${day}`
-}
-
-/**
  * The moment a variant checks in, as minutes past midnight in UTC+8.
  *
  * 600 is 10:00, which is when the upstream resets the daily campaign; it is
@@ -137,12 +125,24 @@ export function getUtc8DateString(nowMs: number = Date.now()): string {
  */
 export const DEFAULT_CHECK_IN_MINUTE = 600
 
-/** Clamp any stored/typed value onto a real minute of the day. */
+/**
+ * The earliest moment a variant may be scheduled for: the window's opening.
+ *
+ * The upstream opens the daily benefit at 10:00 UTC+8, so an earlier moment
+ * cannot claim anything — the run reads the *previous* window's status and
+ * settles a day that was never claimed. The settings schema refuses to store
+ * such a value; this is the floor a stored one is lifted to, so an old config
+ * (or a hand-edited file) still lands on the earliest moment the plugin can
+ * actually honour instead of scheduling a request that can never succeed.
+ */
+export const EARLIEST_CHECK_IN_MINUTE = DEFAULT_CHECK_IN_MINUTE
+
+/** Clamp any stored/typed value onto a minute the plugin can actually honour. */
 export function normalizeCheckInMinute(value: unknown): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_CHECK_IN_MINUTE
   const whole = Math.trunc(value)
   if (whole < 0 || whole > 1439) return DEFAULT_CHECK_IN_MINUTE
-  return whole
+  return Math.max(EARLIEST_CHECK_IN_MINUTE, whole)
 }
 
 /**
@@ -153,9 +153,8 @@ export function normalizeCheckInMinute(value: unknown): number {
  */
 export function msUntilNextCheckIn(minuteOfDay: number, nowMs: number = Date.now()): number {
   const minute = normalizeCheckInMinute(minuteOfDay)
-  const d = new Date(nowMs)
   // Calculate current UTC+8 wall clock
-  const utc8Time = new Date(d.getTime() + (d.getTimezoneOffset() + 480) * 60_000)
+  const utc8Time = utc8WallClock(nowMs)
   const targetUtc8 = new Date(utc8Time.getTime())
   targetUtc8.setHours(Math.floor(minute / 60), minute % 60, 5, 0)
 
@@ -173,8 +172,7 @@ export function msUntilNextCheckIn(minuteOfDay: number, nowMs: number = Date.now
  */
 export function isPastCheckInTime(minuteOfDay: number, nowMs: number = Date.now()): boolean {
   const minute = normalizeCheckInMinute(minuteOfDay)
-  const d = new Date(nowMs)
-  const utc8 = new Date(d.getTime() + (d.getTimezoneOffset() + 480) * 60_000)
+  const utc8 = utc8WallClock(nowMs)
   return utc8.getHours() * 60 + utc8.getMinutes() >= minute
 }
 
@@ -289,7 +287,7 @@ export class CheckInScheduler {
   async sweepAll(isCatchUp: boolean, only?: string): Promise<void> {
     if (this.disposed) return
     const nowMs = this.now()
-    const today = getUtc8DateString(nowMs)
+    const today = formatUtc8Date(nowMs)
 
     for (const target of this.targets) {
       if (only !== undefined && target.variantId !== only) continue
