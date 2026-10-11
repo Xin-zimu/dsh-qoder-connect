@@ -15,6 +15,25 @@ const expiryBufferMs = 5 * 60 * 1000
 const defaultExpiryMs = 24 * 60 * 60 * 1000
 const defaultAuthTimeoutMs = 15_000
 
+/**
+ * Interpret an OAuth `expires_in` value as a duration in milliseconds.
+ *
+ * The RFC 6749 convention is SECONDS, but this upstream has been observed
+ * returning milliseconds, and the earlier code assumed ms unconditionally — an
+ * assumption every test shared, so it could never be caught. Treating a real
+ * seconds value (e.g. 3600) as ms would expire the job token ~3.6s out and
+ * force a re-exchange on nearly every request; since a new exchange retires the
+ * previous job token, concurrent conversations would evict each other.
+ *
+ * Heuristic: any value below 1e6 is read as seconds (a token lifetime under
+ * ~11.6 days), anything at or above it as milliseconds. The two regimes cannot
+ * overlap for realistic lifetimes, so both spellings resolve to the same wall
+ * clock. Confirm against the live upstream before relying on either branch.
+ */
+export function expiresInToMs(expiresIn: number): number {
+  return expiresIn < 1_000_000 ? expiresIn * 1000 : expiresIn
+}
+
 interface CachedEntry {
   creds: CosyCredentials
   expiresAt: number
@@ -202,7 +221,7 @@ export class QoderAuthService {
       const parsed = Date.parse(data.expires_at)
       if (!Number.isNaN(parsed)) expiresAt = parsed
     } else if (typeof data.expires_in === 'number' && data.expires_in > 0) {
-      expiresAt = Date.now() + data.expires_in
+      expiresAt = Date.now() + expiresInToMs(data.expires_in)
     }
 
     const userInfo = await retryMetadataRead(signal, () => this.fetchUserInfo(jobToken, signal))

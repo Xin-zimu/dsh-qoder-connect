@@ -1856,7 +1856,14 @@ export function apply(ctx: Context, config: Config): void {
       // `lastFetchAtMs` starts at 0 — without the shared record every write
       // would immediately re-fetch both variants from upstream.
       const stale = runtime.catalogSource !== 'live'
-      const fetchedAt = lastLiveFetchAt.get(identity) ?? 0
+      // Consider BOTH clocks: the shared per-identity success record (survives a
+      // fiber reload) and this instance's own last-attempt time, which the
+      // failure branch also stamps. Reading only the success record would leave
+      // an account that has never fetched successfully — a fresh install during
+      // an upstream outage, exactly when backing off matters most — with
+      // `fetchedAt` pinned at 0, so every sweep would re-request the catalog and
+      // become the request loop this backoff exists to prevent.
+      const fetchedAt = Math.max(lastLiveFetchAt.get(identity) ?? 0, runtime.lastFetchAtMs)
       const due = Date.now() - fetchedAt >= credentialPollMs() * CATALOG_RETRY_SWEEPS
       if (stale && due) await fetchCatalog(runtime, identity)
       return

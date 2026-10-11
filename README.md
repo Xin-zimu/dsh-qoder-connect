@@ -150,6 +150,14 @@ DSH → 设置 → 插件设置 → Qoder 卡片，展开后把 PAT 粘贴进密
 
 数据目录按 profile 归属（在 `$DSH_HOME/profiles/` 下找声明本插件的 profile），无法确定时回落到 Harness home；环境变量 `DSH_QODER_DATA_DIR` 可显式覆盖。
 
+### 本地 Web 路由的绑定前提
+
+插件自带的 loopback shim（`/v1/chat/completions` 等）由本进程绑定，只监听 `127.0.0.1`，并要求每个请求带本机 Host/Origin 与每进程随机 bearer，属仓库可控范围。
+
+但**状态与控制路由**（`web-status`、`probe-route`）挂在宿主的 `ctx.webServer` 上，其监听地址由 DeepSeek Harness 决定、本仓库无法约束。这两条路由的响应里会下发控制密钥（`authKey` / `probeKey`），任何能访问该端口者即可用它们覆写或清除 PAT、触发消耗额度的探测。它们已用 loopback Host/Origin 校验挡住 DNS-rebinding 与跨源请求，但**这道校验的前提是宿主 Web 服务只绑定回环地址**。
+
+因此：**请勿把 DSH 的 Web 界面暴露到局域网或公网**（例如通过端口转发、反代或让宿主监听 `0.0.0.0`）。一旦暴露，上述控制密钥即对同网段可见。若确有远程访问需求，请自行加一层可信反向代理并限制来源。
+
 
 ## 开发
 

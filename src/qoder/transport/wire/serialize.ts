@@ -178,6 +178,17 @@ export async function buildQoderRequestBody(
       ...options.reasoningEffort === undefined
         ? {}
         : { reasoning_effort: String(options.reasoningEffort) },
+      // Forward the sampling controls the shim parsed into GenerateOptions.
+      // Dropping them here silently discarded a caller's temperature and, more
+      // importantly, its stop sequences — so a generation that should have
+      // halted on a sentinel ran to the token cap instead. Each is emitted only
+      // when set, so a request that names neither is byte-identical to before.
+      ...typeof options.temperature === 'number' && Number.isFinite(options.temperature)
+        ? { temperature: options.temperature }
+        : {},
+      ...Array.isArray(options.stop) && options.stop.length > 0
+        ? { stop: [...options.stop] }
+        : {},
     },
     chat_context: {
       chatPrompt: '',

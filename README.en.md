@@ -150,6 +150,14 @@ Everything the plugin owns lives in one data directory: `<profile>/.dsh-qoder-co
 
 The directory follows the profile that declares this plugin (found under `$DSH_HOME/profiles/`), falling back to the Harness home when none can be determined; `DSH_QODER_DATA_DIR` overrides it explicitly.
 
+### Binding premise of the local web routes
+
+The bundled loopback shim (`/v1/chat/completions` and friends) is bound by this process itself: it listens on `127.0.0.1` only and requires every request to carry a loopback Host/Origin plus a per-process random bearer, so it stays within the repository's control.
+
+The **status and control routes** (`web-status`, `probe-route`), however, are mounted on the host's `ctx.webServer`; the address that server listens on is decided by DeepSeek Harness and cannot be constrained from this repository. Those two routes hand back control keys (`authKey` / `probeKey`) in their responses, and anyone who can reach the port can use them to overwrite or clear the PAT, or trigger credit-spending probes. They already block DNS-rebinding and cross-origin requests with a loopback Host/Origin check — **but that check assumes the host web server binds a loopback address only.**
+
+Therefore: **do not expose DSH's web interface to a LAN or the public internet** (via port forwarding, a reverse proxy, or making the host listen on `0.0.0.0`). Once exposed, those control keys become visible to others on the same network. If you genuinely need remote access, put a trusted reverse proxy in front and restrict the source yourself.
+
 ## Development
 
 ```sh

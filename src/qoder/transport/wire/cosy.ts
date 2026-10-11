@@ -34,13 +34,26 @@ export const qoderDesktopClientType = '10'
 export const defaultUserAgent = `qoder/${qoderIdeVersion}`
 const qoderDataPolicy = 'disagree'
 const qoderLoginVersion = 'v2'
-const qoderMachineOs = process.platform === 'win32'
-  ? process.arch === 'arm64'
-    ? 'aarch64_windows'
-    : 'x86_64_windows'
-  : process.arch === 'arm64'
-    ? 'aarch64_linux'
-    : 'x86_64_linux'
+/**
+ * The `Cosy-Machineos` value for a platform/arch pair.
+ *
+ * `darwin` gets its own suffix: an earlier form only branched win32 vs. else,
+ * so macOS — a primary Desktop-host platform — was reported upstream as
+ * `x86_64_linux`/`aarch64_linux`. That value feeds the COSY signature headers,
+ * so mislabeling the OS can trip upstream OS-based rollout or risk controls.
+ */
+export function qoderMachineOsFor(platform: NodeJS.Platform, arch: string): string {
+  const machine = arch === 'arm64' ? 'aarch64' : 'x86_64'
+  switch (platform) {
+    case 'win32':
+      return `${machine}_windows`
+    case 'darwin':
+      return `${machine}_darwin`
+    default:
+      return `${machine}_linux`
+  }
+}
+const qoderMachineOs = qoderMachineOsFor(process.platform, process.arch)
 const qoderMachineTypeMagic = '5'
 
 export interface CosyCredentials {

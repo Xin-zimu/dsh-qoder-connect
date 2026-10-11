@@ -1,7 +1,18 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { QoderAuthService } from '../../src/qoder/transport/auth.ts'
+import { QoderAuthService, expiresInToMs } from '../../src/qoder/transport/auth.ts'
 import { QoderLlmError } from '../../src/qoder/errors.ts'
+
+test('expiresInToMs reads a small value as seconds and a large one as ms', () => {
+  // OAuth's conventional unit: 3600 seconds is one hour.
+  assert.equal(expiresInToMs(3600), 3_600_000)
+  assert.equal(expiresInToMs(86_400), 86_400_000)
+  // Already-millisecond spellings (>= 1e6) pass through unchanged.
+  assert.equal(expiresInToMs(3_600_000), 3_600_000)
+  assert.equal(expiresInToMs(1_000_000), 1_000_000)
+  // Just below the threshold is still seconds.
+  assert.equal(expiresInToMs(999_999), 999_999_000)
+})
 
 test('QoderAuthService exchanges once, resolves identity, and caches credentials', async () => {
   let exchangeCalls = 0

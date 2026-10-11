@@ -313,7 +313,10 @@ export async function run(argv: readonly string[]): Promise<number> {
       return 1
     }
   }
-  const unknown = rest.filter(flag => flag !== '--json' && !flag.startsWith('--'))
+  // `pat set <TOKEN>` takes the token as a positional argument, so for that
+  // one path a non-flag operand is the documented input, not a stray option.
+  const allowPositional = action === 'pat' && patCommand === 'set'
+  const unknown = rest.filter(flag => flag !== '--json' && !flag.startsWith('--') && !allowPositional)
   if (unknown.length > 0 || (jsonOutput && action !== 'doctor' && action !== 'status')) {
     process.stderr.write(`dsh-qoder-connect: invalid options for ${action}: ${flags.join(' ')}\n`)
     return 1

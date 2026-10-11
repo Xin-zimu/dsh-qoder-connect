@@ -2,12 +2,21 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { buildAuthHeaders, computeSigPath } from '../../src/qoder/transport/wire/cosy.ts'
+import { buildAuthHeaders, computeSigPath, qoderMachineOsFor } from '../../src/qoder/transport/wire/cosy.ts'
 import { getQoderChatUrl } from '../../src/qoder/transport/endpoints.ts'
 import { getMachineId } from '../../src/qoder/transport/machine-id.ts'
 
 test('computeSigPath strips the /algo prefix', () => {
   assert.equal(computeSigPath('https://api3.qoder.sh/algo/api/v2/service'), '/api/v2/service')
+})
+
+test('qoderMachineOsFor labels each platform, including darwin', () => {
+  assert.equal(qoderMachineOsFor('win32', 'x64'), 'x86_64_windows')
+  assert.equal(qoderMachineOsFor('win32', 'arm64'), 'aarch64_windows')
+  assert.equal(qoderMachineOsFor('darwin', 'x64'), 'x86_64_darwin')
+  assert.equal(qoderMachineOsFor('darwin', 'arm64'), 'aarch64_darwin')
+  assert.equal(qoderMachineOsFor('linux', 'x64'), 'x86_64_linux')
+  assert.equal(qoderMachineOsFor('linux', 'arm64'), 'aarch64_linux')
 })
 
 test('getMachineId accepts an isolated storage location', () => {

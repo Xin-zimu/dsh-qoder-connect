@@ -29,6 +29,21 @@ import type { QoderProbeAction } from './status-paths.ts'
 /** Largest control body accepted; these payloads are a few dozen bytes. */
 const MAX_BODY_BYTES = 4096
 
+/**
+ * Strip token-like content from a message before it reaches the browser.
+ *
+ * A probe failure can carry an upstream body — `sse.ts` splices the raw error
+ * text into the thrown message — and this route answers a same-origin card, so
+ * an unsanitized `error.message` would be echoed into the browser. Matches the
+ * sanitizer `auth-route.ts` already applies to its own error responses.
+ */
+function safeMessage(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error))
+    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/gu, '[redacted token]')
+    .replace(/(\b(?:code|token|pat)=)[^&\s]+/giu, '$1[redacted]')
+    .slice(0, 500)
+}
+
 /** Constructor dependencies. */
 export interface QoderProbeRouteOptions {
   /**
@@ -218,7 +233,7 @@ export function qoderProbeHandler(
       }
       json(res, 200, await deps.probe(action.model as string))
     } catch (error: unknown) {
-      json(res, 500, { error: error instanceof Error ? error.message : String(error) })
+      json(res, 500, { error: safeMessage(error) })
     }
   }
 }

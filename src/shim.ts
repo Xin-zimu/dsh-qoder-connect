@@ -245,13 +245,29 @@ export function createQoderShim(options: QoderShimOptions): QoderShim {
       'X-Accel-Buffering': 'no',
     })
     let sawDone = false
+    // `[DONE]` can straddle a chunk boundary; keep a small tail so the seam is
+    // scanned too, otherwise a split marker reads as "never completed" and the
+    // error path fires on an otherwise-finished stream.
+    let carry = ''
     const body = Readable.fromWeb(result.response.body as Parameters<typeof Readable.fromWeb>[0])
     body.on('data', (chunk: Buffer) => {
-      if (chunk.includes('[DONE]')) sawDone = true
+      const window = carry + chunk.toString('utf8')
+      if (window.includes('[DONE]')) sawDone = true
+      carry = window.slice(-8)
     })
     body.on('error', (error: unknown) => {
       logger?.warn('dsh-qoder-connect: upstream stream failed mid-flight', error)
-      if (!sawDone && res.writable) res.end('data: [DONE]\n\n')
+      if (sawDone || !res.writable) {
+        res.end()
+        return
+      }
+      // Never fake a clean completion: a truncated answer accepted as whole is
+      // silent data loss the user cannot see. Emit one SSE error frame — the
+      // same shape upstream.ts uses — before the terminator so pi-ai surfaces
+      // the failure instead of treating the cut-off reply as finished.
+      const message = error instanceof Error ? error.message : String(error)
+      const frame = `data: ${JSON.stringify({ error: { message, type: 'server_error', code: 'upstream_stream_error' } })}\n\n`
+      res.end(`${frame}data: [DONE]\n\n`)
     })
     body.pipe(res)
   }
