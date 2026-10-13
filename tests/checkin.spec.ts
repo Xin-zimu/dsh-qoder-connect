@@ -22,6 +22,13 @@ const PREVIOUS_OPEN_MS = WINDOW_OPEN_MS - 86_400_000 // 2026-10-10 10:00 UTC+8
 const PREVIOUS_CLOSE_MS = WINDOW_CLOSE_MS - 86_400_000 // 2026-10-11 09:59 UTC+8
 /** The moment the report's "09:58 already claimed" row was written. */
 const PRE_WINDOW_MS = Date.parse('2026-10-11T01:58:10.000Z')
+/**
+ * Five seconds after today's window opened — the instant the scheduled run
+ * fires. Pinned by every test that reaches the upstream: the fixtures below are
+ * dated 2026-10-11, so an unpinned clock would make their assertions depend on
+ * the day the suite happens to run.
+ */
+const POST_OPEN_MS = Date.parse('2026-10-11T02:00:05.000Z')
 
 afterEach(() => {
   // The window tests pin `Date.now`; leaking that spy would silently move every
@@ -84,6 +91,22 @@ function previousCampaign(claimStatus: string): Record<string, unknown> {
   }
 }
 
+/**
+ * A campaign whose window opens *tomorrow* — the upstream publishing the next
+ * window early, carrying a status left over from the last cycle.
+ */
+function nextCampaign(claimStatus: string): Record<string, unknown> {
+  return {
+    campaignId: 'camp-next',
+    campaignKey: 'act-20261012-747',
+    actionType: 'CLAIM_BENEFIT',
+    claimStatus,
+    startAt: (WINDOW_OPEN_MS + 86_400_000) / 1000,
+    endAt: (WINDOW_CLOSE_MS + 86_400_000) / 1000,
+    benefit: { amount: 100, kind: 'CREDITS' },
+  }
+}
+
 describe('QoderCheckInService', () => {
 
   it('rejects with error result when PAT is empty', async () => {
@@ -95,6 +118,7 @@ describe('QoderCheckInService', () => {
   })
 
   it('successfully claims daily benefit when campaign is claimable', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(POST_OPEN_MS)
     const auth = createMockAuth('valid-token')
     const mockFetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const urlStr = String(url)
@@ -135,6 +159,7 @@ describe('QoderCheckInService', () => {
   })
 
   it('returns already-claimed when campaign status is already CLAIMED', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(POST_OPEN_MS)
     const auth = createMockAuth()
     const mockFetch = vi.fn(async (url: string | URL | Request) => {
       return new Response(JSON.stringify({
@@ -164,9 +189,9 @@ describe('QoderCheckInService', () => {
   })
 
   it('does not settle today from a CLAIMED that belongs to the previous window', async () => {
-    // The reported failure, with its own numbers: at 09:58:10 UTC+8 the
-    // upstream is still serving the window that opened at 10:00 the day before
-    // and reports it CLAIMED. That says nothing about today, and recording it
+    // The reported failure, with its own numbers: at 09:58:10 UTC+8 the upstream
+    // is still serving the window that opened at 10:00 the day before and
+    // reports it CLAIMED. That says nothing about today, and recording it
     // against today is what let the 10:00 run skip the day.
     vi.spyOn(Date, 'now').mockReturnValue(PRE_WINDOW_MS)
     const { fetch: mockFetch, posts } = campaignFetch(previousCampaign('CLAIMED'))
@@ -179,15 +204,18 @@ describe('QoderCheckInService', () => {
 
     const result = await service.checkIn('pt-test')
 
-    // Retryable and dated today, so the scheduled run after 10:00 still claims.
-    expect(result.status).toBe('no-campaign')
+    // Retryable and dated today, so the run after the window opens still claims.
+    expect(result.status).toBe('before-window')
     expect(result.date).toBe('2026-10-11')
+    expect(result.message).toContain('2026-10-10')
     expect(posts).toHaveLength(0)
   })
 
-  it("keeps today retryable while today's window has not opened yet", async () => {
+  it('refuses a window that has not opened yet, however the upstream labels it', async () => {
     // The other shape of the same mistake: the upstream already serves today's
-    // campaign before 10:00, carrying a status left over from the last cycle.
+    // campaign before the window opens, carrying a status left over from the
+    // last cycle. The window's own bounds are what refuse it — no clock rule is
+    // consulted, which is why this holds at any opening time, in either region.
     vi.spyOn(Date, 'now').mockReturnValue(PRE_WINDOW_MS)
     const { fetch: mockFetch, posts } = campaignFetch(todayCampaign('CLAIMED'))
     const service = new QoderCheckInService({
@@ -199,7 +227,48 @@ describe('QoderCheckInService', () => {
 
     const result = await service.checkIn('pt-test')
 
-    expect(result.status).toBe('no-campaign')
+    expect(result.status).toBe('before-window')
+    expect(result.date).toBe('2026-10-11')
+    expect(result.message).toContain('has not opened yet')
+    expect(posts).toHaveLength(0)
+  })
+
+  it("still refuses yesterday's window once the clock says today has opened", async () => {
+    // The shape a clock rule cannot see: 10:00:05, so "today" has opened by any
+    // local reckoning, yet the upstream is still serving yesterday's window.
+    // Only the bounds the upstream sends can tell, and they must not be read as
+    // today's benefit.
+    vi.spyOn(Date, 'now').mockReturnValue(POST_OPEN_MS)
+    const { fetch: mockFetch, posts } = campaignFetch(previousCampaign('CLAIMED'))
+    const service = new QoderCheckInService({
+      authService: createMockAuth(),
+      variantId: 'qoder',
+      region: 'china',
+      fetch: mockFetch,
+    })
+
+    const result = await service.checkIn('pt-test')
+
+    expect(result.status).toBe('before-window')
+    expect(result.message).toContain('2026-10-10')
+    expect(posts).toHaveLength(0)
+  })
+
+  it('refuses the next window when the upstream publishes it early', async () => {
+    // Reachable after the window opens too: the upstream publishes the *next*
+    // window ahead of time, carrying a status left over from the last cycle.
+    vi.spyOn(Date, 'now').mockReturnValue(POST_OPEN_MS)
+    const { fetch: mockFetch, posts } = campaignFetch(nextCampaign('CLAIMED'))
+    const service = new QoderCheckInService({
+      authService: createMockAuth(),
+      variantId: 'qoder',
+      region: 'china',
+      fetch: mockFetch,
+    })
+
+    const result = await service.checkIn('pt-test')
+
+    expect(result.status).toBe('before-window')
     expect(result.date).toBe('2026-10-11')
     expect(posts).toHaveLength(0)
   })
@@ -243,7 +312,7 @@ describe('QoderCheckInService', () => {
     // Documented fallback: with no startAt/endAt nothing can attribute the
     // status to a window, so the calendar day is the only signal left. Pinned
     // here so the fallback is a decision rather than an accident.
-    vi.spyOn(Date, 'now').mockReturnValue(PRE_WINDOW_MS)
+    vi.spyOn(Date, 'now').mockReturnValue(POST_OPEN_MS)
     const { fetch: mockFetch } = campaignFetch({
       campaignId: 'camp-123',
       campaignKey: 'daily-100',
@@ -290,6 +359,7 @@ describe('QoderCheckInService', () => {
   })
 
   it('returns no-campaign when no CLAIM_BENEFIT campaign exists (like current Global)', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(POST_OPEN_MS)
     const auth = createMockAuth()
     const mockFetch = vi.fn(async () => {
       return new Response(JSON.stringify({
@@ -316,6 +386,7 @@ describe('QoderCheckInService', () => {
   })
 
   it('identifies as the desktop client, without which the upstream returns an empty campaign list', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(POST_OPEN_MS)
     const auth = createMockAuth()
     const seenHeaders: (Record<string, string> | undefined)[] = []
     const mockFetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
@@ -342,6 +413,7 @@ describe('QoderCheckInService', () => {
   })
 
   it('self-heals with exchangeFresh when auth token is rejected with 401', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(POST_OPEN_MS)
     let callCount = 0
     const auth = {
       getCredentials: vi.fn(async () => ({ authToken: 'expired-token', userID: 'u1', name: 'User', email: 'u@test.com', machineID: 'm1' })),
@@ -568,6 +640,45 @@ describe('CheckInScheduler', () => {
 
     // "Nothing to claim yet" is not a settled day: a later attempt the same
     // day must still be allowed to claim it.
+    expect(checkIn).toHaveBeenCalled()
+    expect(records.qoder?.status).toBe('claimed')
+  })
+
+  it('retries the day after a pre-window attempt refused to act', async () => {
+    // #13's shape, in the state the window check leaves behind: the day was
+    // attempted before the window opened, so the record says `before-window`.
+    // That record must not settle the day — the run after the window opens has
+    // to claim it.
+    const records: Record<string, CheckInRecord> = {
+      qoder: { lastDate: '2026-09-22', lastAt: 1, status: 'before-window' },
+    }
+    const store: CheckInStatusStore = {
+      read: id => records[id],
+      write: (id, record) => { records[id] = record },
+      clearLogs: id => { if (records[id]) records[id].logs = [] },
+    }
+    const checkIn = vi.fn(async () => ({
+      variantId: 'qoder',
+      date: '2026-09-22',
+      timestamp: 2,
+      status: 'claimed' as const,
+      amount: 100,
+    }))
+
+    const scheduler = new CheckInScheduler({
+      targets: [{
+        variantId: 'qoder',
+        checkIn,
+        minuteOfDay: () => DEFAULT_CHECK_IN_MINUTE,
+      }],
+      isEnabled: () => true,
+      store,
+      now: () => new Date('2026-09-22T04:00:00.000Z').getTime(),
+    })
+
+    await scheduler.sweepAll(false, 'qoder')
+    scheduler.dispose()
+
     expect(checkIn).toHaveBeenCalled()
     expect(records.qoder?.status).toBe('claimed')
   })
@@ -810,6 +921,6 @@ describe('check-in across the 10:00 window boundary', () => {
     expect(records.qoder?.lastDate).toBe('2026-10-11')
     // ...which is only possible because the pre-window attempt left the day
     // unsettled instead of recording the previous window's CLAIMED against it.
-    expect(early.status).toBe('no-campaign')
+    expect(early.status).toBe('before-window')
   })
 })

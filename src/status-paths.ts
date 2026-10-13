@@ -252,7 +252,7 @@ export type QoderWebStatus =
     checkIn?: {
       lastDate: string
       lastAt: number
-      status: 'claimed' | 'already-claimed' | 'no-campaign' | 'error'
+      status: 'claimed' | 'already-claimed' | 'before-window' | 'no-campaign' | 'error'
       amount?: number | undefined
       message?: string | undefined
       /**
@@ -267,7 +267,7 @@ export type QoderWebStatus =
         id: string
         date: string
         timestamp: number
-        status: 'claimed' | 'already-claimed' | 'no-campaign' | 'error'
+        status: 'claimed' | 'already-claimed' | 'before-window' | 'no-campaign' | 'error'
         amount?: number | undefined
         campaignKey?: string | undefined
         message?: string | undefined

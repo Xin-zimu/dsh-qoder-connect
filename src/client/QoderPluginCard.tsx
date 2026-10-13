@@ -850,7 +850,7 @@ function CheckInLogTable({
                     ? 'var(--dsw-alias-status-success, #52c41a)'
                     : log.status === 'already-claimed'
                       ? 'var(--dsw-alias-status-info, #1890ff)'
-                      : log.status === 'no-campaign'
+                      : log.status === 'no-campaign' || log.status === 'before-window'
                         ? 'var(--dsw-alias-label-tertiary, #999)'
                         : 'var(--dsw-alias-status-error, #f5222d)',
                 }} />
@@ -861,11 +861,24 @@ function CheckInLogTable({
                       ? t('autoCheckInStatusAlready')
                       : log.status === 'no-campaign'
                         ? t('autoCheckInStatusNoCampaign')
-                        : t('autoCheckInStatusError', { message: log.message ?? '' })}
+                        : log.status === 'before-window'
+                          ? t('autoCheckInStatusBeforeWindow')
+                          : t('autoCheckInStatusError', { message: log.message ?? '' })}
                 </span>
               </span>
-              <span style={{ flex: 1, textAlign: 'right', fontWeight: 600, color: log.amount ? 'var(--dsw-alias-brand-primary)' : 'inherit' }}>
-                {log.amount ? `+${log.amount}` : '-'}
+              <span style={{ flex: 1, textAlign: 'right', fontWeight: 600, color: log.status === 'claimed' ? 'var(--dsw-alias-brand-primary)' : 'inherit' }}>
+                {/*
+                  The column is "credits obtained", so only a `claimed` row may
+                  fill it. Every other status obtained nothing *by this action*:
+                  `already-claimed` is either the upstream saying the day was
+                  claimed before we asked, or our own claim replaying (the
+                  upstream granted nothing), and the scheduler's no-op row
+                  carries the day's amount forward without obtaining it. Keying
+                  the cell off `amount` alone printed "+100" on those rows too,
+                  so a day with an automatic claim and a later manual click read
+                  as two grants of 100.
+                */}
+                {log.status === 'claimed' ? `+${log.amount ?? 100}` : '-'}
               </span>
             </div>
           ))}
@@ -1057,6 +1070,8 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
         setCheckInNotice(t('autoCheckInStatusAlready'))
       } else if (result.state === 'no-campaign') {
         setCheckInNotice(t('autoCheckInStatusNoCampaign'))
+      } else if (result.state === 'before-window') {
+        setCheckInNotice(t('autoCheckInStatusBeforeWindow'))
       } else if (result.reason) {
         setCheckInNotice(t('autoCheckInStatusError', { message: result.reason }))
       }

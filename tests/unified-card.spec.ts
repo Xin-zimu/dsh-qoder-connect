@@ -456,9 +456,17 @@ describe('Unified Qoder Plugin Card', () => {
             checkIn: {
               lastDate: '2026-09-21',
               lastAt: 1700000000000,
-              status: 'claimed',
+              status: 'already-claimed',
               amount: 100,
               logs: [
+                {
+                  id: 'log-2',
+                  date: '2026-09-21',
+                  timestamp: 1700000100000,
+                  status: 'already-claimed',
+                  amount: 100,
+                  message: 'Already claimed today',
+                },
                 {
                   id: 'log-1',
                   date: '2026-09-21',
@@ -505,9 +513,14 @@ describe('Unified Qoder Plugin Card', () => {
       checkInTab.props.onClick()
     })
 
-    // Verify check-in log entries rendered
+    // Verify check-in log entries rendered. Two rows, one grant: the
+    // `already-claimed` row carries an amount in the record (it is the day's
+    // benefit value), but that action obtained nothing, so only the `claimed`
+    // row may print "+100" — otherwise one day reads as two grants of 100.
     const amounts = view!.root.findAll(n => n.children.includes('+100'))
-    expect(amounts.length).toBeGreaterThanOrEqual(1)
+    expect(amounts).toHaveLength(1)
+    const alreadyClaimed = view!.root.findAll(n => n.children.includes(en.autoCheckInStatusAlready))
+    expect(alreadyClaimed.length).toBeGreaterThanOrEqual(1)
 
     // Verify action buttons exist in check-in log panel (check in now, refresh, clear)
     const checkInBtn = view!.root.findAll(n => n.children.includes(en.checkInNow))

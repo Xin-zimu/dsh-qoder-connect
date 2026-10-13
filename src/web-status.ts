@@ -59,7 +59,7 @@ export interface QoderStatusRouteOptions {
   checkIn?: () => {
     lastDate: string
     lastAt: number
-    status: 'claimed' | 'already-claimed' | 'no-campaign' | 'error'
+    status: 'claimed' | 'already-claimed' | 'before-window' | 'no-campaign' | 'error'
     amount?: number | undefined
     message?: string | undefined
     nextRunAt?: number | undefined
@@ -67,7 +67,7 @@ export interface QoderStatusRouteOptions {
       id: string
       date: string
       timestamp: number
-      status: 'claimed' | 'already-claimed' | 'no-campaign' | 'error'
+      status: 'claimed' | 'already-claimed' | 'before-window' | 'no-campaign' | 'error'
       amount?: number | undefined
       campaignKey?: string | undefined
       message?: string | undefined

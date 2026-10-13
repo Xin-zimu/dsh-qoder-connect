@@ -52,7 +52,7 @@ export interface QoderCheckInResult {
   variantId: string
   date: string
   timestamp: number
-  status: 'claimed' | 'already-claimed' | 'no-campaign' | 'error'
+  status: 'claimed' | 'already-claimed' | 'before-window' | 'no-campaign' | 'error'
   amount?: number | undefined
   campaignKey?: string | undefined
   message?: string | undefined
@@ -208,17 +208,32 @@ export class QoderCheckInService {
       }
 
       const campaignWindow = this.classifyCampaignWindow(benefitCampaign, nowMs, today)
-      // Only today's own window may settle today. A window that has not opened
-      // yet, or one that is still yesterday's, is not today's benefit however
-      // the upstream reports its status — so stay retryable and let the run
-      // after 10:00 do the claiming. Settling the day here is what lost the
-      // credits: the scheduled run then short-circuited without ever asking.
+      // Only today's own window may settle today, and which window the
+      // upstream is serving is the only thing that can say so: a window that
+      // has not opened yet, or one that is still yesterday's, is not today's
+      // benefit however the upstream reports its status. This is also what
+      // refuses a pre-window attempt (#13, a manual click at 09:58 that read
+      // the previous window's `CLAIMED` and cost the day): nothing is claimed
+      // and the day stays retryable, so the run after the window opens still
+      // does the claiming.
+      //
+      // Deliberately driven by the campaign's own `startAt`/`endAt` rather than
+      // any clock constant: the opening moment is the upstream's to state, and
+      // the China and Global products need not share it. A local "nothing can
+      // be claimed before 10:00" rule would have hard-coded the one product's
+      // measured boundary onto both.
+      //
+      // `before-window` rather than `no-campaign`: the campaign exists and the
+      // day is still claimable, only the window is not open. Sharing one status
+      // with "this account has no campaign at all" (the Global shape, #6/#12)
+      // made the card say the same sentence for both, which is how a user
+      // reads "nothing to claim" while a claim is still owed to them.
       if (campaignWindow.kind === 'not-open' || campaignWindow.kind === 'earlier') {
         return {
           variantId: this.variantId,
           date: today,
           timestamp: nowMs,
-          status: 'no-campaign',
+          status: 'before-window',
           campaignKey: benefitCampaign.campaignKey,
           message: campaignWindow.kind === 'not-open'
             ? "Today's benefit window has not opened yet"

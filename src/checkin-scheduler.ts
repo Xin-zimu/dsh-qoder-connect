@@ -32,7 +32,7 @@ export interface CheckInLogItem {
   id: string
   date: string
   timestamp: number
-  status: 'claimed' | 'already-claimed' | 'no-campaign' | 'error'
+  status: 'claimed' | 'already-claimed' | 'before-window' | 'no-campaign' | 'error'
   amount?: number | undefined
   campaignKey?: string | undefined
   message?: string | undefined
@@ -41,7 +41,7 @@ export interface CheckInLogItem {
 export interface CheckInRecord {
   lastDate: string
   lastAt: number
-  status: 'claimed' | 'already-claimed' | 'no-campaign' | 'error'
+  status: 'claimed' | 'already-claimed' | 'before-window' | 'no-campaign' | 'error'
   amount?: number | undefined
   message?: string | undefined
   logs?: CheckInLogItem[] | undefined
@@ -314,9 +314,11 @@ export class CheckInScheduler {
   ): Promise<void> {
     const record = this.store.read(target.variantId)
     // Only an actually claimed day is settled. A day whose attempt ended in
-    // "no campaign" (the upstream had not released it yet) or in an error
-    // must stay retryable, otherwise one early failure burns the whole day —
-    // which is exactly what a wrong client identifier used to do.
+    // "no campaign" (the upstream had not released it yet), in "before window"
+    // (the clock was early — the previous window's status is all that was
+    // readable) or in an error must stay retryable, otherwise one early
+    // failure burns the whole day — which is exactly what a wrong client
+    // identifier used to do, and what a pre-10:00 manual click did to #13.
     const settledToday = record?.lastDate === today
       && (record.status === 'claimed' || record.status === 'already-claimed')
     if (settledToday) {
