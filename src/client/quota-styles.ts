@@ -69,7 +69,9 @@ export const QUOTA_CSS = `
 .qdp-footBar{display:block;background:var(--dsw-alias-bg-layer-2);border-radius:999px;height:5px;overflow:hidden}
 .qdp-footFill{display:block;background:var(--dsw-alias-brand-primary);border-radius:999px;height:100%;transition:width .3s ease}
 .qdp-footFillWarn{background:var(--dsw-alias-state-error-primary)}
-.qdp-footPct{flex:none;width:34px;color:var(--dsw-alias-label-secondary);text-align:right;font-size:11px;line-height:16px;font-variant-numeric:tabular-nums}
+/* 38px, not 34px: two-decimal copy is wider, and "99.61%" measures 36px in this
+   font. nowrap keeps a long value from wrapping the row into a second line. */
+.qdp-footPct{flex:none;width:38px;color:var(--dsw-alias-label-secondary);text-align:right;font-size:11px;line-height:16px;font-variant-numeric:tabular-nums;white-space:nowrap}
 
 /* The 56px rail: one icon button on the shell's own rail geometry (36px cell),
    so the collapsed column keeps a single glyph like its siblings. */

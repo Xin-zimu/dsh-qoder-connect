@@ -364,6 +364,36 @@ describe('Qoder plugin card', () => {
     expect(tree).toContain(t('contextUpTo', { size: '1M' }))
   })
 
+  it('prints the used percentage beside a package label in the quota detail tab', async () => {
+    // Issue #14, second surface: the settings card's credit bar labels carry the
+    // same "(used N%)" suffix the sidebar card prints, read from the same
+    // helper. 2,340 / 2,400 is Qoder desktop's own "60 / 2,400 (已使用 3%)".
+    statusBody = {
+      status: 'signed-in',
+      probeKey: 'test-probe-key',
+      authKey: 'test-auth-key',
+      credits: {
+        total: 25,
+        accounts: [
+          { packageName: '个人额度', remain: 2000, size: 2000 },
+          { packageName: '赠送额度', remain: 2340, size: 2400 },
+        ],
+      },
+      models: [],
+    }
+    await mount()
+    await press(en.tabDetails)
+
+    const labels = view!.root
+      .findAll(node => node.type === 'span')
+      .map(node => node.children.filter((child): child is string => typeof child === 'string').join(''))
+      .filter(text => text.includes('个人额度') || text.includes('赠送额度'))
+    expect(labels).toEqual([
+      `个人额度${t('quotaPackageUsed', { percent: '0' })}`,
+      `赠送额度${t('quotaPackageUsed', { percent: '3' })}`,
+    ])
+  })
+
   it('offers the max-window preference on the Global card, as a route write', async () => {
     statusBody = {
       status: 'signed-in',

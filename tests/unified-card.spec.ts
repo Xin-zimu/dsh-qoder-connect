@@ -15,6 +15,13 @@ const t = (key: QoderSettingsKey, params: Record<string, unknown> = {}): string 
     en[key] as string,
   )
 
+/** The same bound translator over the Chinese copy, for the sidebar row's labels. */
+const tZh = (key: QoderSettingsKey, params: Record<string, unknown> = {}): string =>
+  Object.entries(params).reduce(
+    (text, [name, value]) => text.replace(`{${name}}`, String(value)),
+    zh[key] as string,
+  )
+
 /**
  * The shared status store is module state that outlives a test, and an
  * expanding card no longer re-reads a document that is still fresh — so each
@@ -400,6 +407,73 @@ describe('Unified Qoder Plugin Card', () => {
     })
     expect(openMock).toHaveBeenCalledTimes(1)
     act(() => signedInView?.unmount())
+  })
+
+  it('prints the cycle USED percentage beside each package label in the sidebar card', async () => {
+    // Issue #14's shape: the row already carried the REMAINING ratio, and the
+    // label now carries the same ratio read as usage — Qoder desktop's
+    // "60 / 2,400 (已使用 3%)" phrasing, one line down in our own card.
+    setQuotaToggles(true, false)
+    noteQuotaSignIn('qoder', true)
+    noteQuotaStatus('qoder', {
+      status: 'signed-in',
+      credits: {
+        total: 0,
+        accounts: [
+          { packageName: '个人额度', remain: 2000, size: 2000 },
+          { packageName: '赠送额度', remain: 2340, size: 2400 },
+        ],
+      },
+    })
+
+    let card: ReactTestRenderer | undefined
+    await act(async () => {
+      card = create(createElement(SidebarQuotaCard, {
+        t: tZh as any,
+        statusPath: QODER_STATUS_PATH,
+        open: () => {},
+        wide: true,
+      } as any))
+    })
+
+    const labels = card!.root
+      .findAll(node => node.props.className === 'qdp-footLabel')
+      .map(node => node.children.filter((child): child is string => typeof child === 'string').join(''))
+    expect(labels).toEqual(['个人额度(已使用0%)', '赠送额度(已使用3%)'])
+    act(() => card?.unmount())
+  })
+
+  it('omits the used suffix when the row has no ratio to state', async () => {
+    // An unknown total and an uncapped package both have no percentage — the
+    // suffix must vanish rather than assert a fabricated "已使用0%".
+    setQuotaToggles(true, false)
+    noteQuotaSignIn('qoder', true)
+    noteQuotaStatus('qoder', {
+      status: 'signed-in',
+      credits: {
+        total: 0,
+        accounts: [
+          { packageName: '个人额度', remain: 100, size: 0 },
+          { packageName: '赠送额度', remain: 0, size: 0, unlimited: true },
+        ],
+      },
+    })
+
+    let card: ReactTestRenderer | undefined
+    await act(async () => {
+      card = create(createElement(SidebarQuotaCard, {
+        t: tZh as any,
+        statusPath: QODER_STATUS_PATH,
+        open: () => {},
+        wide: true,
+      } as any))
+    })
+
+    const labels = card!.root
+      .findAll(node => node.props.className === 'qdp-footLabel')
+      .map(node => node.children.filter((child): child is string => typeof child === 'string').join(''))
+    expect(labels).toEqual(['个人额度', '赠送额度'])
+    act(() => card?.unmount())
   })
 
   it('rejects write to scope.set when attempting to turn on sidebarQuotaCN/Global while unsigned', async () => {

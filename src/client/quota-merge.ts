@@ -92,6 +92,53 @@ export function clampPercent(remain: number, size: number): number | undefined {
   return Math.min(100, Math.max(0, percent))
 }
 
+/**
+ * The percent format every surface prints a RATIO with: at most two decimals,
+ * with a whole value left whole — "100", never "100.00".
+ *
+ * Both cards show the SAME package, so they must print the SAME number: while
+ * the sidebar rounded to whole percent and the settings card kept one decimal,
+ * 2,291 / 2,300 read "100%" in one place and "99.6%" in the other, and the two
+ * surfaces contradicted each other about one figure.
+ *
+ * Two decimals, not a fixed two: the padding would buy no accuracy, and the
+ * sidebar's percent column is 38px wide, where "99.61%" measures 36px while
+ * "100.00%" measures 42px.
+ *
+ * @param percent - an already-clamped percentage value.
+ * @returns the percent as text, without the trailing sign.
+ */
+export function formatPercentText(percent: number): string {
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(percent)
+}
+
+/**
+ * The same ratio read the other way round: the cycle's USED percentage as a
+ * bare number string ("3"), ready for the `quotaPackageUsed` copy.
+ *
+ * Both surfaces that print it call this ONE function — the sidebar card's label
+ * suffix and the settings card's credit bar — because they must never disagree
+ * about the same package.
+ *
+ * Unlike {@link formatPercentText}, this one stays whole percent on purpose:
+ * the suffix rides inside the package label, and at two decimals the sidebar's
+ * label measures 105px against the 93px its row can spare, which would ellipsize
+ * the very suffix it exists to show.
+ *
+ * Derived from remain/size rather than read from the upstream's per-package
+ * `used`: the transport normalizes `remaining` from `used`, so the value is the
+ * same, while a package the upstream reports without `used` normalizes to a
+ * literal 0 — adopting that field would print "已使用0%" under a half-empty bar.
+ *
+ * @param remain - the package's remaining credit.
+ * @param size - the package's granted total; a non-positive size has no ratio.
+ * @returns the used percentage as a bare number string, or undefined when there is no ratio to state.
+ */
+export function usedPercentText(remain: number, size: number): string | undefined {
+  const percent = clampPercent(remain, size)
+  return percent === undefined ? undefined : String(Math.round(100 - percent))
+}
+
 /** Parse an upstream expiry string ("YYYY-MM-DD HH:mm:ss") into a timestamp; undefined when unparseable. */
 function parseExpiry(value: string | undefined): number | undefined {
   if (value === undefined) return undefined

@@ -21,6 +21,7 @@ import type {
   QoderWebStatus,
 } from '../status-paths.ts'
 import type { QoderSettingsKey } from './locales.ts'
+import { formatPercentText, usedPercentText } from './quota-merge.ts'
 import { QuotaSettingsContent, type QuotaSection, type QuotaSettingsScope } from './QuotaSettingsCard.tsx'
 import {
   acquireLiveCard,
@@ -394,10 +395,6 @@ function formatNumber(value: number): string {
   return new Intl.NumberFormat(undefined).format(value)
 }
 
-function formatPercent(value: number): string {
-  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(value)
-}
-
 function formatTime(ms: number): string {
   return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(ms))
 }
@@ -465,11 +462,14 @@ function CreditBar({ label, remain, size, unlimited, packageEndTime, t }: {
   const percent = sizeKnown ? (remain / size) * 100 : undefined
   const display = percent === undefined
     ? t('percentUnknown')
-    : t('percentRemaining', { percent: formatPercent(percent) })
+    : t('percentRemaining', { percent: formatPercentText(percent) })
+  // The label carries the same used-percentage suffix the sidebar card prints,
+  // read from the same helper, so the same package never reads two ways.
+  const usedPercent = usedPercentText(remain, size)
   return (
     <div style={quotaGroupStyle}>
       <div style={quotaLabelStyle}>
-        <span>{label}</span>
+        <span>{label}{usedPercent === undefined ? null : t('quotaPackageUsed', { percent: usedPercent })}</span>
         <span>{display}</span>
       </div>
       <div
@@ -1494,7 +1494,7 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
                           <h3 style={quotaTitleStyle}>{t('creditsHeading')}</h3>
                           <span style={bodyStyle}>{status.credits.unlimited === true
                             ? t('creditsTotalUnlimited')
-                            : t('creditsUsed', { percent: formatPercent(status.credits.total) })}</span>
+                            : t('creditsUsed', { percent: formatPercentText(status.credits.total) })}</span>
                         </div>
                         {status.credits.cycleResetTime === undefined ? null : (
                           <p style={descriptionStyle}>

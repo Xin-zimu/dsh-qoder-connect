@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { clampPercent, mergeCreditAccounts, sortPackageRows, visibleQuotaGroups } from '../src/client/quota-merge.ts'
+import { clampPercent, formatPercentText, mergeCreditAccounts, sortPackageRows, usedPercentText, visibleQuotaGroups } from '../src/client/quota-merge.ts'
 import type { QuotaGroup } from '../src/client/quota-merge.ts'
 import type { QoderWebCreditAccount } from '../src/status-paths.ts'
 
@@ -195,5 +195,37 @@ describe('clampPercent', () => {
     expect(clampPercent(150, 100)).toBe(100)
     expect(clampPercent(-10, 100)).toBe(0)
     expect(clampPercent(50, 100)).toBe(50)
+  })
+})
+
+describe('usedPercentText', () => {
+  it('reads the same ratio as usage, matching Qoder desktop', () => {
+    // The desktop's own panel: "0 / 2,000 (已使用 0%)" and "60 / 2,400 (已使用 3%)".
+    expect(usedPercentText(2000, 2000)).toBe('0')
+    expect(usedPercentText(2340, 2400)).toBe('3')
+  })
+  it('states nothing when there is no ratio to state', () => {
+    expect(usedPercentText(50, 0)).toBeUndefined()
+    expect(usedPercentText(Number.POSITIVE_INFINITY, 1)).toBeUndefined()
+  })
+  it('never states a negative or over-100 usage', () => {
+    expect(usedPercentText(150, 100)).toBe('0')
+    expect(usedPercentText(-10, 100)).toBe('100')
+  })
+  it('stays whole percent even though the ratio column carries decimals', () => {
+    // The suffix rides inside the package label, where two decimals would push
+    // the sidebar's label past the room its row has and ellipsize it.
+    expect(usedPercentText(2291, 2300)).toBe('0')
+  })
+})
+
+describe('formatPercentText', () => {
+  it('keeps two decimals — the figure the two surfaces disagreed on', () => {
+    // The sidebar said "100%" while the settings card said "99.6%".
+    expect(formatPercentText(99.6087)).toBe('99.61')
+  })
+  it('leaves a whole value whole instead of padding it with zeros', () => {
+    expect(formatPercentText(100)).toBe('100')
+    expect(formatPercentText(0)).toBe('0')
   })
 })

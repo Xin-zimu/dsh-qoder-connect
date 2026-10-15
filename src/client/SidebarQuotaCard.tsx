@@ -21,7 +21,7 @@ import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type { QoderWebStatus } from '../status-paths.ts'
 import type { QoderSettingsKey } from './locales.ts'
-import { clampPercent, mergeCreditAccounts, sortPackageRows, visibleQuotaGroups } from './quota-merge.ts'
+import { clampPercent, formatPercentText, mergeCreditAccounts, sortPackageRows, usedPercentText, visibleQuotaGroups } from './quota-merge.ts'
 import { acquireLiveSurface, onQuotaSettingsChange, quotaReadFailure, quotaSettingsRevision, quotaStatus, quotaStatusFetchedAt, quotaToggles, variantOfStatusPath } from './quota-settings-store.ts'
 /** Everything the registration binds into the card. */
 export interface SidebarQuotaCardInjected {
@@ -64,6 +64,8 @@ export type QuotaCopyKey =
   | 'signedIn'
   /** Usage-percentage line under the totals. */
   | 'quotaCycleUsed'
+  /** Inline "(已使用N%)" suffix beside a package label in the sidebar card. */
+  | 'quotaPackageUsed'
 
 /** Compile-time assertion: every quota key must exist in the shared key set. */
 const _assertQuotaKeys: Record<QuotaCopyKey, QoderSettingsKey> = {
@@ -91,6 +93,7 @@ const _assertQuotaKeys: Record<QuotaCopyKey, QoderSettingsKey> = {
   patTail: 'patTail',
   signedIn: 'signedIn',
   quotaCycleUsed: 'quotaCycleUsed',
+  quotaPackageUsed: 'quotaPackageUsed',
 }
 void _assertQuotaKeys
 
@@ -120,6 +123,14 @@ interface QuotaBarView {
   detail: string
   /** Printed right-hand percentage; undefined when there is no ratio. */
   percent: string | undefined
+  /**
+   * The cycle's USED percentage as a bare number string ("3"), rendered as the
+   * "(已使用3%)" suffix beside the label. Undefined exactly when {@link percent}
+   * is: no ratio, no suffix. Read through {@link usedPercentText}, the one
+   * function this card and the settings card's credit bar share, so the two
+   * surfaces cannot disagree about the same package.
+   */
+  usedPercent: string | undefined
   /** Fill width, clamped to [0, 100]. */
   barPercent: number
   /** Render in the error colour (nearly exhausted). */
@@ -145,7 +156,8 @@ function buildBars(accounts: readonly { packageName: string; remain: number; siz
     bars.push({
       label: group.packageName,
       detail,
-      percent: percent === undefined ? undefined : `${Math.round(percent)}%`,
+      percent: percent === undefined ? undefined : `${formatPercentText(percent)}%`,
+      usedPercent: usedPercentText(group.remain, group.size),
       barPercent: percent === undefined ? 0 : Math.max(2, percent),
       warn: !group.unlimited && percent !== undefined && percent < 20,
       packageEndTime: group.packageEndTime,
@@ -272,7 +284,7 @@ export function SidebarQuotaCard(props: SidebarQuotaCardProps): React.ReactNode 
   const fetchedAt = quotaStatusFetchedAt(variantId)
   const title = [
     t(nameKey),
-    ...bars.map(bar => `${bar.label} ${bar.detail}${bar.percent === undefined ? '' : ` (${bar.percent})`}`),
+    ...bars.map(bar => `${bar.label} ${bar.detail}${bar.percent === undefined ? '' : ` (${bar.percent})`}${bar.usedPercent === undefined ? '' : ` ${t('quotaPackageUsed', { percent: bar.usedPercent })}`}`),
     fetchedAt !== undefined ? `${t('quotaUpdated')} ${timeText(fetchedAt)}` : '',
   ].filter(part => part !== '').join(' · ')
 
@@ -335,6 +347,7 @@ export function SidebarQuotaCard(props: SidebarQuotaCardProps): React.ReactNode 
             <span className="qdp-footHead">
               <span className="qdp-footLabel" title={bar.packageEndTime !== undefined ? `${t('quotaExpires')} ${bar.packageEndTime}` : t('quotaNoExpiry')}>
                 {bar.label}
+                {bar.usedPercent === undefined ? null : t('quotaPackageUsed', { percent: bar.usedPercent })}
               </span>
               <span className="qdp-footAmount">{bar.detail}</span>
               <span className="qdp-footPct">{bar.percent ?? ''}</span>
