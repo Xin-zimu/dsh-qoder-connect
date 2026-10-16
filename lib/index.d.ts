@@ -181,9 +181,23 @@ interface QoderWebCreditAccount {
    * When the package's credit expires, carried through in whatever form the
    * upstream reported it (an ISO string or a numeric epoch-millisecond value
    * normalized to an ISO string). Absent when the upstream reported no
-   * expiry — rendered as "no expiry", never guessed into a date.
+   * expiry — rendered as "no expiry", never guessed into a date. The
+   * year-9999 "never" sentinel the upstream uses for an uncapped allowance is
+   * dropped at the transport, so it never arrives here as a date.
    */
   packageEndTime?: string;
+  /**
+   * The package's localized display titles, when the upstream named it (a
+   * campaign grant's `SOTA 专属积分` / `SOTA Exclusive Credits`). `packageName`
+   * remains the best single-language guess for renderers that do not consult
+   * this map.
+   */
+  packageNameI18n?: {
+    zh?: string | undefined;
+    en?: string | undefined;
+  };
+  /** The opaque upstream campaign code behind the same grant, when known. */
+  packageCode?: string;
 }
 /** Aggregated credit answer rendered by the plugin card. */
 interface QoderWebCredits {
@@ -686,6 +700,38 @@ interface QoderQuota {
   percentage: number;
   unit: string;
 }
+/**
+ * A named grant of credits that expires on its own schedule.
+ *
+ * The international upstream reports these in `dedicatedResourcePackages`: one
+ * entry per campaign package (the SOTA exclusive credits, for one). Every
+ * bucket the reader already knows (`userQuota`, `orgResourcePackage`,
+ * `addOnQuota`) shares the single cycle-level `expiresAt`, whereas a dedicated
+ * package carries its OWN `expiresAt` and its own localized title — so it is
+ * its own shape, not just another `QoderQuota`.
+ */
+interface QoderDedicatedResourcePackage extends QoderQuota {
+  /** Upstream package id (`01a1426f-…`), when reported. */
+  id?: string | undefined;
+  /** Raw upstream name — usually an opaque campaign code, not display copy. */
+  name?: string | undefined;
+  /** Localized display title from `displayLabels`, when the upstream sends one. */
+  title?: {
+    zh?: string | undefined;
+    en?: string | undefined;
+  } | undefined;
+  /**
+   * This package's own expiry, ISO. Deliberately NOT the account's cycle-level
+   * `expiresAt`: a campaign grant ends when the grant ends, and reporting the
+   * account's (sentinel `9999`) date against it is what made the card's dates
+   * wrong.
+   */
+  expiresAt?: string | undefined;
+  /** Whether the upstream says the package is currently usable. */
+  available?: boolean | undefined;
+  /** Upstream lifecycle marker (`QUOTA_DETAIL_STATUS_ACTIVE`). */
+  status?: string | undefined;
+}
 interface QoderQuotaUsage {
   userQuota?: QoderQuota | undefined;
   orgResourcePackage?: QoderQuota | undefined;
@@ -697,6 +743,15 @@ interface QoderQuotaUsage {
    * than the account actually holds (two on the web, one here).
    */
   addOnQuota?: QoderQuota | undefined;
+  /**
+   * Campaign grants with their own expiry and display title (the international
+   * edition's SOTA exclusive credits land here).
+   *
+   * Dropping this array hid a whole 2,000-credit package from the card: the
+   * reader mapped only the three named buckets above, so the credit was real
+   * and simply never rendered.
+   */
+  dedicatedResourcePackages?: readonly QoderDedicatedResourcePackage[] | undefined;
   totalUsagePercentage?: number | undefined;
   isQuotaExceeded?: boolean | undefined;
   expiresAt?: string | undefined;
@@ -804,8 +859,25 @@ interface QoderCreditAccount {
   remain: number;
   size: number;
   unlimited?: true;
-  /** Expiry of this package, verbatim from the upstream (ISO string). */
+  /**
+   * Expiry of this package, verbatim from the upstream (ISO string).
+   *
+   * Absent when the upstream reported no expiry — which now includes the
+   * year-9999 "never" sentinel the transport drops rather than forwarding.
+   */
   packageEndTime?: string;
+  /**
+   * The package's own localized titles, when the upstream sent a real display
+   * name (a campaign grant's `SOTA 专属积分`). The renderer picks the active
+   * language; `packageName` stays the single-language best guess it falls back
+   * to, so a card that never consults this map still shows a sensible label.
+   */
+  packageNameI18n?: {
+    zh?: string | undefined;
+    en?: string | undefined;
+  };
+  /** Opaque upstream code for the same grant (`act-20261014-129`), when known. */
+  packageCode?: string;
 }
 /** The aggregated credit answer the card renders. */
 interface QoderCredits {
@@ -915,10 +987,17 @@ declare class QoderUpstreamClient {
   /**
    * The subscriber's quota answer, mapped onto the card's credit shape.
    *
-   * Qoder reports one personal quota and an optional organization resource
-   * package; each becomes a package row the card already knows how to draw.
-   * An unbounded personal allowance (`total === 0`, not exceeded) is the
-   * account's "unlimited" state.
+   * Qoder reports one personal quota, an optional organization resource
+   * package, bonus credits, and — on the international edition — a list of
+   * campaign grants under `dedicatedResourcePackages`. Each becomes a package
+   * row the card already knows how to draw. An unbounded personal allowance
+   * (`total === 0`, not exceeded) is the account's "unlimited" state.
+   *
+   * A campaign grant carries its OWN expiry and its OWN localized title, and
+   * neither may be borrowed from the account: `usage.expiresAt` is the
+   * year-9999 "never" sentinel for a personal account, while the grant really
+   * does end, and `name` is an opaque campaign code while the readable copy
+   * lives in `displayLabels`.
    */
   fetchCredits(signal?: AbortSignal): Promise<QoderCredits>;
   /**
