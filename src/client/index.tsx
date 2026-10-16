@@ -26,7 +26,8 @@ import type { QuotaDashboardInjected, QuotaDashboardState, QuotaDashboardProps, 
 import { injectQuotaCss } from './quota-styles.ts'
 import './quota-slots.ts'
 import './plugin-manager-slots.ts'
-import { setQuotaPollMs, setQuotaToggles, quotaSignInState, quotaPollMs, quotaStatusIsFresh, acquireLiveSurface, refreshQuotaStatus, variantOfStatusPath } from './quota-settings-store.ts'
+import { setQuotaPollMs, setQuotaToggles, quotaSignInState, quotaPollMs, quotaStatusIsFresh, acquireLiveSurface, refreshQuotaStatus, variantOfStatusPath, noteQuotaLanguage } from './quota-settings-store.ts'
+import { setActiveLanguage } from './quota-merge.ts'
 import { en, zh } from './locales.ts'
 import type { QoderSettingsKey } from './locales.ts'
 import { QODER_GLOBAL_STATUS_PATH, QODER_STATUS_PATH } from '../status-paths.ts'
@@ -169,6 +170,25 @@ export function apply(ctx: ClientContext): void {
     const namespace = 'settings.qoder'
     ctx.effect(() => ctx.locale.register(namespace, { zh, en }), 'dsh-qoder-connect: settings copy')
     const t = ctx.locale.bind(namespace) as QoderPluginCardInjected['t']
+
+    // Which language a package's own title renders in is decided in the merge
+    // layer (one answer for the sidebar card and the dashboard, which must not
+    // label one package two ways). The host publishes the active locale here;
+    // the bump re-renders every subscribed card so a mid-session language
+    // switch relabels the packages without waiting for the next poll.
+    const applyLanguage = (localeId: string): void => {
+      setActiveLanguage(localeId)
+      noteQuotaLanguage()
+    }
+    applyLanguage(ctx.locale.getLocale().active)
+    ctx.effect(() => {
+      const dispose = ctx.on('locale/change', snapshot => {
+        applyLanguage(snapshot.active)
+      })
+      return () => {
+        dispose()
+      }
+    }, 'dsh-qoder-connect: package title language')
 
     // 1. Shared quota-settings card. Card ORDER is priority-ascending in the
     // Plugins tab (measured: lower priority renders first), so this card gets

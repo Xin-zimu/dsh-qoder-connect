@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { clampPercent, formatPercentText, mergeCreditAccounts, sortPackageRows, usedPercentText, visibleQuotaGroups } from '../src/client/quota-merge.ts'
+import { accountDisplayName, clampPercent, currentLanguage, formatExpiryText, formatPercentText, mergeCreditAccounts, setActiveLanguage, sortPackageRows, usedPercentText, visibleQuotaGroups } from '../src/client/quota-merge.ts'
 import type { QuotaGroup } from '../src/client/quota-merge.ts'
 import type { QoderWebCreditAccount } from '../src/status-paths.ts'
 
@@ -227,5 +227,77 @@ describe('formatPercentText', () => {
   it('leaves a whole value whole instead of padding it with zeros', () => {
     expect(formatPercentText(100)).toBe('100')
     expect(formatPercentText(0)).toBe('0')
+  })
+})
+
+describe('accountDisplayName', () => {
+  // A campaign grant arrives with a localized title (`SOTA 专属积分` /
+  // `SOTA Exclusive Credits`); the two surfaces that print it — the sidebar
+  // card and the itemised table — must print the SAME one for the SAME
+  // package, which is why the choice lives here rather than in either card.
+  const grant = acct('SOTA 专属积分', 2000, 2000, {
+    packageNameI18n: { zh: 'SOTA 专属积分', en: 'SOTA Exclusive Credits' },
+    packageCode: 'act-20261014-129',
+  })
+
+  it('uses the requested language when the upstream sent a title map', () => {
+    expect(accountDisplayName(grant, 'zh')).toBe('SOTA 专属积分')
+    expect(accountDisplayName(grant, 'en')).toBe('SOTA Exclusive Credits')
+  })
+
+  it('falls back to the other language when the active one is missing', () => {
+    expect(accountDisplayName(acct('包', 1, 1, { packageNameI18n: { zh: '包' } }), 'en')).toBe('包')
+    expect(accountDisplayName(acct('Pack', 1, 1, { packageNameI18n: { en: 'Pack' } }), 'zh')).toBe('Pack')
+  })
+
+  it('keeps the plain name for a package with no title map', () => {
+    expect(accountDisplayName(acct('个人额度', 0, 0), 'en')).toBe('个人额度')
+  })
+
+  it('reads the active language when none is passed', () => {
+    const previous = currentLanguage()
+    try {
+      setActiveLanguage('en')
+      expect(currentLanguage()).toBe('en')
+      expect(accountDisplayName(grant)).toBe('SOTA Exclusive Credits')
+      setActiveLanguage('zh-CN')
+      expect(accountDisplayName(grant)).toBe('SOTA 专属积分')
+      // Anything not English selects Chinese: the plugin's own copy is
+      // Chinese-first, so a third language must not leave the row unnamed.
+      setActiveLanguage('fr')
+      expect(accountDisplayName(grant)).toBe('SOTA 专属积分')
+    } finally {
+      setActiveLanguage(previous)
+    }
+  })
+})
+
+describe('formatExpiryText', () => {
+  it('localizes an ISO instant instead of printing it verbatim', () => {
+    // The panel once put "2026-10-19T02:00:00.000Z" in a date column: not
+    // readable, and in UTC while the user's own clock said 10:00 of that day.
+    const text = formatExpiryText('2026-10-19T02:00:00.000Z')!
+    expect(text).toContain('2026')
+    expect(text).not.toContain('T02:00:00.000Z')
+  })
+
+  it('leaves an unparseable value verbatim rather than inventing a date', () => {
+    expect(formatExpiryText('not a date')).toBe('not a date')
+  })
+
+  it('states nothing about a package with no expiry', () => {
+    expect(formatExpiryText(undefined)).toBeUndefined()
+  })
+})
+
+describe('mergeCreditAccounts with titles', () => {
+  it('carries the first member title map onto the group', () => {
+    const groups = mergeCreditAccounts([
+      acct('SOTA 专属积分', 2000, 2000, { packageNameI18n: { zh: 'SOTA 专属积分', en: 'SOTA Exclusive Credits' } }),
+      acct('SOTA 专属积分', 500, 500, { packageNameI18n: { zh: 'SOTA 专属积分', en: 'SOTA Exclusive Credits' } }),
+    ])
+    expect(groups).toHaveLength(1)
+    expect(groups[0]?.remain).toBe(2500)
+    expect(accountDisplayName(groups[0]!, 'en')).toBe('SOTA Exclusive Credits')
   })
 })

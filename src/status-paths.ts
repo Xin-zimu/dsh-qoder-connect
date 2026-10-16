@@ -160,9 +160,20 @@ export interface QoderWebCreditAccount {
    * When the package's credit expires, carried through in whatever form the
    * upstream reported it (an ISO string or a numeric epoch-millisecond value
    * normalized to an ISO string). Absent when the upstream reported no
-   * expiry — rendered as "no expiry", never guessed into a date.
+   * expiry — rendered as "no expiry", never guessed into a date. The
+   * year-9999 "never" sentinel the upstream uses for an uncapped allowance is
+   * dropped at the transport, so it never arrives here as a date.
    */
   packageEndTime?: string
+  /**
+   * The package's localized display titles, when the upstream named it (a
+   * campaign grant's `SOTA 专属积分` / `SOTA Exclusive Credits`). `packageName`
+   * remains the best single-language guess for renderers that do not consult
+   * this map.
+   */
+  packageNameI18n?: { zh?: string | undefined; en?: string | undefined }
+  /** The opaque upstream campaign code behind the same grant, when known. */
+  packageCode?: string
 }
 
 /** Aggregated credit answer rendered by the plugin card. */

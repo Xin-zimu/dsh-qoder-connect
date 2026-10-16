@@ -3,7 +3,7 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QoderPluginCard, type QoderPluginCardProps } from '../src/client/QoderPluginCard.tsx'
 import { QuotaSettingsContent } from '../src/client/QuotaSettingsCard.tsx'
-import { SidebarQuotaCard } from '../src/client/SidebarQuotaCard.tsx'
+import { QuotaDashboard, SidebarQuotaCard } from '../src/client/SidebarQuotaCard.tsx'
 import { en, zh } from '../src/client/locales.ts'
 import type { QoderSettingsKey } from '../src/client/locales.ts'
 import { noteQuotaSignIn, noteQuotaStatus, resetQuotaStatusForTesting, setQuotaToggles } from '../src/client/quota-settings-store.ts'
@@ -474,6 +474,123 @@ describe('Unified Qoder Plugin Card', () => {
       .map(node => node.children.filter((child): child is string => typeof child === 'string').join(''))
     expect(labels).toEqual(['个人额度', '赠送额度'])
     act(() => card?.unmount())
+  })
+
+  it('shows a dedicated campaign package in the sidebar row set', async () => {
+    // Qoder Global grants campaign credits in `dedicatedResourcePackages`; the
+    // host maps them onto rows, and the card must draw them like any other
+    // package. Before this mapping existed the 2,000-credit SOTA grant was
+    // simply absent from every surface.
+    setQuotaToggles(false, true)
+    noteQuotaSignIn('qoder-global', true)
+    noteQuotaStatus('qoder-global', {
+      status: 'signed-in',
+      pat: { source: 'card', savedAtMs: 1_792_116_336_888, patTail: 'd092' },
+      credits: {
+        total: 0.01,
+        totalSize: 2100,
+        accounts: [
+          { packageName: '个人额度', remain: 0, size: 0 },
+          { packageName: '赠送额度', remain: 95, size: 100 },
+          {
+            packageName: 'SOTA 专属积分',
+            packageNameI18n: { zh: 'SOTA 专属积分', en: 'SOTA Exclusive Credits' },
+            packageCode: 'act-20261014-129',
+            remain: 2000,
+            size: 2000,
+            packageEndTime: '2026-10-19T02:00:00.000Z',
+          },
+        ],
+      },
+    })
+
+    let card: ReactTestRenderer | undefined
+    await act(async () => {
+      card = create(createElement(SidebarQuotaCard, {
+        t: tZh as any,
+        statusPath: QODER_GLOBAL_STATUS_PATH,
+        open: () => {},
+        wide: true,
+      } as any))
+    })
+
+    const labels = card!.root
+      .findAll(node => node.props.className === 'qdp-footLabel')
+      .map(node => node.children.filter((child): child is string => typeof child === 'string').join(''))
+    // The grant renders with its own title and its own figures; the spent
+    // personal row stays hidden because something else still has credit.
+    expect(labels).toEqual(['赠送额度(已使用5%)', 'SOTA 专属积分(已使用0%)'])
+    const amounts = card!.root
+      .findAll(node => node.props.className === 'qdp-footAmount')
+      .map(node => node.children.filter((child): child is string => typeof child === 'string').join(''))
+    expect(amounts).toEqual(['95 / 100', '2,000 / 2,000'])
+    act(() => card?.unmount())
+  })
+
+  it('lists a campaign grant in the dashboard ledger with its own expiry', async () => {
+    // The panel is the itemised ledger: the SOTA grant must appear there with
+    // its OWN deadline, printed as a date the user can read rather than the
+    // raw UTC instant, and with the account's year-9999 sentinel nowhere in
+    // sight. With no account-wide expiry to state, the panel says what it does
+    // know — when this PAT was authorized.
+    noteQuotaSignIn('qoder-global', true)
+    noteQuotaStatus('qoder-global', {
+      status: 'signed-in',
+      pat: { source: 'card', savedAtMs: Date.parse('2026-10-16T02:05:36.888Z'), patTail: 'd092' },
+      credits: {
+        total: 0.01,
+        totalSize: 2100,
+        accounts: [
+          { packageName: '个人额度', remain: 0, size: 0 },
+          { packageName: '赠送额度', remain: 95, size: 100 },
+          {
+            packageName: 'SOTA 专属积分',
+            packageNameI18n: { zh: 'SOTA 专属积分', en: 'SOTA Exclusive Credits' },
+            remain: 2000,
+            size: 2000,
+            packageEndTime: '2026-10-19T01:59:57.331Z',
+          },
+        ],
+      },
+    })
+
+    let panel: ReactTestRenderer | undefined
+    await act(async () => {
+      panel = create(createElement(QuotaDashboard, {
+        t: tZh as any,
+        statusPaths: [QODER_GLOBAL_STATUS_PATH],
+        refresh: () => {},
+        close: () => {},
+        onVariantPicked: () => {},
+        useQuotaDashboard: (selector: (state: { loading: boolean; activePath: string }) => unknown) =>
+          selector({ loading: false, activePath: QODER_GLOBAL_STATUS_PATH }),
+      } as any))
+    })
+
+    const expiryCells = panel!.root
+      .findAll(node => node.props.className === 'qdp-expiry')
+      .map(node => node.children.filter((child): child is string => typeof child === 'string').join(''))
+    // One date column carries the grant's deadline, localized rather than the
+    // verbatim instant; the personal and bonus rows state no expiry at all.
+    const dated = expiryCells.filter(text => text.includes('2026'))
+    expect(dated).toHaveLength(1)
+    expect(dated[0]).not.toMatch(/T\d{2}:\d{2}/)
+
+    // The ledger's figure column: every row the upstream reported, live rows
+    // first and the spent personal quota sunk to the bottom (the panel is the
+    // itemised ledger — collapsing a spent row here would destroy the only
+    // place its standing allowance is visible). The grant keeps its own
+    // 2,000 / 2,000 rather than being summed into the package beside it.
+    const amounts = panel!.root
+      .findAll(node => node.props.className === 'qdp-numText')
+      .map(node => node.children.filter((child): child is string => typeof child === 'string').join(''))
+    expect(amounts).toEqual(['95 / 100', '2,000 / 2,000', '0 / 0'])
+
+    const tree = JSON.stringify(panel!.toJSON())
+    expect(tree).not.toContain('9999')
+    expect(tree).toContain('SOTA 专属积分')
+    expect(tree).toContain(zh.patAuthorizedAt.replace('{time}', ''))
+    act(() => panel?.unmount())
   })
 
   it('rejects write to scope.set when attempting to turn on sidebarQuotaCN/Global while unsigned', async () => {

@@ -19,9 +19,9 @@
 import { useEffect, useState, useSyncExternalStore } from 'react'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
-import type { QoderWebStatus } from '../status-paths.ts'
+import type { QoderWebCreditAccount, QoderWebStatus } from '../status-paths.ts'
 import type { QoderSettingsKey } from './locales.ts'
-import { clampPercent, formatPercentText, mergeCreditAccounts, sortPackageRows, usedPercentText, visibleQuotaGroups } from './quota-merge.ts'
+import { accountDisplayName, clampPercent, formatExpiryText, formatPercentText, formatStampText, mergeCreditAccounts, sortPackageRows, usedPercentText, visibleQuotaGroups } from './quota-merge.ts'
 import { acquireLiveSurface, onQuotaSettingsChange, quotaReadFailure, quotaSettingsRevision, quotaStatus, quotaStatusFetchedAt, quotaToggles, variantOfStatusPath } from './quota-settings-store.ts'
 /** Everything the registration binds into the card. */
 export interface SidebarQuotaCardInjected {
@@ -66,6 +66,8 @@ export type QuotaCopyKey =
   | 'quotaCycleUsed'
   /** Inline "(已使用N%)" suffix beside a package label in the sidebar card. */
   | 'quotaPackageUsed'
+  /** Line under the panel's totals stating when the PAT in effect was authorized. */
+  | 'patAuthorizedAt'
 
 /** Compile-time assertion: every quota key must exist in the shared key set. */
 const _assertQuotaKeys: Record<QuotaCopyKey, QoderSettingsKey> = {
@@ -94,6 +96,7 @@ const _assertQuotaKeys: Record<QuotaCopyKey, QoderSettingsKey> = {
   signedIn: 'signedIn',
   quotaCycleUsed: 'quotaCycleUsed',
   quotaPackageUsed: 'quotaPackageUsed',
+  patAuthorizedAt: 'patAuthorizedAt',
 }
 void _assertQuotaKeys
 
@@ -139,8 +142,11 @@ interface QuotaBarView {
   packageEndTime: string | undefined
 }
 
+/** A credit account as the card sees it (the status document's shape). */
+type QuotaAccountView = QoderWebCreditAccount
+
 /** Project the credit accounts into the card's bar list. */
-function buildBars(accounts: readonly { packageName: string; remain: number; size: number; unlimited?: true; packageEndTime?: string }[]): QuotaBarView[] {
+function buildBars(accounts: readonly QuotaAccountView[]): QuotaBarView[] {
   // Merge first, THEN the sidebar's visibility+ordering rule: live groups
   // render first (first-seen order), spent-but-not-expired groups sink to
   // the bottom (lowest priority), expired groups drop out entirely.
@@ -154,7 +160,7 @@ function buildBars(accounts: readonly { packageName: string; remain: number; siz
         ? `${group.remain.toLocaleString()} · ?`
         : `${group.remain.toLocaleString()} / ${group.size.toLocaleString()}`
     bars.push({
-      label: group.packageName,
+      label: accountDisplayName(group),
       detail,
       percent: percent === undefined ? undefined : `${formatPercentText(percent)}%`,
       usedPercent: usedPercentText(group.remain, group.size),
@@ -212,7 +218,7 @@ interface PackageRow {
  * overview; this panel is the itemised ledger, so collapsing here would
  * destroy the only place a per-package figure is visible.
  */
-function buildPackageRows(accounts: readonly { packageName: string; remain: number; size: number; unlimited?: true; packageEndTime?: string }[]): PackageRow[] {
+function buildPackageRows(accounts: readonly QuotaAccountView[]): PackageRow[] {
   // Every package renders unmerged (the itemised ledger), but the ordering
   // rule applies: live rows first, spent-yet-active rows sunk to the bottom,
   // expired rows dropped entirely.
@@ -220,7 +226,7 @@ function buildPackageRows(accounts: readonly { packageName: string; remain: numb
   return ordered.map(account => {
     const percent = account.unlimited === true ? undefined : clampPercent(account.remain, account.size)
     return {
-      name: account.packageName,
+      name: accountDisplayName(account),
       remain: account.remain,
       size: account.size,
       percent,
@@ -345,7 +351,7 @@ export function SidebarQuotaCard(props: SidebarQuotaCardProps): React.ReactNode 
         bars.map((bar, index) => (
           <span className="qdp-footRow" key={`${index}\u0000${bar.label}\u0000${bar.packageEndTime ?? ''}`}>
             <span className="qdp-footHead">
-              <span className="qdp-footLabel" title={bar.packageEndTime !== undefined ? `${t('quotaExpires')} ${bar.packageEndTime}` : t('quotaNoExpiry')}>
+              <span className="qdp-footLabel" title={bar.packageEndTime !== undefined ? `${t('quotaExpires')} ${formatExpiryText(bar.packageEndTime) ?? bar.packageEndTime}` : t('quotaNoExpiry')}>
                 {bar.label}
                 {bar.usedPercent === undefined ? null : t('quotaPackageUsed', { percent: bar.usedPercent })}
               </span>
@@ -450,6 +456,11 @@ export function QuotaDashboard(props: QuotaDashboardProps): React.ReactNode {
   // surface refreshed last.
   const fetchedAt = quotaStatusFetchedAt(activeVariant)
   const credits = status !== undefined && 'credits' in status ? status.credits : undefined
+  // When this variant's PAT was authorized. Qoder answers a personal account's
+  // cycle expiry with the year-9999 "never" sentinel, so the one date the card
+  // can honestly state for the account as a whole is the one it holds itself:
+  // the credential's save time.
+  const patAuthorizedAt = status !== undefined && status.status === 'signed-in' ? status.pat?.savedAtMs : undefined
   // The detail table: EVERY package, unmerged, exhausted included — the
   // sidebar card is the merged overview, this panel is the itemised ledger.
   const rows = credits === undefined ? [] : buildPackageRows(credits.accounts ?? [])
@@ -588,14 +599,25 @@ export function QuotaDashboard(props: QuotaDashboardProps): React.ReactNode {
                           />
                         </span>
                       </td>
-                      <td className="qdp-expiry">{row.packageEndTime ?? t('quotaNoExpiry')}</td>
+                      <td className="qdp-expiry">{(row.packageEndTime !== undefined ? formatExpiryText(row.packageEndTime) : undefined) ?? t('quotaNoExpiry')}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
+              {/* The account-wide expiry, when the upstream really reported one.
+                  Qoder's personal accounts answer the year-9999 "never"
+                  sentinel, which the transport drops — so this line goes quiet
+                  rather than claiming the quota resets in the year 10000. */}
               {credits.cycleResetTime !== undefined ? (
-                <p className="qdp-windowReset">{t('quotaExpires')} {credits.cycleResetTime}</p>
+                <p className="qdp-windowReset">{t('quotaExpires')} {formatExpiryText(credits.cycleResetTime) ?? credits.cycleResetTime}</p>
               ) : null}
+              {/* What the account DOES key off instead: when this PAT was
+                  authorized. The card's head prints the same fact as a small
+                  stamp; here it stands where a cycle reset would otherwise be
+                  guessed at. */}
+              {patAuthorizedAt === undefined ? null : (
+                <p className="qdp-windowReset">{t('patAuthorizedAt', { time: formatStampText(patAuthorizedAt) })}</p>
+              )}
             </>
           )}
         </section>

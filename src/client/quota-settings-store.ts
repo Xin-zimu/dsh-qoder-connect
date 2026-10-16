@@ -90,6 +90,17 @@ export function quotaSignInState(): QuotaSignInState {
   return signInSnapshot
 }
 
+/**
+ * Note that the label language changed and wake every subscribed surface.
+ *
+ * A package title is re-read at render, and the cards re-render on this
+ * revision — so without a bump an English-UI user who switched to Chinese kept
+ * seeing "SOTA Exclusive Credits" until the next poll.
+ */
+export function noteQuotaLanguage(): void {
+  bump()
+}
+
 /** Subscribe to any flag change; returns the disposer. */
 export function onQuotaSettingsChange(listener: () => void): () => void {
   listeners.add(listener)

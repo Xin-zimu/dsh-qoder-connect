@@ -82,6 +82,23 @@ function apply(ctx: any): void {
     ctx.effect(() => ctx.locale.register(namespace, { zh: {}, en: {} }), 'dsh-qoder-connect: settings copy')
     const t = ctx.locale.bind(namespace)
 
+    // The package-title language, mirrored from the entry: read once, then kept
+    // current by the locale/change subscription. The store bump is a no-op
+    // stand-in here (it needs the real store, which the DOM-free mirror never
+    // loads); the guarded sequence around it stays verbatim.
+    const applyLanguage = (localeId: string): void => {
+      void localeIds.push(localeId)
+    }
+    applyLanguage(ctx.locale.getLocale().active)
+    ctx.effect(() => {
+      const dispose = ctx.on('locale/change', (snapshot: { active: string }) => {
+        applyLanguage(snapshot.active)
+      })
+      return () => {
+        dispose()
+      }
+    }, 'dsh-qoder-connect: package title language')
+
     // 1. Shared quota-settings card, registered first so it sits above the two
     // variant cards (统一设置 (50) → CN (60) → Global (70); the band starts at
     // 50 so the sibling connect plugin's 10/20/30 cards never interleave these).
@@ -258,6 +275,14 @@ function apply(ctx: any): void {
   }
 }
 
+/**
+ * Languages the mirror's `apply` observed, oldest first.
+ *
+ * The real entry writes into the quota store (the re-render bump); the mirror
+ * loads no store, so it records the same call sites' arguments here instead.
+ */
+const localeIds: string[] = []
+
 interface FakeContext {
   readonly ctx: any
   readonly injections: string[]
@@ -312,7 +337,8 @@ function fakeContext(
   const layout = { selectPanel: () => {} }
   const ctx: any = {
     effect: (fn: () => unknown) => { fn() },
-    locale: { register: () => () => {}, bind: () => (key: string) => key },
+    locale: { register: () => () => {}, bind: () => (key: string) => key, getLocale: () => ({ active: 'zh' }) },
+    on: () => () => true,
     slots,
     get: (name: string) => (name === 'layout' ? layout : undefined),
     inject: (deps: string[], cb: (scope: any) => void) => {
@@ -517,8 +543,14 @@ describe('mirror stays verbatim with src/client/index.tsx', () => {
 
   it('every effect label and locale namespace in the entry is mirrored', () => {
     const labels = [...entrySource.matchAll(/,\s*'(dsh-qoder-connect: [^']+)'/g)].map(match => match[1]!)
-    expect(labels).toEqual(['dsh-qoder-connect: settings copy', 'dsh-qoder-connect: quota styles'])
+    expect(labels).toEqual(['dsh-qoder-connect: settings copy', 'dsh-qoder-connect: package title language', 'dsh-qoder-connect: quota styles'])
     for (const label of labels) expect(mirrorSource).toContain(label)
+    // The language effect is not decoration: the mirror must read the active
+    // locale once at bind time, which is the only reason a package title has a
+    // language at all before the first locale switch.
+    localeIds.length = 0
+    apply(fakeContext().ctx)
+    expect(localeIds).toEqual(['zh'])
     // The two locale namespaces and the settings namespace the scope binds.
     expect(entrySource).toContain("'settings.qoder'")
     expect(entrySource).toContain("'panel.qoder-quota'")
