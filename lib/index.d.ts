@@ -17,9 +17,12 @@ import { SettingsNamespace } from "@deepseek-ai/dsh-settings";
  * seed — writes there, so a profile directory never collects loose
  * `.qoder-*` files and the whole plugin's footprint is one folder.
  *
- * Fallbacks, in order: `DSH_QODER_DATA_DIR` env override → the discovered
- * profile → the Harness home (a checkout running its own tests, or a host
- * loading the plugin from outside any profile).
+ * Fallbacks, in order: `DSH_QODER_DATA_DIR` env override → the profile the host
+ * reports as running → the discovered profile → the Harness home (a checkout
+ * running its own tests, or a host loading the plugin from outside any profile).
+ *
+ * The host-reported profile outranks discovery because it is the running
+ * profile rather than an inference about it; see {@link configurePluginPaths}.
  *
  * Split out of `auth.ts` so catalog/probe/heartbeat stores can import the
  * directory without pulling in the credential code (and its upstream
@@ -34,10 +37,10 @@ declare const QODER_DATA_DIR_ENV = "DSH_QODER_DATA_DIR";
 /**
  * The plugin's data directory: `<profile>/.dsh-qoder-connect`.
  *
- * Falls back to the Harness home when no profile can be discovered — a
- * checkout running its own tests, or a host that loads the plugin from
- * outside a profile — so the plugin always has somewhere to write, and
- * `DSH_QODER_DATA_DIR` overrides either way.
+ * Falls back to profile discovery, then to the Harness home when no profile can
+ * be determined — a checkout running its own tests, or a host that loads the
+ * plugin from outside a profile — so the plugin always has somewhere to write,
+ * and `DSH_QODER_DATA_DIR` overrides either way.
  */
 declare function qoderPluginDataDir(): string;
 //#endregion

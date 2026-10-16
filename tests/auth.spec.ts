@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   patTail,
@@ -14,6 +15,7 @@ import {
   type AuthLogger,
 } from '../src/auth.ts'
 import {
+  configurePluginPaths,
   qoderPluginDataDir,
   QODER_DATA_DIR_ENV,
   QODER_DATA_DIR_NAME,
@@ -29,7 +31,22 @@ import { CHINA_VARIANT, GLOBAL_VARIANT, type QoderVariant } from '../src/variant
 
 const CLEANUP: (() => Promise<void>)[] = []
 
+/**
+ * The running copy's package root: exactly what `paths.ts` compares a profile's
+ * installed copy against, computed here the same way (two levels up from
+ * `src/paths.ts`, which is one level up from this file).
+ */
+const REPO_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
+
+/** A directory link, in the only flavour an unprivileged Windows process can make. */
+async function linkDir(target: string, path: string): Promise<void> {
+  await symlink(target, path, process.platform === 'win32' ? 'junction' : 'dir')
+}
+
 afterEach(async () => {
+  // Path resolution is module state set by the plugin's `apply()`; clear it so a
+  // reported profile cannot leak into the next case.
+  configurePluginPaths({ profileDir: undefined })
   await Promise.all(CLEANUP.splice(0).map(clean => clean()))
   vi.unstubAllEnvs()
 })
@@ -351,6 +368,30 @@ describe('plugin data directory', () => {
     expect(qoderPluginDataDir()).toBe(join(home, 'profiles', 'web', QODER_DATA_DIR_NAME))
   })
 
+  it('refuses a lone declaring profile that links its whole node_modules', async () => {
+    // The single-candidate branch deliberately skips the link test (the case
+    // above), so this is the one shape it still has to refuse on its own: a
+    // residual directory is not the running copy regardless of how many other
+    // profiles exist to compare it against.
+    const home = await tempDir()
+    const residual = join(home, 'profiles', 'residual')
+    await mkdir(join(home, 'profiles', 'other', 'node_modules'), { recursive: true })
+    await mkdir(residual, { recursive: true })
+    await writeFile(
+      join(residual, 'package.json'),
+      JSON.stringify({ dependencies: { 'dsh-qoder-connect': `link:${REPO_ROOT}` } }),
+    )
+    await linkDir(join(home, 'profiles', 'other', 'node_modules'), join(residual, 'node_modules'))
+
+    vi.stubEnv(QODER_DATA_DIR_ENV, '')
+    vi.stubEnv('DSH_HOME', home)
+    const warn = vi.fn()
+    configurePluginPaths({ profileDir: undefined, diagnostics: { warn } })
+    expect(qoderPluginDataDir()).toBe(join(home, QODER_DATA_DIR_NAME))
+    expect(warn).toHaveBeenCalledOnce()
+    expect(warn.mock.calls[0]![0]).toContain(residual)
+  })
+
   it('does not guess between two profiles that both declare it', async () => {
     const home = await tempDir()
     for (const name of ['web', 'desktop']) {
@@ -362,9 +403,102 @@ describe('plugin data directory', () => {
     }
     vi.stubEnv(QODER_DATA_DIR_ENV, '')
     vi.stubEnv('DSH_HOME', home)
+    const warn = vi.fn()
+    configurePluginPaths({ profileDir: undefined, diagnostics: { warn } })
     // Neither profile's installed copy resolves to this package, so writing a
     // credential into a guess would be worse than the documented fallback.
     expect(qoderPluginDataDir()).toBe(join(home, QODER_DATA_DIR_NAME))
+    // The fallback is otherwise invisible: the user reads an empty status and
+    // concludes their credentials are gone. Say which profiles were considered.
+    expect(warn).toHaveBeenCalledOnce()
+    expect(warn.mock.calls[0]![0]).toContain(join(home, 'profiles', 'web'))
+    expect(warn.mock.calls[0]![0]).toContain(join(home, 'profiles', 'desktop'))
+  })
+
+  it('follows the profile the host reports, even one that declares nothing', async () => {
+    const home = await tempDir()
+    const reported = join(home, 'profiles', 'desktop')
+    await mkdir(reported, { recursive: true })
+    // A candidate discovery WOULD find, to prove the host's answer is not
+    // merely a tie-break among discovered profiles.
+    await mkdir(join(home, 'profiles', 'web'), { recursive: true })
+    await writeFile(
+      join(home, 'profiles', 'web', 'package.json'),
+      JSON.stringify({ dependencies: { 'dsh-qoder-connect': 'link:E:/elsewhere' } }),
+    )
+
+    vi.stubEnv(QODER_DATA_DIR_ENV, '')
+    vi.stubEnv('DSH_HOME', home)
+    configurePluginPaths({ profileDir: reported })
+    expect(qoderPluginDataDir()).toBe(join(reported, QODER_DATA_DIR_NAME))
+  })
+
+  it('ignores a host report that names no directory', async () => {
+    const home = await tempDir()
+    await mkdir(join(home, 'profiles', 'web'), { recursive: true })
+    await writeFile(
+      join(home, 'profiles', 'web', 'package.json'),
+      JSON.stringify({ dependencies: { 'dsh-qoder-connect': 'link:E:/elsewhere' } }),
+    )
+    vi.stubEnv(QODER_DATA_DIR_ENV, '')
+    vi.stubEnv('DSH_HOME', home)
+    // An empty string is not a directory: taking it would resolve the data dir
+    // into the process's working directory.
+    configurePluginPaths({ profileDir: '   ' })
+    expect(qoderPluginDataDir()).toBe(join(home, 'profiles', 'web', QODER_DATA_DIR_NAME))
+  })
+
+  it('prefers a real install over a residual profile that links its whole node_modules', async () => {
+    // Issue #15: a discarded profile kept a COPY of another profile's manifest
+    // and pointed its entire `node_modules` at that profile. Both then "declare"
+    // the plugin and both realpath-resolve to this package, so the winner was
+    // decided by readdir order — and the plugin wrote its data into the
+    // directory nothing was running. The name here sorts FIRST, so order alone
+    // would pick the residual one.
+    const home = await tempDir()
+    const residual = join(home, 'profiles', 'aaa-residual')
+    const real = join(home, 'profiles', 'desktop')
+    await mkdir(join(real, 'node_modules'), { recursive: true })
+    await mkdir(residual, { recursive: true })
+    for (const dir of [residual, real]) {
+      await writeFile(
+        join(dir, 'package.json'),
+        JSON.stringify({ dependencies: { 'dsh-qoder-connect': `link:${REPO_ROOT}` } }),
+      )
+    }
+    await linkDir(REPO_ROOT, join(real, 'node_modules', 'dsh-qoder-connect'))
+    await linkDir(join(real, 'node_modules'), join(residual, 'node_modules'))
+
+    vi.stubEnv(QODER_DATA_DIR_ENV, '')
+    vi.stubEnv('DSH_HOME', home)
+    configurePluginPaths({ profileDir: undefined })
+    expect(qoderPluginDataDir()).toBe(join(real, QODER_DATA_DIR_NAME))
+  })
+
+  it('reports an unbreakable tie instead of deciding it by directory order', async () => {
+    const home = await tempDir()
+    const names = ['desktop', 'web']
+    for (const name of names) {
+      const dir = join(home, 'profiles', name)
+      await mkdir(join(dir, 'node_modules'), { recursive: true })
+      await writeFile(
+        join(dir, 'package.json'),
+        JSON.stringify({ dependencies: { 'dsh-qoder-connect': `link:${REPO_ROOT}` } }),
+      )
+      await linkDir(REPO_ROOT, join(dir, 'node_modules', 'dsh-qoder-connect'))
+    }
+    vi.stubEnv(QODER_DATA_DIR_ENV, '')
+    vi.stubEnv('DSH_HOME', home)
+    const warn = vi.fn()
+    configurePluginPaths({ profileDir: undefined, diagnostics: { warn } })
+
+    const resolved = qoderPluginDataDir()
+    // Which one wins is order-dependent by construction; what must NOT happen is
+    // that it happens silently.
+    expect(names.map(name => join(home, 'profiles', name, QODER_DATA_DIR_NAME))).toContain(resolved)
+    expect(warn).toHaveBeenCalledOnce()
+    expect(warn.mock.calls[0]![0]).toContain(join(home, 'profiles', 'web'))
+    expect(warn.mock.calls[0]![0]).toContain(join(home, 'profiles', 'desktop'))
   })
 
   it('falls back under the Harness home when no profile can be discovered', () => {

@@ -28,7 +28,7 @@ import { newestFirst, QoderProbeStore, qoderProbePath } from './probe-store.ts'
 import { QoderUpstreamClient, validateApiKey } from './upstream.ts'
 import { createQoderTransport, type QoderCheckInResult, type QoderTransport } from './qoder/transport/index.ts'
 import { getMachineId } from './qoder/transport/machine-id.ts'
-import { qoderMachineIdPath } from './paths.ts'
+import { configurePluginPaths, qoderMachineIdPath } from './paths.ts'
 import { registerQoderStatusRoute } from './web-status.ts'
 import { createProbeKey, registerQoderProbeRoute } from './probe-route.ts'
 import { CheckInScheduler, DEFAULT_CHECK_IN_MINUTE, EARLIEST_CHECK_IN_MINUTE, JsonFileCheckInStore, normalizeCheckInMinute } from './checkin-scheduler.ts'
@@ -1222,6 +1222,17 @@ const lastLiveFetchAt = new Map<string, number>()
  * without re-registering the provider.
  */
 export function apply(ctx: Context, config: Config): void {
+  // Before anything reads a path: the first `SettingsStore` below already calls
+  // `qoderPluginDataDir()`, and every store built afterwards freezes what it got.
+  //
+  // `ctx.get` rather than `inject` — a profile context is absent in compositions
+  // booted without a profile, and this plugin still has to load there.
+  const profileContext = ctx.get('profileContext') as { dir?: unknown } | undefined
+  configurePluginPaths({
+    profileDir: typeof profileContext?.dir === 'string' ? profileContext.dir : undefined,
+    diagnostics: ctx.logger,
+  })
+
   // Live configuration source: the composition entry (the profile row, read
   // through the volatile indirection — on 0.1.7 every projected field is a
   // reference object whose value comes from `.get()`) with the plugin-owned
