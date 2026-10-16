@@ -593,6 +593,48 @@ describe('Unified Qoder Plugin Card', () => {
     act(() => panel?.unmount())
   })
 
+  it('states a real cycle deadline alone, never beside the PAT stand-in', async () => {
+    // The panel's two bottom lines are alternatives, not siblings: an account
+    // whose upstream reports a real cycle deadline must state that deadline and
+    // must NOT also print when the PAT was authorized. The plugin card's status
+    // tab already gates the same fact this way; the panel let both through,
+    // which is the asymmetry this case pins down.
+    noteQuotaSignIn('qoder-global', true)
+    noteQuotaStatus('qoder-global', {
+      status: 'signed-in',
+      pat: { source: 'card', savedAtMs: Date.parse('2026-10-16T02:05:36.888Z'), patTail: 'd092' },
+      credits: {
+        total: 12,
+        totalSize: 300,
+        accounts: [{ packageName: '个人额度', remain: 264, size: 300, packageEndTime: '2026-11-01T00:00:00.000Z' }],
+        cycleResetTime: '2026-11-01T00:00:00.000Z',
+      },
+    })
+
+    let panel: ReactTestRenderer | undefined
+    await act(async () => {
+      panel = create(createElement(QuotaDashboard, {
+        t: tZh as any,
+        statusPaths: [QODER_GLOBAL_STATUS_PATH],
+        refresh: () => {},
+        close: () => {},
+        onVariantPicked: () => {},
+        useQuotaDashboard: (selector: (state: { loading: boolean; activePath: string }) => unknown) =>
+          selector({ loading: false, activePath: QODER_GLOBAL_STATUS_PATH }),
+      } as any))
+    })
+
+    const bottomLines = panel!.root
+      .findAll(node => node.props.className === 'qdp-windowReset')
+      .map(node => node.children.filter((child): child is string => typeof child === 'string').join(''))
+    // Exactly one line, and it is the deadline — not the PAT stand-in that
+    // exists only for accounts whose upstream reports no deadline at all.
+    expect(bottomLines).toHaveLength(1)
+    expect(bottomLines[0]).toContain(zh.quotaExpires)
+    expect(bottomLines[0]).not.toContain(zh.patAuthorizedAt.replace('{time}', '').trim())
+    act(() => panel?.unmount())
+  })
+
   it('rejects write to scope.set when attempting to turn on sidebarQuotaCN/Global while unsigned', async () => {
     const mockSet = vi.fn()
     const fakeScope = {

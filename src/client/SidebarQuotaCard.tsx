@@ -614,8 +614,11 @@ export function QuotaDashboard(props: QuotaDashboardProps): React.ReactNode {
               {/* What the account DOES key off instead: when this PAT was
                   authorized. The card's head prints the same fact as a small
                   stamp; here it stands where a cycle reset would otherwise be
-                  guessed at. */}
-              {patAuthorizedAt === undefined ? null : (
+                  guessed at — and NEVER beside a real one. The line above
+                  states the deadline when the upstream reported one, so this
+                  stand-in goes quiet then, exactly as the plugin card's status
+                  tab already gates the same fact. */}
+              {patAuthorizedAt === undefined || credits.cycleResetTime !== undefined ? null : (
                 <p className="qdp-windowReset">{t('patAuthorizedAt', { time: formatStampText(patAuthorizedAt) })}</p>
               )}
             </>
