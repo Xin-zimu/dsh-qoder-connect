@@ -21,7 +21,7 @@ import type {
   QoderWebStatus,
 } from '../status-paths.ts'
 import type { QoderSettingsKey } from './locales.ts'
-import { formatPercentText, usedPercentText } from './quota-merge.ts'
+import { accountDisplayName, formatPercentText, usedPercentText } from './quota-merge.ts'
 import { QuotaSettingsContent, type QuotaSection, type QuotaSettingsScope } from './QuotaSettingsCard.tsx'
 import {
   acquireLiveCard,
@@ -1501,6 +1501,15 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
                             {t('cycleResetAt', { time: formatCycleReset(status.credits.cycleResetTime) })}
                           </p>
                         )}
+                        {/* No account-wide expiry to state (Qoder answers a
+                            personal account with the year-9999 "never"
+                            sentinel, which the transport drops)? Say what the
+                            card DOES know: when this PAT was authorized. */}
+                        {status.credits.cycleResetTime !== undefined || status.pat?.savedAtMs === undefined ? null : (
+                          <p style={descriptionStyle}>
+                            {t('patAuthorizedAt', { time: formatTime(status.pat.savedAtMs) })}
+                          </p>
+                        )}
                       </div>
                     )}
                     {status.creditsError === undefined ? null
@@ -1538,7 +1547,7 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
                           .map((account, index) => (
                             <CreditBar
                               key={`${account.packageName}-${String(index)}`}
-                              label={account.packageName}
+                              label={accountDisplayName(account)}
                               remain={account.remain}
                               size={account.size}
                               unlimited={account.unlimited}

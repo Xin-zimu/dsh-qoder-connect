@@ -172,6 +172,8 @@ export const en = {
   quotaColPackage: 'Package',
   quotaColRemain: 'Remaining / Total',
   quotaColExpiry: 'Expires',
+  /** Line stating when the PAT in effect was authorized (saved). */
+  patAuthorizedAt: 'PAT authorized {time}',
 } as const
 
 export type QoderSettingsKey = keyof typeof en
@@ -348,4 +350,5 @@ export const zh: Record<QoderSettingsKey, string> = {
   quotaColPackage: '资源包',
   quotaColRemain: '剩余 / 总量',
   quotaColExpiry: '到期时间',
+  patAuthorizedAt: 'PAT 授权于 {time}',
 }

@@ -11,10 +11,83 @@
 
 import type { QoderWebCreditAccount } from '../status-paths.ts'
 
+/** Languages the plugin can label a package in (the upstream sends `zh`/`en`). */
+export type QuotaTitleLanguage = 'zh' | 'en'
+
+/**
+ * The active UI language, kept here because the sidebar card and the dashboard
+ * label the SAME package and must not pick different words for it.
+ *
+ * The client entry mirrors `ctx.locale` into this one setter; a build or a test
+ * that never calls it leaves `zh` as the answer, which is the language the
+ * plugin's own copy and its Chinese-first users read.
+ */
+let activeLanguage: QuotaTitleLanguage = 'zh'
+
+/** Record the host's active locale; anything but `en` selects the Chinese title. */
+export function setActiveLanguage(localeId: string | undefined): void {
+  activeLanguage = typeof localeId === 'string' && localeId.toLowerCase().startsWith('en') ? 'en' : 'zh'
+}
+
+/** The language currently labelling packages. */
+export function currentLanguage(): QuotaTitleLanguage {
+  return activeLanguage
+}
+
+/**
+ * The label one credit account renders with.
+ *
+ * `packageName` is the host's single-language best guess (the upstream sends a
+ * localized title only for campaign grants). Where a title map exists, the
+ * active language wins and the other language backstops it, so an English UI
+ * says "SOTA Exclusive Credits" and a Chinese one says "SOTA 专属积分" about one
+ * package — never the campaign code the upstream `name` field carries.
+ */
+export function accountDisplayName(
+  account: { packageName: string; packageNameI18n?: { zh?: string | undefined; en?: string | undefined } },
+  language: QuotaTitleLanguage = activeLanguage,
+): string {
+  const titles = account.packageNameI18n
+  if (titles === undefined) return account.packageName
+  const other: QuotaTitleLanguage = language === 'en' ? 'zh' : 'en'
+  return titles[language] ?? titles[other] ?? account.packageName
+}
+
+/**
+ * Format an upstream expiry instant the way every quota surface prints dates.
+ *
+ * The card once printed the raw ISO string ("2026-10-19T02:00:00.000Z") in a
+ * date column: unreadable, and in UTC at that — the day a user's grant ends is
+ * the day on their clock, so the render is localized rather than verbatim. An
+ * unparseable value stays verbatim rather than becoming a made-up date.
+ */
+export function formatExpiryText(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined
+  const parsed = Date.parse(value)
+  if (Number.isNaN(parsed)) return value
+  return new Intl.DateTimeFormat(hostLocale(), { dateStyle: 'medium' }).format(new Date(parsed))
+}
+
+/**
+ * Format an instant with its time of day, in the language the cards are
+ * already using. The PAT's authorization line needs the clock time as well as
+ * the day; a package's expiry line needs only the day.
+ */
+export function formatStampText(atMs: number): string {
+  return new Intl.DateTimeFormat(hostLocale(), { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(atMs))
+}
+
+/** The BCP-47 tag the active language formats dates with. */
+function hostLocale(): string {
+  return activeLanguage === 'en' ? 'en-US' : 'zh-CN'
+}
+
 /** One merged sidebar row: a package group and its summed figures. */
 export interface QuotaGroup {
   /** Package display name, verbatim from the upstream. */
   packageName: string
+  /** Localized titles of the first member, so the row can re-label itself. */
+  packageNameI18n?: { zh?: string | undefined; en?: string | undefined }
   /**
    * The group's expiry, verbatim, or undefined when no member reported one.
    * Grouping treats "no expiry" as its own bucket, so a dated and an undated
@@ -58,6 +131,7 @@ export function mergeCreditAccounts(accounts: readonly QoderWebCreditAccount[]):
     if (existing === undefined) {
       groups.set(key, {
         packageName: account.packageName,
+        ...account.packageNameI18n === undefined ? {} : { packageNameI18n: account.packageNameI18n },
         packageEndTime: account.packageEndTime,
         remain: account.remain,
         size: account.size,

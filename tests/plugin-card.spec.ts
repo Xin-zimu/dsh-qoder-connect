@@ -394,6 +394,69 @@ describe('Qoder plugin card', () => {
     ])
   })
 
+  it('states the PAT authorization when the account has no cycle expiry', async () => {
+    // Qoder answers a personal account's cycle deadline with the year-9999
+    // "never" sentinel, which the transport drops rather than forwarding. The
+    // status tab used to print nothing at all there (and, before the drop,
+    // claimed the quota reset in the year 10000); it now names the one date the
+    // card actually knows — when this PAT was authorized.
+    statusBody = {
+      status: 'signed-in',
+      pat: { source: 'card', savedAtMs: Date.parse('2026-10-16T02:05:36.888Z'), patTail: 'd092' },
+      probeKey: 'test-probe-key',
+      authKey: 'test-auth-key',
+      credits: {
+        total: 0.01,
+        totalSize: 2100,
+        accounts: [
+          {
+            packageName: 'SOTA 专属积分',
+            packageNameI18n: { zh: 'SOTA 专属积分', en: 'SOTA Exclusive Credits' },
+            remain: 2000,
+            size: 2000,
+            packageEndTime: '2026-10-19T02:00:00.000Z',
+          },
+        ],
+      },
+      models: [],
+    }
+    await mount()
+    await press(en.tabDetails)
+    let tree = JSON.stringify(view!.toJSON())
+    // The grant renders under its own localized title, not the campaign code.
+    expect(tree).toContain('SOTA 专属积分')
+    expect(tree).not.toContain('act-20261014-129')
+
+    await press(en.tabStatus)
+    tree = JSON.stringify(view!.toJSON())
+    expect(tree).toContain('PAT authorized')
+    expect(tree).not.toContain(en.cycleResetAt.split('{time}')[0]!)
+    expect(tree).not.toContain('9999')
+  })
+
+  it('still states the real cycle deadline when the upstream reports one', async () => {
+    // The PAT line is a stand-in for an absent expiry, never a replacement for
+    // a reported one: a subscription whose quota really does reset must say so.
+    statusBody = {
+      status: 'signed-in',
+      pat: { source: 'card', savedAtMs: Date.parse('2026-10-16T02:05:36.888Z'), patTail: 'd092' },
+      probeKey: 'test-probe-key',
+      authKey: 'test-auth-key',
+      credits: {
+        total: 12,
+        totalSize: 300,
+        accounts: [{ packageName: '个人额度', remain: 264, size: 300, packageEndTime: '2026-11-01T00:00:00.000Z' }],
+        cycleResetTime: '2026-11-01T00:00:00.000Z',
+      },
+      models: [],
+    }
+    await mount()
+    await press(en.tabStatus)
+    const tree = JSON.stringify(view!.toJSON())
+    expect(tree).toContain(en.cycleResetAt.split('{time}')[0]!)
+    expect(tree).not.toContain('PAT authorized')
+  })
+
   it('offers the max-window preference on the Global card, as a route write', async () => {
     statusBody = {
       status: 'signed-in',
