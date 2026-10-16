@@ -14,6 +14,36 @@ export interface QoderQuota {
   unit: string
 }
 
+/**
+ * A named grant of credits that expires on its own schedule.
+ *
+ * The international upstream reports these in `dedicatedResourcePackages`: one
+ * entry per campaign package (the SOTA exclusive credits, for one). Every
+ * bucket the reader already knows (`userQuota`, `orgResourcePackage`,
+ * `addOnQuota`) shares the single cycle-level `expiresAt`, whereas a dedicated
+ * package carries its OWN `expiresAt` and its own localized title — so it is
+ * its own shape, not just another `QoderQuota`.
+ */
+export interface QoderDedicatedResourcePackage extends QoderQuota {
+  /** Upstream package id (`01a1426f-…`), when reported. */
+  id?: string | undefined
+  /** Raw upstream name — usually an opaque campaign code, not display copy. */
+  name?: string | undefined
+  /** Localized display title from `displayLabels`, when the upstream sends one. */
+  title?: { zh?: string | undefined; en?: string | undefined } | undefined
+  /**
+   * This package's own expiry, ISO. Deliberately NOT the account's cycle-level
+   * `expiresAt`: a campaign grant ends when the grant ends, and reporting the
+   * account's (sentinel `9999`) date against it is what made the card's dates
+   * wrong.
+   */
+  expiresAt?: string | undefined
+  /** Whether the upstream says the package is currently usable. */
+  available?: boolean | undefined
+  /** Upstream lifecycle marker (`QUOTA_DETAIL_STATUS_ACTIVE`). */
+  status?: string | undefined
+}
+
 export interface QoderQuotaUsage {
   userQuota?: QoderQuota | undefined
   orgResourcePackage?: QoderQuota | undefined
@@ -25,6 +55,15 @@ export interface QoderQuotaUsage {
    * than the account actually holds (two on the web, one here).
    */
   addOnQuota?: QoderQuota | undefined
+  /**
+   * Campaign grants with their own expiry and display title (the international
+   * edition's SOTA exclusive credits land here).
+   *
+   * Dropping this array hid a whole 2,000-credit package from the card: the
+   * reader mapped only the three named buckets above, so the credit was real
+   * and simply never rendered.
+   */
+  dedicatedResourcePackages?: readonly QoderDedicatedResourcePackage[] | undefined
   totalUsagePercentage?: number | undefined
   isQuotaExceeded?: boolean | undefined
   expiresAt?: string | undefined

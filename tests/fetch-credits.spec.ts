@@ -115,6 +115,85 @@ describe('fetchCredits shapes', () => {
     expect(credits.accounts.map(entry => entry.packageName)).toEqual(['个人额度'])
   })
 
+  it('lists a dedicated campaign package with its OWN title and expiry', async () => {
+    // Observed live on Qoder Global: a 2,000-credit SOTA grant arrives in
+    // `dedicatedResourcePackages`, unmapped by the first version of this
+    // reader — the credit was real and invisible on every surface. Its own
+    // expiry and localized title are the only honest ones: the account's
+    // `expiresAt` is the year-9999 "never" sentinel and the package `name` is
+    // an opaque campaign code.
+    const credits = await clientFor(account({
+      userQuota: { total: 0, used: 0, remaining: 0, percentage: 0, unit: 'credits' },
+      addOnQuota: { total: 100, used: 5, remaining: 95, percentage: 0.06, unit: 'credits' },
+      isQuotaExceeded: false,
+      dedicatedResourcePackages: [{
+        id: '01a1426f-fe90-7201-b11e-18d563f31f8d',
+        name: 'act-20261014-129',
+        total: 2000,
+        used: 0,
+        remaining: 2000,
+        percentage: 0,
+        unit: 'credits',
+        expiresAt: '2026-10-19T02:00:00.000Z',
+        title: { zh: 'SOTA 专属积分', en: 'SOTA Exclusive Credits' },
+        available: true,
+        status: 'QUOTA_DETAIL_STATUS_ACTIVE',
+      }],
+    })).fetchCredits()
+    expect(credits.accounts.map(entry => entry.packageName)).toEqual(['个人额度', '赠送额度', 'SOTA 专属积分'])
+    expect(credits.accounts[2]).toEqual({
+      packageName: 'SOTA 专属积分',
+      packageNameI18n: { zh: 'SOTA 专属积分', en: 'SOTA Exclusive Credits' },
+      packageCode: 'act-20261014-129',
+      remain: 2000,
+      size: 2000,
+      packageEndTime: '2026-10-19T02:00:00.000Z',
+    })
+    // The grant's total joins the account denominator the dashboard divides by.
+    expect(credits.totalSize).toBe(2100)
+    // The sentinel already dropped at the transport means there is no
+    // account-wide date to claim; nothing here invents one.
+    expect('cycleResetTime' in credits).toBe(false)
+  })
+
+  it('labels a dedicated package with its code when the upstream sent no title', async () => {
+    // A grant without `displayLabels` still shows its amount: an opaque name
+    // beats a hidden package, and the row stays honest about what it is.
+    const credits = await clientFor(account({
+      dedicatedResourcePackages: [{ total: 50, used: 0, remaining: 50, percentage: 0, unit: 'credits', name: 'act-x' }],
+    })).fetchCredits()
+    expect(credits.accounts[0]).toEqual({
+      packageName: 'act-x',
+      packageCode: 'act-x',
+      remain: 50,
+      size: 50,
+    })
+    expect('packageEndTime' in (credits.accounts[0] ?? {})).toBe(false)
+  })
+
+  it('falls back to 专属资源包 when a grant carries neither a title nor a name', async () => {
+    const credits = await clientFor(account({
+      dedicatedResourcePackages: [{ total: 10, used: 0, remaining: 10, percentage: 0, unit: 'credits' }],
+    })).fetchCredits()
+    expect(credits.accounts[0]?.packageName).toBe('专属资源包')
+  })
+
+  it('carries one title per grant when the account stacks several', async () => {
+    const credits = await clientFor(account({
+      dedicatedResourcePackages: [
+        { total: 2000, used: 0, remaining: 2000, percentage: 0, unit: 'credits', title: { zh: 'SOTA 专属积分' }, expiresAt: '2026-10-19T02:00:00.000Z' },
+        { total: 300, used: 0, remaining: 300, percentage: 0, unit: 'credits', title: { zh: '体验包' }, expiresAt: '2026-11-01T02:00:00.000Z' },
+      ],
+    })).fetchCredits()
+    // Distinct names stay distinct rows (the merge keys on the name); each
+    // keeps its own deadline rather than sharing one account date.
+    expect(credits.accounts.map(entry => [entry.packageName, entry.packageEndTime])).toEqual([
+      ['SOTA 专属积分', '2026-10-19T02:00:00.000Z'],
+      ['体验包', '2026-11-01T02:00:00.000Z'],
+    ])
+    expect(credits.totalSize).toBe(2300)
+  })
+
   it('always asks the transport for a fresh read', async () => {
     const readAccount = vi.fn(async () => account(undefined))
     await clientFor(undefined, readAccount as never).fetchCredits()

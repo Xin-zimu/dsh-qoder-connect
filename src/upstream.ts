@@ -102,8 +102,22 @@ export interface QoderCreditAccount {
   remain: number
   size: number
   unlimited?: true
-  /** Expiry of this package, verbatim from the upstream (ISO string). */
+  /**
+   * Expiry of this package, verbatim from the upstream (ISO string).
+   *
+   * Absent when the upstream reported no expiry — which now includes the
+   * year-9999 "never" sentinel the transport drops rather than forwarding.
+   */
   packageEndTime?: string
+  /**
+   * The package's own localized titles, when the upstream sent a real display
+   * name (a campaign grant's `SOTA 专属积分`). The renderer picks the active
+   * language; `packageName` stays the single-language best guess it falls back
+   * to, so a card that never consults this map still shows a sensible label.
+   */
+  packageNameI18n?: { zh?: string | undefined; en?: string | undefined }
+  /** Opaque upstream code for the same grant (`act-20261014-129`), when known. */
+  packageCode?: string
 }
 
 /** The aggregated credit answer the card renders. */
@@ -729,10 +743,17 @@ export class QoderUpstreamClient {
   /**
    * The subscriber's quota answer, mapped onto the card's credit shape.
    *
-   * Qoder reports one personal quota and an optional organization resource
-   * package; each becomes a package row the card already knows how to draw.
-   * An unbounded personal allowance (`total === 0`, not exceeded) is the
-   * account's "unlimited" state.
+   * Qoder reports one personal quota, an optional organization resource
+   * package, bonus credits, and — on the international edition — a list of
+   * campaign grants under `dedicatedResourcePackages`. Each becomes a package
+   * row the card already knows how to draw. An unbounded personal allowance
+   * (`total === 0`, not exceeded) is the account's "unlimited" state.
+   *
+   * A campaign grant carries its OWN expiry and its OWN localized title, and
+   * neither may be borrowed from the account: `usage.expiresAt` is the
+   * year-9999 "never" sentinel for a personal account, while the grant really
+   * does end, and `name` is an opaque campaign code while the readable copy
+   * lives in `displayLabels`.
    */
   async fetchCredits(signal?: AbortSignal): Promise<QoderCredits> {
     const account: QoderAccountInfo = await this.transport.readAccount({ force: true, ...signal === undefined ? {} : { signal } })
@@ -766,6 +787,22 @@ export class QoderUpstreamClient {
         remain: addOn.remaining,
         size: addOn.total,
         ...usage.expiresAt === undefined ? {} : { packageEndTime: usage.expiresAt },
+      })
+    }
+    // Campaign grants (`act-…` SOTA credits) are stacked in an array rather
+    // than a single named bucket, so the field had no mapping at all: a real
+    // 2,000-credit package stayed invisible on every surface while the account
+    // page listed it. Its own expiry travels with it, never the account's.
+    for (const pack of usage.dedicatedResourcePackages ?? []) {
+      const titles = pack.title
+      const fallbackName = titles?.zh ?? titles?.en ?? pack.name ?? '专属资源包'
+      accounts.push({
+        packageName: fallbackName,
+        ...titles === undefined ? {} : { packageNameI18n: titles },
+        ...pack.name === undefined ? {} : { packageCode: pack.name },
+        remain: pack.remaining,
+        size: pack.total,
+        ...pack.expiresAt === undefined ? {} : { packageEndTime: pack.expiresAt },
       })
     }
     const unlimited = usage.isQuotaExceeded === false && personal !== undefined && personal.total === 0
