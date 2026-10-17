@@ -14,7 +14,8 @@ import { resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
 import type { LlmModelInfo, LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm'
 import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
 import type { ResolvedPiAiProviderProfile } from '@deepseek-ai/dsh-llm-pi-ai'
-import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
+import { requestImageDimensions } from '@deepseek-ai/dsh-attachment'
+import type { AttachmentStore, ImageAttachmentRef, ImageRequestTarget } from '@deepseek-ai/dsh-attachment'
 import type { QoderCredentialStore } from './auth.ts'
 import type { QoderCatalog, QoderModelInfo } from './catalog.ts'
 import type { QoderProbeRecord } from './probe-store.ts'
@@ -344,5 +345,32 @@ class QoderPiAiAdapter extends PiAiAdapter {
     const info = this.infoFor(model)
     if (info === undefined) return resolved
     return { ...resolved, name: withCatalogDisplay(resolved.name, info) }
+  }
+
+  /**
+   * Resolve the request-image projection target for one route.
+   *
+   * `dsh-llm` 0.2.1 added `LlmAdapter.imageRequestTarget()` and its runtime calls
+   * it unconditionally (`this.registration(provider).adapter.imageRequestTarget(...)`,
+   * no optional chaining, no typeof guard). This plugin resolves its harness peers
+   * from its own pnpm store (0.1.7-rc.2), whose `PiAiAdapter` predates the method,
+   * so an inherited implementation is absent and that call would throw
+   * `TypeError: ....imageRequestTarget is not a function`.
+   *
+   * Derive the same target from the profile budgets this route already declares.
+   * When a host does provide the base implementation (a newer peer resolution),
+   * prefer it so this override never drifts from upstream behavior.
+   */
+  imageRequestTarget(provider: string, model: string, image: ImageAttachmentRef): ImageRequestTarget {
+    const inherited = (Object.getPrototypeOf(QoderPiAiAdapter.prototype) as {
+      imageRequestTarget?: (provider: string, model: string, image: ImageAttachmentRef) => ImageRequestTarget
+    }).imageRequestTarget
+    if (typeof inherited === 'function') return inherited.call(this, provider, model, image)
+    const { width, height } = requestImageDimensions(
+      image.width,
+      image.height,
+      REQUEST_IMAGE_BUDGETS.requestImagePixelBudget,
+    )
+    return { width, height, maxBytes: REQUEST_IMAGE_BUDGETS.requestImageMaxBytes }
   }
 }
