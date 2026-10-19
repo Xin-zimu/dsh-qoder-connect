@@ -178,6 +178,17 @@ describe('QoderProbeStore', () => {
     store.clear()
     expect(store.all()).toEqual({})
   })
+
+  it('clears one account without touching another saved account', () => {
+    const { store } = tempStore()
+    store.set(BASE.id, store.record(fingerprintModel(BASE), 'validating', ['low'], 'acct-a'))
+    store.set(DECLARED.id, store.record(fingerprintModel(DECLARED), 'validating', ['low'], 'acct-b'))
+    store.clearFor('acct-a')
+    expect(store.get(BASE.id, fingerprintModel(BASE), 'acct-a')).toBeUndefined()
+    // The other saved account's observation survives: removing one PAT must
+    // not erase the data of the accounts the user still has.
+    expect(store.get(DECLARED.id, fingerprintModel(DECLARED), 'acct-b')).toBeDefined()
+  })
 })
 
 describe('QoderProbeService precedence', () => {

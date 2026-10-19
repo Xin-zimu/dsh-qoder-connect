@@ -236,6 +236,25 @@ export class QoderProbeStore {
     this.persist()
   }
 
+  /**
+   * Drop every record that belongs to one account, leaving the other saved
+   * accounts' observations intact.
+   *
+   * Used when a saved token is removed: its detected effort levels are that
+   * account's data, and no other account can use them. A plain {@link clear}
+   * here would erase the observations of every account the user still has.
+   */
+  clearFor(account: string): void {
+    const records = this.load()
+    let removed = false
+    for (const [modelId, record] of Object.entries(records)) {
+      if (record.account !== account) continue
+      delete records[modelId]
+      removed = true
+    }
+    if (removed) this.persist()
+  }
+
   /** Every record currently held, for status display. */
   all(): Readonly<Record<string, QoderProbeRecord>> {
     return { ...this.load() }

@@ -13,9 +13,10 @@ Configure only what you use: a variant with no saved PAT shows no model group an
 
 ## Features
 
-- **PAT: save it and it works** — paste a PAT into the card and press *Save*; the token is validated live against that variant's region before anything is written, and the model group appears immediately — no DSH restart. Once signed in, *Replace PAT* (the new token overwrites only after it validates, so a mistyped paste can never strand a working credential) and *Clear PAT* are one click away.
+- **Multiple PATs, switched by hand** — each variant keeps a list of saved PATs and the card offers a select to choose the active one. Switching only changes the signing token: model toggles, context-window preferences, check-in and sidebar-quota settings are one shared configuration per variant and never follow the account. *Add PAT*, *Remove current* and *Clear all* manage the list; saving validates first, and removing or switching never touches another account's saved catalog or probe records.
+- **PAT: save it and it works** — paste a PAT into the card and press *Save*; the token is validated live against that variant's region before anything is written, and the model group appears immediately — no DSH restart. A mistyped paste can never strand a working credential.
 - **Two independent variants** — `qoder` (china) and `qoder-global` (global) keep separate credential files, routes and saved catalogs: a token minted on qoder.com does not work against the China deployment and vice versa.
-- **Three-tier model catalog (live → saved → fallback)** — the card states where the list on screen came from: *“Model list updated …”* (fetched now), *“Showing the saved model list from …”* (this account's last successful fetch, restored after a restart or a failed fetch), or *“Showing the built-in model list (not yet updated from Qoder)”* (the roster compiled into the plugin). The reason of the most recent failed fetch is shown too, and a *Refresh model list* button sits right there.
+- **Three-tier model catalog (live → saved → fallback)** — the card states where the list on screen came from: *“Model list updated …”* (fetched now), *“Showing the saved model list from …”* (this account's last successful fetch, restored after a restart or a failed fetch), or *“Showing the built-in model list (not yet updated from Qoder)”* (the roster compiled into the plugin). The reason of the most recent failed fetch is shown too, and the card's *Refresh* action re-reads the status and re-fetches the model list.
 - **One-toggle context window** — each variant card's *Context window* tab lists every model's capacity (the default and the largest declared window) and carries its own *“Use the largest declared context window”* preference (on by default): on, requests declare the maximum (e.g. Qwen3.8-Max at 1M); off, the default (200K). The two variants keep independent toggle state.
 - **Model visibility toggles & batch controls** — each variant card provides a dedicated *Model Toggles* tab (between *Context window* and *Credit details*) to freely enable or hide individual models; disabled models are hidden from the DSH model picker, keeping it tidy; includes instant search by name/ID and one-click *Enable all* / *Disable all* batch operations.
 - **Daily auto check-in & logs** — claims the daily 100 Credits automatically, **at a time you can set per variant on the card** (10:00 UTC+8 by default, the upstream's reset moment), with independent toggles and startup catch-up protection. The card features a dedicated *Check-in log* panel with audit trails, *Check in now*, *Refresh*, and *Clear logs* quick actions.
@@ -113,9 +114,23 @@ Swap the `--profile` value for the profile you use (`web` / `desktop` / `tui`, e
 
 (The card repeats the same guidance: *“Generate a PAT in your qoder.com account settings (Account → Personal Access Token), then paste it here.”*)
 
-### Save it on the card
+### Save and switch on the card
 
-DSH → Settings → Plugin Settings (插件设置) → the Qoder card: paste the PAT into the password field and press *Save* (*“Validating and saving…”* while it runs). The token is validated against that variant's region first — a refusal saves nothing and the card says *“That PAT was rejected — generate a new one in your account settings and try again.”*. Do this on both cards to run both groups side by side.
+DSH → Settings → Plugin Settings (插件设置) → the Qoder card: paste the PAT into the password field and press *Save* (*“Validating and saving…”* while it runs). The token is validated against that variant's region first — a refusal saves nothing and the card says *“That PAT was rejected — generate a new one in your account settings and try again.”*
+
+Each variant can hold several PATs: once a second one is saved, the account row shows a select — choosing an entry switches to it. *Add PAT* appends another (with an optional local-only label), *Remove current* deletes only the active one, and *Clear all* empties the list. **Configuration is shared**: model toggles, context-window preferences, check-in time and sidebar-quota settings belong to the variant, not to the account, and switching never changes them. Quota and check-in act on the active account. Check-in history is kept per variant, so switching does not retroactively check the new account in for today — use *Check in now* when needed. Do this on both cards to run both groups side by side.
+
+### Command line (optional)
+
+On a terminal-only profile the CLI manages the same list (`--provider` defaults to `qoder`):
+
+```bash
+dsh-qoder-connect pat set <token> --provider qoder   # validate, save, and activate
+dsh-qoder-connect pat list --provider qoder          # list saved tokens (* = active)
+dsh-qoder-connect pat use <id> --provider qoder      # switch
+dsh-qoder-connect pat rm <id> --provider qoder       # remove
+dsh-qoder-connect pat clear --provider qoder         # remove all (logout is an alias)
+```
 
 ### Environment-variable fallback
 
@@ -136,8 +151,8 @@ Everything the plugin owns lives in one data directory: `<profile>/.dsh-qoder-co
 
 ```text
 <profile>/.dsh-qoder-connect/
-├── .qoder-auth.json              # China PAT ({version:2, pat, region, savedAt})
-├── .qoder-global-auth.json       # Global PAT
+├── .qoder-auth.json              # China PAT list ({version:3, activeId, credentials:[{id,pat,region,savedAt,label?}]})
+├── .qoder-global-auth.json       # Global PAT list
 ├── checkin-status.json           # check-in status and history logs
 └── state/
     ├── .qoder-catalog.json       # China per-account saved catalog

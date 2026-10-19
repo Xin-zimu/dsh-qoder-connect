@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   patTail,
+  qoderCredentialId,
   qoderCredentialIdentity,
   qoderOwnAuthPath,
   QoderCredentialStore,
@@ -23,10 +24,11 @@ import {
 import { CHINA_VARIANT, GLOBAL_VARIANT, type QoderVariant } from '../src/variants.ts'
 
 /**
- * The Qoder credential store: one Personal Access Token per variant, one small
- * JSON document on disk, and an environment fallback. There is no device flow,
- * no refresh, and no expiry — so the cases below are exactly those three
- * surfaces plus the stale-file refusal the WorkBuddy era leaves behind.
+ * The Qoder credential store: a list of Personal Access Tokens per variant,
+ * one active, one small JSON document on disk, and an environment fallback.
+ * There is no device flow, no refresh, and no expiry — so the cases below are
+ * exactly those surfaces plus the stale-file refusal the WorkBuddy era leaves
+ * behind and the v2 → v3 migration the list shape needs.
  */
 
 const CLEANUP: (() => Promise<void>)[] = []
@@ -90,13 +92,15 @@ describe('QoderCredentialStore: file reading', () => {
     const savedAt = 1_792_128_236_868
     await writeFile(own, authDocument('pt-file-abc', savedAt))
     const credential = await storeAt(own).current()
-    expect(credential).toEqual({ pat: 'pt-file-abc', region: 'china', savedAtMs: savedAt, source: 'card' })
+    expect(credential).toMatchObject({ pat: 'pt-file-abc', region: 'china', savedAtMs: savedAt, source: 'card' })
+    // A v2 file is read as a one-entry list under a deterministic id.
+    expect(credential?.id).toBe(qoderCredentialId('pt-file-abc'))
   })
 
   it('drops a non-finite or absent savedAt rather than inventing one', async () => {
     const own = join(await tempDir(), 'own.json')
     await writeFile(own, JSON.stringify({ version: 2, pat: 'pt-x', region: 'china', savedAt: 'tomorrow' }))
-    await expect(storeAt(own).current()).resolves.toEqual({ pat: 'pt-x', region: 'china', source: 'card' })
+    await expect(storeAt(own).current()).resolves.toMatchObject({ pat: 'pt-x', region: 'china', source: 'card' })
   })
 
   it('falls back to the variant region when the file names none valid', async () => {
@@ -230,16 +234,22 @@ describe('QoderCredentialStore: environment fallback', () => {
 })
 
 describe('QoderCredentialStore: save, clear, and the on-disk layout', () => {
-  it('writes the v2 document and reads it back', async () => {
+  it('writes the v3 document and reads it back', async () => {
     const dir = await tempDir()
     const own = join(dir, 'own.json')
     const before = Date.now()
     const credential = await storeAt(own).save('  pt-saved-99  ')
     const document = JSON.parse(await readFile(own, 'utf8')) as Record<string, unknown>
-    expect(Object.keys(document).sort()).toEqual(['pat', 'region', 'savedAt', 'version'])
-    expect(document).toMatchObject({ version: 2, pat: 'pt-saved-99', region: 'china' })
-    expect(typeof document.savedAt).toBe('number')
-    expect(document.savedAt as number).toBeGreaterThanOrEqual(before)
+    expect(Object.keys(document).sort()).toEqual(['activeId', 'credentials', 'version'])
+    expect(document).toMatchObject({ version: 3 })
+    expect(document['activeId']).toBe(qoderCredentialId('pt-saved-99'))
+    expect(document['credentials']).toEqual([{
+      id: qoderCredentialId('pt-saved-99'),
+      pat: 'pt-saved-99',
+      region: 'china',
+      savedAt: expect.any(Number),
+    }])
+    expect((document['credentials'] as { savedAt: number }[])[0]!.savedAt).toBeGreaterThanOrEqual(before)
     expect(credential).toMatchObject({ pat: 'pt-saved-99', source: 'card' })
     await expect(storeAt(own).current()).resolves.toMatchObject({ pat: 'pt-saved-99' })
   })
@@ -284,6 +294,80 @@ describe('QoderCredentialStore: save, clear, and the on-disk layout', () => {
   })
 })
 
+describe('QoderCredentialStore: multiple saved PATs', () => {
+  it('saves several tokens, keeps the newest active, and never lists a token', async () => {
+    const own = join(await tempDir(), 'own.json')
+    const store = storeAt(own)
+    const first = await store.add('pt-first-1111')
+    const second = await store.add('pt-second-2222')
+    expect(await store.entries()).toHaveLength(2)
+    await expect(store.current()).resolves.toMatchObject({ pat: 'pt-second-2222' })
+    const status = await store.status()
+    expect(status.activeId).toBe(second.id)
+    expect(status.profiles).toHaveLength(2)
+    expect(status.profiles?.map(profile => profile.patTail).sort()).toEqual(['1111', '2222'])
+    // The redacted document is what the browser receives; no full token in it.
+    expect(JSON.stringify(status)).not.toContain('pt-first-1111')
+    expect(JSON.stringify(status)).not.toContain('pt-second-2222')
+    expect(first.id).not.toBe(second.id)
+  })
+
+  it('activates another saved token without touching the others', async () => {
+    const own = join(await tempDir(), 'own.json')
+    const store = storeAt(own)
+    const first = await store.add('pt-first-1111')
+    await store.add('pt-second-2222')
+    await store.activate(first.id)
+    await expect(store.current()).resolves.toMatchObject({ pat: 'pt-first-1111' })
+    expect(await store.entries()).toHaveLength(2)
+    // A dangling pointer is not an error either: the first entry answers.
+    await expect(store.activate('no-such-id')).resolves.toBeUndefined()
+    await expect(store.current()).resolves.toMatchObject({ pat: 'pt-first-1111' })
+  })
+
+  it('re-saving the same token updates one entry instead of duplicating it', async () => {
+    const own = join(await tempDir(), 'own.json')
+    const store = storeAt(own)
+    const first = await store.add('pt-same-1234', '工作号')
+    const again = await store.add('pt-same-1234')
+    expect(again.id).toBe(first.id)
+    expect(await store.entries()).toHaveLength(1)
+    const status = await store.status()
+    // The label survives a token re-save that supplies none.
+    expect(status.profiles?.[0]?.label).toBe('工作号')
+    expect(status.profiles?.[0]?.patTail).toBe('1234')
+  })
+
+  it('remove drops one entry, moves the pointer, and deletes the file with the last one', async () => {
+    const dir = await tempDir()
+    const own = join(dir, 'own.json')
+    const store = storeAt(own)
+    const first = await store.add('pt-first-1111')
+    const second = await store.add('pt-second-2222')
+    await expect(store.remove(second.id)).resolves.toMatchObject({ pat: 'pt-second-2222' })
+    await expect(store.current()).resolves.toMatchObject({ pat: 'pt-first-1111' })
+    await expect(store.remove('no-such-id')).resolves.toBeUndefined()
+    await store.remove(first.id)
+    await expect(store.current()).resolves.toBeUndefined()
+    // No entries is "signed out": the file itself is gone, so the environment
+    // fallback is visible again.
+    expect(await readdir(dir)).toEqual([])
+  })
+
+  it('rewrites a v2 file as a list on the first mutation, keeping the token', async () => {
+    const own = join(await tempDir(), 'own.json')
+    await writeFile(own, authDocument('pt-legacy-0001'))
+    const store = storeAt(own)
+    const added = await store.add('pt-new-0002')
+    const document = JSON.parse(await readFile(own, 'utf8')) as Record<string, unknown>
+    expect(document['version']).toBe(3)
+    expect(document['activeId']).toBe(added.id)
+    const credentials = document['credentials'] as { pat: string }[]
+    expect(credentials.map(entry => entry.pat).sort()).toEqual(['pt-legacy-0001', 'pt-new-0002'])
+    await expect(store.current()).resolves.toMatchObject({ pat: 'pt-new-0002' })
+  })
+})
+
 describe('QoderCredentialStore: redacted status', () => {
   it('summarizes a stored token without ever carrying it', async () => {
     const dir = await tempDir()
@@ -295,7 +379,18 @@ describe('QoderCredentialStore: redacted status', () => {
       state: 'configured',
       region: 'china',
       filePath: own,
-      pat: { source: 'card', savedAtMs: expect.any(Number), patTail: 'abcd' },
+      pat: {
+        id: qoderCredentialId('pt-secret-abcd'),
+        source: 'card',
+        savedAtMs: expect.any(Number),
+        patTail: 'abcd',
+      },
+      activeId: qoderCredentialId('pt-secret-abcd'),
+      profiles: [{
+        id: qoderCredentialId('pt-secret-abcd'),
+        patTail: 'abcd',
+        savedAtMs: expect.any(Number),
+      }],
     })
     expect(JSON.stringify(status)).not.toContain('pt-secret-abcd')
   })

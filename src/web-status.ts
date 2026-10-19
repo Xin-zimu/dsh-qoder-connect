@@ -162,6 +162,11 @@ export async function qoderWebStatus(deps: QoderStatusRouteOptions): Promise<Qod
     status: 'signed-in',
     ...authStatus.region === undefined ? {} : { region: authStatus.region },
     ...authStatus.pat === undefined ? {} : { pat: authStatus.pat },
+    // The saved-token list rides the same document: the card's account select
+    // is built from it, and it is redacted at the store (ids are hash
+    // prefixes, never tokens). An environment-only sign-in has no list.
+    ...authStatus.profiles === undefined ? {} : { patProfiles: authStatus.profiles },
+    ...authStatus.activeId === undefined ? {} : { activePatId: authStatus.activeId },
     // Both arms carry the key: a signed-in card needs it to clear the token,
     // and omitting it here made that action unreachable.
     ...deps.authKey === undefined ? {} : { authKey: deps.authKey },

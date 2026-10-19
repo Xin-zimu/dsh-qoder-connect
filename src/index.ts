@@ -78,6 +78,7 @@ export {
 } from './variants.ts'
 export {
   patTail,
+  qoderCredentialId,
   qoderCredentialIdentity,
   QoderCredentialStore,
   qoderOwnAuthPath,
@@ -89,6 +90,7 @@ export {
   QODER_PAT_ENV_GLOBAL,
   type QoderAuthStatus,
   type QoderCredential,
+  type QoderCredentialEntry,
 } from './auth.ts'
 export {
   createAuthKey,
@@ -106,6 +108,7 @@ export {
   QODER_STATUS_PATH,
   type QoderAuthRequest,
   type QoderCatalogModelSnapshot,
+  type QoderPatProfile,
   type QoderPatSummary,
   type QoderProbeAction,
   type QoderWebCatalog,
@@ -1402,12 +1405,16 @@ export function apply(ctx: Context, config: Config): void {
     const hadCredential = known !== undefined
     if (identity === undefined) lastIdentities.delete(id)
     else lastIdentities.set(id, identity)
-    // Any change of identity invalidates in-flight work and recorded answers.
+    // Any change of identity invalidates in-flight work and the rendered
+    // catalog. Probe records are deliberately LEFT in place: they are keyed by
+    // account and filtered on read (see `QoderProbeStore.get`), so they cannot
+    // leak across accounts — and clearing here would erase every other saved
+    // account's observations on a single switch. Removing a token is the one
+    // transition that drops its records (see the PAT route's `remove`).
     runtime.catalogGeneration += 1
     runtime.inflightFetch?.controller.abort()
     runtime.inflightFetch = undefined
     if (hadCredential && known !== identity) {
-      runtime.probeStore.clear()
       runtime.invalidate()
     }
     if (identity === undefined) {
@@ -1505,7 +1512,7 @@ export function apply(ctx: Context, config: Config): void {
       })
       registerQoderAuthRoute(webCtx, {
         path: runtime.variant.authPath,
-        save: async pat => {
+        save: async (pat, label) => {
           // Validate against the region this variant owns *before* anything is
           // written: a token that cannot answer discovery is refused with a
           // stable code, and the file never holds a credential the plugin has
@@ -1513,11 +1520,11 @@ export function apply(ctx: Context, config: Config): void {
           if (!await validateApiKey(pat, runtime.variant.region)) {
             return { ok: false, error: 'qoder_invalid_pat' as const }
           }
-          const credential = await runtime.store.save(pat)
+          const entry = await runtime.store.add(pat, label)
           // Saving a token is the one transition the sweep would otherwise only
           // notice on its next tick; adopt it here so the model group appears
           // at once.
-          const identity = credentialIdentity(credential)
+          const identity = credentialIdentity(entry)
           adoptIdentity(runtime, identity)
           // AWAIT the fetch: the card re-reads the status the moment this answer
           // lands, so returning first left it rendering the built-in roster
@@ -1527,7 +1534,47 @@ export function apply(ctx: Context, config: Config): void {
           await fetchCatalog(runtime, identity)
           return { ok: true, status: await runtime.store.status() }
         },
+        activate: async id => {
+          const entry = await runtime.store.activate(id)
+          if (entry === undefined) return { ok: false, error: 'qoder_unknown_pat' as const }
+          const identity = credentialIdentity(entry)
+          // Seed from this account's saved catalog immediately — the switch
+          // answers without a network round trip — then refresh in the
+          // background. `fetchCatalog` is scoped to the identity, so a slow
+          // answer cannot overwrite a later switch's state.
+          adoptIdentity(runtime, identity)
+          detach(ctx, fetchCatalog(runtime, identity), `${runtime.variant.id} catalog refresh after switch`)
+          return { ok: true, status: await runtime.store.status() }
+        },
+        remove: async id => {
+          const removed = await runtime.store.remove(id)
+          if (removed === undefined) return { ok: false, error: 'qoder_unknown_pat' as const }
+          // The departing account's detected levels and saved roster are that
+          // account's data: drop them, leave every other saved account alone.
+          const finished = credentialIdentity(removed)
+          runtime.probeStore.clearFor(finished)
+          runtime.savedCatalogs.delete(finished)
+          // `remove` already moved the active pointer to the first remaining
+          // entry; adopt whatever is in effect now (or hide the group when the
+          // list is empty).
+          const active = await runtime.store.current().catch(() => undefined)
+          const identity = active === undefined ? undefined : credentialIdentity(active)
+          adoptIdentity(runtime, identity)
+          if (identity !== undefined) {
+            detach(ctx, fetchCatalog(runtime, identity), `${runtime.variant.id} catalog refresh after removal`)
+          }
+          return { ok: true, status: await runtime.store.status() }
+        },
         clear: async () => {
+          // Drop every saved account's account-scoped data before the file
+          // goes: otherwise the catalogs and probe records would be orphaned
+          // (and would reappear if the same token were ever saved again).
+          const saved = await runtime.store.entries().catch(() => [])
+          for (const entry of saved) {
+            const identity = credentialIdentity(entry)
+            runtime.probeStore.clearFor(identity)
+            runtime.savedCatalogs.delete(identity)
+          }
           await runtime.store.clear()
           adoptIdentity(runtime, undefined)
         },

@@ -111,7 +111,8 @@ describe('card variants', () => {
     const patKeys = [
       'patHeading', 'patGuide', 'patGuideAI', 'patPlaceholder', 'patPlaceholderAI',
       'patSave', 'patSaving', 'patSaved', 'patSaveFailed', 'patInvalid',
-      'patReplace', 'patClear', 'patClearing',
+      'patAdd', 'patAccounts', 'patRemove', 'patRemoving',
+      'patSwitchFailed', 'patRemoveFailed', 'patClear', 'patClearing',
       'patSourceCard', 'patSourceEnv', 'patSourceCli', 'patSavedAt', 'patTail',
     ] as const satisfies readonly QoderSettingsKey[]
     for (const key of patKeys) {
@@ -146,6 +147,8 @@ describe('plugin card per variant', () => {
       status: 'signed-in',
       region: 'china',
       pat: { source: 'card', savedAtMs: Date.UTC(2026, 8, 12, 8, 30), patTail: 'abcd' },
+      patProfiles: [{ id: 'id-abcd', patTail: 'abcd', savedAtMs: Date.UTC(2026, 8, 12, 8, 30) }],
+      activePatId: 'id-abcd',
       authKey: 'auth-key',
       probeKey: 'probe-key',
       credits: { total: 40, accounts: [] },
@@ -256,7 +259,7 @@ describe('plugin card per variant', () => {
     expect(rendered).toContain('****abcd')
     // An env-sourced credential is labelled as such, so a user can tell where
     // to change it.
-    signedIn({ pat: { source: 'env', patTail: '1234' } })
+    signedIn({ pat: { source: 'env', patTail: '1234' }, patProfiles: [], activePatId: undefined })
     await press(en.refresh)
     expect(JSON.stringify(view!.toJSON())).toContain(en.patSourceEnv)
   })
@@ -329,9 +332,9 @@ describe('plugin card per variant', () => {
     expect(posts(QODER_AUTH_PATH)).toHaveLength(0)
   })
 
-  it('replaces and clears the stored PAT from the signed-in arm', async () => {    await mount()
-    // 「更换 PAT」 opens the entry over a signed-in document (no sign-out first).
-    await press(en.patReplace)
+  it('adds and clears the stored PAT from the signed-in arm', async () => {    await mount()
+    // 「添加 PAT」 opens the entry over a signed-in document (no sign-out first).
+    await press(en.patAdd)
     expect(patInputs()).toHaveLength(1)
     await typePat('a-brand-new-pat')
     await press(en.patSave)

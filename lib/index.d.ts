@@ -87,26 +87,56 @@ declare const QODER_GLOBAL_AUTH_PATH = "/plugins/dsh-qoder-connect/global/auth";
  * One action the PAT route accepts.
  *
  * `save-pat` validates the pasted token against the variant's region and, only
- * on success, persists it; `clear` removes the stored credential. There is no
- * device flow and no credential import: the token is the whole auth surface.
+ * on success, appends it to the saved list and makes it active; `activate`
+ * switches to another saved entry; `remove` deletes one saved entry; `clear`
+ * removes every saved credential. There is no device flow and no credential
+ * import: the token is the whole auth surface.
+ *
+ * All of these are writes — `activate` changes which account signs later
+ * requests — so the route requires the in-process key even for the two that do
+ * not touch a token's bytes.
  */
-type QoderAuthAction = 'save-pat' | 'clear';
+type QoderAuthAction = 'save-pat' | 'activate' | 'remove' | 'clear';
 /** Request body accepted by the PAT route. */
 interface QoderAuthRequest {
   action: QoderAuthAction;
   /** The token to validate and store; required for `save-pat`. */
   pat?: string;
+  /** Optional display label for a saved entry; `save-pat` only. */
+  label?: string;
+  /** Target saved entry; required for `activate` and `remove`. */
+  id?: string;
 }
 /** Where the credential in effect came from. */
 type QoderCredentialSource = 'card' | 'env' | 'cli';
 /**
- * Redacted summary of one variant's PAT.
+ * One saved PAT, redacted for the switch select.
+ *
+ * Never the token itself: the id is a one-way hash prefix, the label is
+ * display copy, and the tail is the last four characters — enough to tell two
+ * saved tokens apart, not enough to misuse one.
+ */
+interface QoderPatProfile {
+  id: string;
+  /** Optional display label supplied when the token was saved. */
+  label?: string;
+  /** Last four characters of the token. */
+  patTail?: string;
+  /** When this token was saved, epoch milliseconds. */
+  savedAtMs?: number;
+}
+/**
+ * Redacted summary of one variant's active PAT.
  *
  * Never the token itself: the browser half displays where the credential came
  * from, when it was saved, and the last four characters — enough to tell two
  * tokens apart, not enough to misuse one.
  */
 interface QoderPatSummary {
+  /** Local id of the saved entry in effect; absent for the environment token. */
+  id?: string;
+  /** Display label of the saved entry in effect, when it carries one. */
+  label?: string;
   source: QoderCredentialSource;
   /** When the stored token was saved, epoch milliseconds; absent for env fallback. */
   savedAtMs?: number;
@@ -255,6 +285,16 @@ type QoderWebStatus = {
   region?: QoderRegion;
   /** Redacted summary of the PAT in effect. */
   pat?: QoderPatSummary;
+  /**
+   * Every saved token for this variant, newest first, redacted.
+   *
+   * One entry means the card has nothing to switch; two or more render the
+   * account select. The list is variant-scoped, like the credential file
+   * itself: a token minted for one region is never offered to the other.
+   */
+  patProfiles?: readonly QoderPatProfile[];
+  /** The saved entry in effect; absent when the token comes from the environment. */
+  activePatId?: string;
   credits?: QoderWebCredits;
   creditsError?: string;
   /** The models the plugin serves, as catalog snapshots. */
@@ -388,12 +428,27 @@ declare const QODER_AUTH_FILENAME = ".qoder-auth.json";
 interface AuthLogger {
   warn?(...args: unknown[]): void;
 }
+/** One saved credential, as the file stores it. */
+interface QoderCredentialEntry {
+  /** Stable local id (a one-way hash prefix of the token). */
+  id: string;
+  pat: string;
+  region: QoderRegion;
+  /** When the stored token was saved, epoch milliseconds. */
+  savedAtMs?: number;
+  /** Optional display label; never sent upstream. */
+  label?: string;
+}
 /** Runtime credential, timestamps in epoch milliseconds. */
 interface QoderCredential {
+  /** Local id of the saved entry; absent for an environment token. */
+  id?: string;
   pat: string;
   region: QoderRegion;
   /** When the stored token was saved; absent for environment-sourced tokens. */
   savedAtMs?: number;
+  /** Display label, when the saved entry carries one. */
+  label?: string;
   source: QoderCredentialSource;
 }
 /** Read-only sign-in summary for status, the PAT route, and doctor output. */
@@ -407,6 +462,10 @@ interface QoderAuthStatus {
   reason?: string;
   /** Absolute path of the credential file this store owns. */
   filePath: string;
+  /** Every saved token for this variant, newest first, redacted. */
+  profiles?: readonly QoderPatProfile[];
+  /** The entry id in effect, when a saved entry is active. */
+  activeId?: string;
 }
 /** Constructor options. */
 interface QoderStoreOptions {
@@ -419,12 +478,20 @@ interface QoderStoreOptions {
 /** Last four characters of a token, for display. */
 declare function patTail(pat: string): string | undefined;
 /**
+ * Stable local id for one token.
+ *
+ * A PAT is a bearer secret, so the id is a one-way hash prefix rather than
+ * any suffix of it: surfaces that show the id (the select, status documents,
+ * logs) leak nothing usable, while two saves of the same token still resolve
+ * to the same entry.
+ */
+declare function qoderCredentialId(pat: string): string;
+/**
  * Stable identity key for a credential, used by probe records and saved
  * catalogs.
  *
- * A PAT is a bearer secret, so the key is its one-way hash rather than any
- * suffix of it: surfaces that show the key (cards, JSON diagnostics) leak
- * nothing usable, while two reads of the same token still correlate locally.
+ * Deliberately wider than the local id: these keys address stored data, not
+ * UI, and 16 hex characters keep two tokens from ever sharing a bucket.
  */
 declare function qoderCredentialIdentity(credential: Pick<QoderCredential, 'pat'>): string;
 declare class QoderCredentialStore {
@@ -439,10 +506,11 @@ declare class QoderCredentialStore {
   /**
    * The credential currently in effect, or `undefined` when there is none.
    *
-   * Resolution order: the plugin-owned file, then the arm's environment
-   * variable (only when no file exists — a saved token always wins over a
-   * stray env), then nothing. There is no refresh and no expiry check: a PAT
-   * lives until revoked.
+   * Resolution order: the active saved entry (or the first one when the
+   * pointer is stale), then the arm's environment variable (only when no
+   * saved entry exists — a saved token always wins over a stray env), then
+   * nothing. There is no refresh and no expiry check: a PAT lives until
+   * revoked.
    */
   current(): Promise<QoderCredential | undefined>;
   /**
@@ -455,12 +523,48 @@ declare class QoderCredentialStore {
   resolve(): Promise<QoderCredential>;
   /** The token in effect as a bare string, rejecting when there is none. */
   patPromise(): Promise<string>;
+  /** Every saved entry (tokens included; host-side callers only). */
+  entries(): Promise<readonly QoderCredentialEntry[]>;
   /**
-   * Persist a token for this variant. The caller is responsible for having
-   * validated it against the region first (`validateApiKey` upstream).
+   * Add a token and make it active.
+   *
+   * Re-saving an existing token updates that entry (its saved time, and its
+   * label when one is supplied) instead of appending a duplicate — the id is
+   * derived from the token, so "same PAT" is the same entry by construction.
+   * The caller is responsible for having validated the token against the
+   * region first (`validateApiKey` upstream).
+   *
+   * @param pat - the token to store.
+   * @param label - optional display label for the select row.
+   * @returns the stored entry.
+   */
+  add(pat: string, label?: string): Promise<QoderCredentialEntry>;
+  /**
+   * Make one saved entry active.
+   *
+   * @param id - the entry id.
+   * @returns the activated entry, or `undefined` when no entry has that id.
+   */
+  activate(id: string): Promise<QoderCredentialEntry | undefined>;
+  /**
+   * Remove one saved entry.
+   *
+   * The active pointer moves to the first remaining entry; removing the last
+   * entry deletes the file, exactly like {@link clear} — a saved token is the
+   * only thing that shadows the environment fallback.
+   *
+   * @param id - the entry id.
+   * @returns the removed entry, or `undefined` when no entry has that id.
+   */
+  remove(id: string): Promise<QoderCredentialEntry | undefined>;
+  /**
+   * Persist a token for this variant and make it active.
+   *
+   * Kept for the CLI and older call sites: it is {@link add} behind the
+   * runtime-credential shape they expect.
    */
   save(pat: string, source?: QoderCredentialSource): Promise<QoderCredential>;
-  /** Remove the stored credential. A missing file is not an error. */
+  /** Remove every stored credential. A missing file is not an error. */
   clear(): Promise<void>;
   /** Alias kept for call-site readability (`logout` is just clearing). */
   logout(): Promise<void>;
@@ -470,7 +574,7 @@ declare class QoderCredentialStore {
   private pendingLegacyReason;
   private fromEnvironment;
   private readOwn;
-  private writeOwn;
+  private writeDocument;
 }
 /**
  * The plugin-owned credential path for one variant's default filename.
@@ -1146,6 +1250,15 @@ declare class QoderProbeStore {
   set(modelId: string, record: QoderProbeRecord): void;
   /** Drop every record; used by the card's explicit "clear" action. */
   clear(): void;
+  /**
+   * Drop every record that belongs to one account, leaving the other saved
+   * accounts' observations intact.
+   *
+   * Used when a saved token is removed: its detected effort levels are that
+   * account's data, and no other account can use them. A plain {@link clear}
+   * here would erase the observations of every account the user still has.
+   */
+  clearFor(account: string): void;
   /** Every record currently held, for status display. */
   all(): Readonly<Record<string, QoderProbeRecord>>;
   /** Build a record stamped with this store's clock, version, and account. */
@@ -1346,22 +1459,27 @@ declare class QoderProbeService {
 }
 //#endregion
 //#region src/auth-route.d.ts
-/** Outcome of a save attempt: stored, or refused with a stable reason. */
+/** Outcome of a save/activate/remove attempt: stored, or refused with a stable reason. */
 type QoderAuthSaveResult = {
   ok: true;
   status: QoderAuthStatus;
 } | {
   ok: false;
-  error: 'qoder_invalid_pat' | 'qoder_missing_pat';
+  error: 'qoder_invalid_pat' | 'qoder_missing_pat' | 'qoder_unknown_pat';
 };
 /** Constructor dependencies. */
 interface QoderAuthRouteOptions {
   /**
    * Validate one pasted token against this variant's region and, only on
-   * success, persist it. The route never decides validity itself.
+   * success, persist it and make it active. The route never decides validity
+   * itself.
    */
-  save: (pat: string) => Promise<QoderAuthSaveResult>;
-  /** Remove the stored credential. */
+  save: (pat: string, label?: string) => Promise<QoderAuthSaveResult>;
+  /** Switch to one already-saved token. */
+  activate: (id: string) => Promise<QoderAuthSaveResult>;
+  /** Remove one saved token; the host moves the active pointer. */
+  remove: (id: string) => Promise<QoderAuthSaveResult>;
+  /** Remove every saved token (`logout`). */
   clear: () => Promise<void>;
   /**
    * Route path to mount. Defaults to the China variant's path so callers that
@@ -1375,7 +1493,7 @@ declare function createAuthKey(): string;
  * The PAT route's handler, extracted so tests can mount it on a bare server
  * with a known key.
  *
- * @param deps - the save/clear operations for one variant.
+ * @param deps - the save/activate/remove/clear operations for one variant.
  * @param key - the in-process control key this route requires.
  * @returns the Node request handler.
  */
@@ -1568,4 +1686,4 @@ declare const QUOTA_SECTION_KEYS: readonly ["sidebarQuotaCN", "sidebarQuotaGloba
  */
 declare function apply(ctx: Context, config: Config): void;
 //#endregion
-export { CHINA_VARIANT, CN_SECTION_KEYS, Config, FALLBACK_QODER_MODELS, GLOBAL_SECTION_KEYS, GLOBAL_VARIANT, KIND_STATUS, PROBE_EFFORT_CANDIDATES, type ProbeAttempt, type ProbeOutcome, type ProbeSender, QODER_AUTH_FILENAME, QODER_AUTH_PATH, QODER_DATA_DIR_ENV, QODER_DATA_DIR_NAME, QODER_GLOBAL_AUTH_PATH, QODER_GLOBAL_PROBE_PATH, QODER_GLOBAL_SETTINGS_NS, QODER_GLOBAL_STATUS_PATH, QODER_HOST_HEARTBEAT_FILENAME, QODER_PAT_ENV_CN, QODER_PAT_ENV_GLOBAL, QODER_PROBE_FILENAME, QODER_PROBE_PATH, QODER_PROVIDER, QODER_QUOTA_SETTINGS_NS, QODER_SETTINGS_NS, QODER_STATUS_PATH, QODER_STREAM_IDLE_TIMEOUT_MS, QODER_VARIANTS, QUOTA_POLL_DEFAULT_MS, QUOTA_POLL_MIN_MS, QUOTA_SECTION_KEYS, type QoderAdapter, type QoderAuthRequest, type QoderAuthRouteOptions, type QoderAuthSaveResult, type QoderAuthStatus, QoderCatalog, type QoderCatalogFetch, type QoderCatalogModelSnapshot, QoderCatalogStore, type QoderCatalogStoreOptions, type QoderChatResult, type QoderCredential, QoderCredentialStore, type QoderCreditAccount, type QoderCredits, type QoderEffort, type QoderHostHeartbeat, type QoderModelBilling, type QoderModelInfo, type QoderModelReasoning, type QoderPatSummary, type QoderProbeAction, type QoderProbeRecord, QoderProbeService, type QoderProbeStatus, QoderProbeStore, type QoderProbeValidation, type QoderShim, QoderUpstreamClient, type QoderVariant, type QoderVariantId, type QoderWebCatalog, type QoderWebCreditAccount, type QoderWebCredits, type QoderWebProbeModel, type QoderWebProbeSection, type QoderWebStatus, type ShimLogger, type UpstreamErrorKind, apply, classifyUpstreamError, clearHostHeartbeat, createAuthKey, createQoderAdapter, createQoderShim, fingerprintModel, inject, isHeartbeatProcessAlive, kindFromQoderFailure, modelInfoOf, name, normalizeCredits, patTail, probeModel, processStartTimeMs, qoderAuthHandler, qoderCatalogPath, qoderCredentialIdentity, qoderHostHeartbeatPath, qoderOwnAuthPath, qoderPluginDataDir, qoderProbePath, randomSentinel, readHostHeartbeat, registerQoderAuthRoute, variantFor };
+export { CHINA_VARIANT, CN_SECTION_KEYS, Config, FALLBACK_QODER_MODELS, GLOBAL_SECTION_KEYS, GLOBAL_VARIANT, KIND_STATUS, PROBE_EFFORT_CANDIDATES, type ProbeAttempt, type ProbeOutcome, type ProbeSender, QODER_AUTH_FILENAME, QODER_AUTH_PATH, QODER_DATA_DIR_ENV, QODER_DATA_DIR_NAME, QODER_GLOBAL_AUTH_PATH, QODER_GLOBAL_PROBE_PATH, QODER_GLOBAL_SETTINGS_NS, QODER_GLOBAL_STATUS_PATH, QODER_HOST_HEARTBEAT_FILENAME, QODER_PAT_ENV_CN, QODER_PAT_ENV_GLOBAL, QODER_PROBE_FILENAME, QODER_PROBE_PATH, QODER_PROVIDER, QODER_QUOTA_SETTINGS_NS, QODER_SETTINGS_NS, QODER_STATUS_PATH, QODER_STREAM_IDLE_TIMEOUT_MS, QODER_VARIANTS, QUOTA_POLL_DEFAULT_MS, QUOTA_POLL_MIN_MS, QUOTA_SECTION_KEYS, type QoderAdapter, type QoderAuthRequest, type QoderAuthRouteOptions, type QoderAuthSaveResult, type QoderAuthStatus, QoderCatalog, type QoderCatalogFetch, type QoderCatalogModelSnapshot, QoderCatalogStore, type QoderCatalogStoreOptions, type QoderChatResult, type QoderCredential, type QoderCredentialEntry, QoderCredentialStore, type QoderCreditAccount, type QoderCredits, type QoderEffort, type QoderHostHeartbeat, type QoderModelBilling, type QoderModelInfo, type QoderModelReasoning, type QoderPatProfile, type QoderPatSummary, type QoderProbeAction, type QoderProbeRecord, QoderProbeService, type QoderProbeStatus, QoderProbeStore, type QoderProbeValidation, type QoderShim, QoderUpstreamClient, type QoderVariant, type QoderVariantId, type QoderWebCatalog, type QoderWebCreditAccount, type QoderWebCredits, type QoderWebProbeModel, type QoderWebProbeSection, type QoderWebStatus, type ShimLogger, type UpstreamErrorKind, apply, classifyUpstreamError, clearHostHeartbeat, createAuthKey, createQoderAdapter, createQoderShim, fingerprintModel, inject, isHeartbeatProcessAlive, kindFromQoderFailure, modelInfoOf, name, normalizeCredits, patTail, probeModel, processStartTimeMs, qoderAuthHandler, qoderCatalogPath, qoderCredentialId, qoderCredentialIdentity, qoderHostHeartbeatPath, qoderOwnAuthPath, qoderPluginDataDir, qoderProbePath, randomSentinel, readHostHeartbeat, registerQoderAuthRoute, variantFor };

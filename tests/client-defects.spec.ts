@@ -188,7 +188,7 @@ describe('QoderPluginCard', () => {
       statusReply = { ok: true, body: null }
       await pressCard(en.refresh)
       const tree = JSON.stringify(view!.toJSON())
-      expect(tree).toContain(en.signedIn)
+      expect(tree).toContain(en.patAccounts)
       expect(tree).toContain(NOTICE)
       expect(tree).toContain(en.statusResponseInvalid)
     })
@@ -202,7 +202,7 @@ describe('QoderPluginCard', () => {
       await act(async () => { [...intervals.values()][0]!() }) // the 60s poll fires
       const after = JSON.stringify(view!.toJSON())
       expect(after).toContain(NOTICE)
-      expect(after).toContain(en.signedIn)
+      expect(after).toContain(en.patAccounts)
       expect(before).toContain('wxyz') // the PAT tail was on screen before…
       expect(after).toContain('wxyz') // …and is still on screen after
     })
@@ -286,36 +286,37 @@ describe('QoderPluginCard', () => {
       const live = view!.root.findAll(node => (node.props as { role?: string }).role === 'status')[0]
       expect(live!.props['aria-busy']).toBe(true)
       await release(0, { ok: true, body: doc() })
-      expect(JSON.stringify(view!.toJSON())).toContain(en.signedIn)
+      expect(JSON.stringify(view!.toJSON())).toContain(en.patAccounts)
     })
   })
 
   describe('#6 no sequence guard on reads', () => {
     it('keeps the document whose read started last, even when it settles first', async () => {
-      // Read #1 (mount) settles; read #2 (manual refresh) is held; read #3
-      // (poll) settles first with a newer answer; releasing #2 must not roll
+      // Read #1 (mount) settles; the manual refresh now sends its catalog POST
+      // first (index 1) and then read #2 (index 2), which is held; read #3
+      // (poll) settles first with a newer answer. Releasing #2 must not roll
       // the card back to its older document.
-      plan = (_url, _init, index) => index === 1 ? { hang: true } : { ok: true, body: doc({
-        credits: { total: index === 2 ? 7 : 77, accounts: [] },
+      plan = (_url, _init, index) => index === 2 ? { hang: true } : { ok: true, body: doc({
+        credits: { total: index === 3 ? 7 : 77, accounts: [] },
       }) }
       await mountCard()
-      await pressCard(en.refresh) // read #2, held
+      await pressCard(en.refresh) // POST #1, then read #2 held
       await act(async () => { [...intervals.values()][0]!() }) // read #3, lands first
       expect(JSON.stringify(view!.toJSON())).toContain(t('creditsUsed', { percent: '7' }))
-      await release(1, { ok: true, body: doc({ credits: { total: 77, accounts: [] } }) })
+      await release(2, { ok: true, body: doc({ credits: { total: 77, accounts: [] } }) })
       expect(JSON.stringify(view!.toJSON())).toContain(t('creditsUsed', { percent: '7' }))
     })
 
     it('drops a superseded failure silently instead of blanking the card', async () => {
-      plan = (_url, _init, index) => index === 1 ? { hang: true } : { ok: true, body: doc() }
+      plan = (_url, _init, index) => index === 2 ? { hang: true } : { ok: true, body: doc() }
       await mountCard()
-      await pressCard(en.refresh) // read #2, held
+      await pressCard(en.refresh) // POST #1, then read #2 held
       await act(async () => { [...intervals.values()][0]!() }) // read #3 supersedes it
       // The late answer is a failure (an unreadable body); the sequence guard
       // must swallow it without a notice and without touching the document.
-      await release(1, { ok: true, body: null })
+      await release(2, { ok: true, body: null })
       expect(JSON.stringify(view!.toJSON())).not.toContain(NOTICE)
-      expect(JSON.stringify(view!.toJSON())).toContain(en.signedIn)
+      expect(JSON.stringify(view!.toJSON())).toContain(en.patAccounts)
     })
   })
 
@@ -346,7 +347,7 @@ describe('QoderPluginCard', () => {
       await firePreferenceWrite()
       const tree = JSON.stringify(view!.toJSON())
       expect(tree).toContain(NOTICE)
-      expect(tree).toContain(en.signedIn)
+      expect(tree).toContain(en.patAccounts)
       expect(tree).toContain('invalid-auth-key') // the reason survives the round trip
     })
 

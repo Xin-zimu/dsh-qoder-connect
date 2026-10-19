@@ -9,12 +9,13 @@ import { QoderUpstreamClient, validateApiKey } from './upstream.ts'
 import { createQoderTransport } from './qoder/transport/index.ts'
 import { FALLBACK_QODER_MODELS } from './catalog.ts'
 import { QoderCatalogStore, qoderCatalogPath } from './catalog-store.ts'
+import { QoderProbeStore, qoderProbePath } from './probe-store.ts'
 import { QODER_CONNECT_VERSION } from './version.ts'
 import { isHeartbeatProcessAlive, qoderHostHeartbeatPath, readHostHeartbeat } from './host-heartbeat.ts'
 import { CHINA_VARIANT, QODER_VARIANTS, variantFor, type QoderVariant } from './variants.ts'
 
 type Action = 'doctor' | 'status' | 'pat' | 'logout' | 'catalog'
-type PatCommand = 'set' | 'clear'
+type PatCommand = 'set' | 'list' | 'use' | 'rm' | 'clear'
 type CatalogCommand = 'refresh'
 
 const JSON_SCHEMA_VERSION = 1
@@ -33,8 +34,11 @@ function printHelp(): void {
     '',
     '  doctor         secret-free environment diagnostics',
     '  status         credential state and remaining Qoder credit',
-    '  pat set        validate and store a Personal Access Token (arg, --file, or stdin)',
-    '  pat clear      remove the stored credential',
+    '  pat set        validate, store, and activate a Personal Access Token (arg, --file, or stdin)',
+    '  pat list       list saved tokens and mark the active one',
+    '  pat use <id>   switch to a saved token',
+    '  pat rm <id>    remove a saved token',
+    '  pat clear      remove every saved token',
     '  logout         alias for `pat clear`',
     '  catalog refresh   re-fetch the model list and save it for this account',
     '',
@@ -170,8 +174,7 @@ async function status(jsonOutput: boolean, variant: QoderVariant): Promise<numbe
 }
 
 /** Read a token from the positional arg, --file, or standard input. */
-async function readPat(source: string | undefined, rest: readonly string[]): Promise<string> {
-  const inline = rest.find(argument => !argument.startsWith('--'))
+async function readPat(source: string | undefined, inline: string | undefined): Promise<string> {
   const raw = source === undefined
     ? inline ?? await readStdin()
     : source === '-' ? await readStdin() : await readFile(source, 'utf8')
@@ -188,9 +191,26 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString('utf8')
 }
 
-async function patSet(variant: QoderVariant, file: string | undefined, rest: readonly string[]): Promise<number> {
+/**
+ * Drop the saved catalog and probe records that belong to one token.
+ *
+ * The host does this when a saved token is removed from the card; the CLI
+ * writes the same files, so it has to leave the same state behind. Leaving them
+ * would orphan another account's only copy — or resurrect data for a token the
+ * user just deleted.
+ */
+function forgetAccount(variant: QoderVariant, credential: { pat: string }): void {
+  const identity = qoderCredentialIdentity(credential)
+  new QoderCatalogStore({ path: qoderCatalogPath(variant.catalogFilename) }).delete(identity)
+  new QoderProbeStore({
+    pluginVersion: QODER_CONNECT_VERSION,
+    path: qoderProbePath(variant.probeFilename),
+  }).clearFor(identity)
+}
+
+async function patSet(variant: QoderVariant, file: string | undefined, inline: string | undefined): Promise<number> {
   const store = makeStore(variant)
-  const pat = await readPat(file, rest)
+  const pat = await readPat(file, inline)
   process.stdout.write(`Validating a token against ${variant.displayName} (${variant.region})…\n`)
   // Validate before writing: a file the plugin saved should always be a file
   // the plugin believes works. A refusal costs one discovery call, a bad save
@@ -203,8 +223,75 @@ async function patSet(variant: QoderVariant, file: string | undefined, rest: rea
   await store.save(pat, 'cli')
   const status = await store.status()
   process.stdout.write([
-    `Saved to ${store.ownAuthPath()}${status.pat?.patTail === undefined ? '' : ` (tail …${status.pat.patTail})`}`,
+    `Saved and activated in ${store.ownAuthPath()}${status.pat?.patTail === undefined ? '' : ` (tail …${status.pat.patTail})`}`,
+    `${status.profiles?.length ?? 1} saved token(s); switch with \`dsh-qoder-connect pat use <id>\`.`,
     'The running plugin picks the token up on its next sweep; no restart needed.',
+    '',
+  ].join('\n'))
+  return 0
+}
+
+/** List the saved tokens, marking the active one; never prints a token. */
+async function patList(jsonOutput: boolean, variant: QoderVariant): Promise<number> {
+  const store = makeStore(variant)
+  const status = await store.status()
+  const profiles = status.profiles ?? []
+  if (jsonOutput) {
+    printJson({
+      schemaVersion: JSON_SCHEMA_VERSION,
+      provider: variant.id,
+      activeId: status.activeId ?? null,
+      profiles,
+      ...status.pat?.source === 'env' ? { source: 'env' } : {},
+    })
+    return 0
+  }
+  if (profiles.length === 0) {
+    process.stdout.write(
+      status.pat?.source === 'env'
+        ? `${variant.displayName}: no saved token; the environment token is in use${status.pat.patTail === undefined ? '' : ` (tail …${status.pat.patTail})`}.\n`
+        : `${variant.displayName}: no saved tokens.\n`,
+    )
+    return 0
+  }
+  const lines = profiles.map(profile => [
+    profile.id === status.activeId ? '*' : ' ',
+    profile.id,
+    profile.label ?? '(no label)',
+    profile.patTail === undefined ? '' : `tail …${profile.patTail}`,
+  ].filter(part => part !== '').join('  '))
+  process.stdout.write([`${variant.displayName} saved tokens (* = active):`, ...lines, ''].join('\n'))
+  return 0
+}
+
+/** Make one saved token active. */
+async function patUse(variant: QoderVariant, id: string): Promise<number> {
+  const store = makeStore(variant)
+  const entry = await store.activate(id)
+  if (entry === undefined) {
+    process.stderr.write(`dsh-qoder-connect: no saved token with id ${JSON.stringify(id)}; run \`pat list\` to see the ids.\n`)
+    return 1
+  }
+  const tail = entry.pat.slice(-4)
+  process.stdout.write(`${variant.displayName}: active token is now ${entry.id}${tail.length === 4 ? ` (tail …${tail})` : ''}.\n`)
+  return 0
+}
+
+/** Remove one saved token and the account-scoped data that belonged to it. */
+async function patRemove(variant: QoderVariant, id: string): Promise<number> {
+  const store = makeStore(variant)
+  const removed = await store.remove(id)
+  if (removed === undefined) {
+    process.stderr.write(`dsh-qoder-connect: no saved token with id ${JSON.stringify(id)}; run \`pat list\` to see the ids.\n`)
+    return 1
+  }
+  forgetAccount(variant, removed)
+  const status = await store.status()
+  process.stdout.write([
+    `${variant.displayName}: removed ${removed.id}.`,
+    status.activeId === undefined
+      ? 'No saved token remains; the plugin is signed out of this variant.'
+      : `Active token is now ${status.activeId}.`,
     '',
   ].join('\n'))
   return 0
@@ -212,14 +299,16 @@ async function patSet(variant: QoderVariant, file: string | undefined, rest: rea
 
 async function patClear(variant: QoderVariant): Promise<number> {
   const store = makeStore(variant)
-  // Only this variant's stored credential is removed, so signing out of
+  // Only this variant's stored credentials are removed, so signing out of
   // one product never affects the other. An environment token is not ours to
   // remove; say so rather than pretend the state is fully signed out.
+  const saved = await store.entries()
+  for (const entry of saved) forgetAccount(variant, entry)
   await store.clear()
   const status = await store.status()
   process.stdout.write(
     status.state === 'configured'
-      ? `${variant.displayName} Connect: removed the stored file, but a token is still active from the environment (${status.pat?.source ?? 'env'}).\n`
+      ? `${variant.displayName} Connect: removed ${saved.length} saved token(s), but a token is still active from the environment (${status.pat?.source ?? 'env'}).\n`
       : `${variant.displayName} Connect: signed out; removed ${store.ownAuthPath()}\n`,
   )
   return 0
@@ -297,11 +386,20 @@ export async function run(argv: readonly string[]): Promise<number> {
   // flag hygiene below can mistake it for an unknown option.
   let patCommand: PatCommand | undefined
   let catalogCommand: CatalogCommand | undefined
+  /** The positional a subcommand takes: the token (`set`) or the entry id. */
+  let commandArg: string | undefined
   if (action === 'pat') {
     const sub = rest.shift()
-    patCommand = sub === 'set' || sub === 'clear' ? sub : undefined
+    patCommand = sub === 'set' || sub === 'list' || sub === 'use' || sub === 'rm' || sub === 'clear'
+      ? sub
+      : undefined
     if (patCommand === undefined) {
-      process.stderr.write(`dsh-qoder-connect: pat needs set or clear; got ${JSON.stringify(sub ?? '')}\n`)
+      process.stderr.write(`dsh-qoder-connect: pat needs set, list, use, rm, or clear; got ${JSON.stringify(sub ?? '')}\n`)
+      return 1
+    }
+    if (patCommand !== 'list' && patCommand !== 'clear') commandArg = rest.shift()
+    if ((patCommand === 'use' || patCommand === 'rm') && (commandArg === undefined || commandArg.startsWith('--'))) {
+      process.stderr.write(`dsh-qoder-connect: pat ${patCommand} needs an entry id; run \`pat list\` to see them\n`)
       return 1
     }
   }
@@ -313,8 +411,9 @@ export async function run(argv: readonly string[]): Promise<number> {
       return 1
     }
   }
+  const patListJson = action === 'pat' && patCommand === 'list'
   const unknown = rest.filter(flag => flag !== '--json' && !flag.startsWith('--'))
-  if (unknown.length > 0 || (jsonOutput && action !== 'doctor' && action !== 'status')) {
+  if (unknown.length > 0 || (jsonOutput && action !== 'doctor' && action !== 'status' && !patListJson)) {
     process.stderr.write(`dsh-qoder-connect: invalid options for ${action}: ${flags.join(' ')}\n`)
     return 1
   }
@@ -329,9 +428,19 @@ export async function run(argv: readonly string[]): Promise<number> {
       case 'status':
         return await status(jsonOutput, variant)
       case 'pat':
-        return patCommand === 'set'
-          ? await patSet(variant, file, rest)
-          : await patClear(variant)
+        switch (patCommand) {
+          case 'set':
+            return await patSet(variant, file, commandArg)
+          case 'list':
+            return await patList(jsonOutput, variant)
+          case 'use':
+            return await patUse(variant, commandArg as string)
+          case 'rm':
+            return await patRemove(variant, commandArg as string)
+          case 'clear':
+            return await patClear(variant)
+        }
+        return 1
       case 'logout':
         return await patClear(variant)
       case 'catalog':

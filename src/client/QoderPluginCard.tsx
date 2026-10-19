@@ -285,6 +285,49 @@ const patInputStyle: CSSProperties = {
   lineHeight: 1.5,
 }
 
+/** The saved-PAT select: same field skin, sized so the toolbar stays one row. */
+const patSelectStyle: CSSProperties = {
+  boxSizing: 'border-box',
+  flex: '0 1 180px',
+  maxWidth: 180,
+  minWidth: 110,
+  padding: '6px 10px',
+  borderWidth: '1px',
+  borderStyle: 'solid',
+  borderColor: 'var(--dsw-alias-border-l2)',
+  borderRadius: 8,
+  background: 'var(--dsw-alias-bg-layer-2)',
+  color: 'var(--dsw-alias-label-primary)',
+  font: 'inherit',
+  fontSize: 13,
+  lineHeight: 1.5,
+}
+
+/**
+ * One account toolbar: the active-account select and its actions share a
+ * single row, so a signed-in card no longer stacks a status line, a select
+ * line and an action line on top of each other.
+ *
+ * The account's identity is the select itself; a separate "Account / Signed
+ * in" heading above it only repeated what the select already says, so the
+ * heading is gone. The non-signed-in states keep a status row, because there
+ * the status *is* the information.
+ */
+const accountToolbarStyle: CSSProperties = { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', paddingTop: 6 }
+/** Provenance line under the toolbar; its refresh action sits at the far end. */
+const accountMetaRowStyle: CSSProperties = { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginTop: 8 }
+const accountStatusRowStyle: CSSProperties = { display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', paddingTop: 6 }
+/** Inline field label; the select carries the value, so this stays quiet. */
+const accountFieldLabelStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 6,
+  fontSize: 13,
+  lineHeight: 1.5,
+  color: 'var(--dsw-alias-label-tertiary)',
+  whiteSpace: 'nowrap',
+}
+
 /**
  * Tab strip for the card body. Kept visually light — a full pill would compete
  * with the section headings, and the card is already the densest surface the
@@ -905,8 +948,12 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
   const [headerFocused, setHeaderFocused] = useState(false)
   const [busy, setBusy] = useState(false)
   const [patDraft, setPatDraft] = useState('')
+  /** Optional display label for the token being added; local only. */
+  const [patLabelDraft, setPatLabelDraft] = useState('')
   const [replacing, setReplacing] = useState(false)
   const [patBusy, setPatBusy] = useState(false)
+  /** Which PAT write is in flight, so each control shows its own progress copy. */
+  const [patAction, setPatAction] = useState<'save' | 'clear' | 'switch' | 'remove'>()
   const [patError, setPatError] = useState<string>()
   const [patNotice, setPatNotice] = useState<string>()
   const patInput = useRef<HTMLInputElement>(null)
@@ -958,6 +1005,8 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
       : undefined
 
   const authKey = status === undefined || status.status === 'error' ? undefined : status.authKey
+  /** The saved-token list for the select; an env-only sign-in has none. */
+  const savedPats = status?.status === 'signed-in' ? status.patProfiles ?? [] : []
 
   /**
    * Force one shared read of the shown variant.
@@ -1011,40 +1060,42 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
   }
 
   /**
-   * Ask the host to re-read the credential and re-fetch this variant's catalog.
+   * One refresh for the signed-in account block.
    *
-   * Shares the probe route's key and guards: it is a write that spends an
-   * upstream request, so it does not belong on the read-only status GET. A
-   * failure is surfaced through the refreshed document's `catalog.error` rather
-   * than thrown away, so the reason survives the round trip.
+   * There used to be two buttons: "refresh" re-read the status document
+   * (quota, provenance) and "refresh model list" re-fetched the upstream
+   * catalog and then re-read the status anyway. The second is a superset of
+   * the first, so the card now offers one action: re-fetch the catalog when a
+   * probe key exists, and always re-read the status — even when the catalog
+   * call fails, because the quota answer must not be held hostage by the
+   * model-list endpoint.
    */
-  const refreshModels = useCallback(async (): Promise<void> => {
+  const refreshAll = useCallback(async (): Promise<void> => {
     const key = status?.status === 'signed-in' ? status.probeKey : undefined
-    if (key === undefined) return
     setBusy(true)
     const controller = trackController()
     try {
-      const response = await fetch(currentVariant.probePath, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Qoder-Probe-Key': key },
-        credentials: 'same-origin',
-        signal: controller.signal,
-        body: JSON.stringify({ action: 'refresh' } satisfies QoderProbeAction),
-      })
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      if (key !== undefined) {
+        const response = await fetch(currentVariant.probePath, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Qoder-Probe-Key': key },
+          credentials: 'same-origin',
+          signal: controller.signal,
+          body: JSON.stringify({ action: 'refresh' } satisfies QoderProbeAction),
+        })
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      }
     } catch (error: unknown) {
       if (mounted.current && controller.signal.aborted !== true) {
         setWriteFailure(error instanceof Error ? error.message : t('requestFailed'))
       }
-      manualControllers.current.delete(controller)
-      return
     } finally {
-      if (mounted.current) setBusy(false)
-    }
-    try {
-      await refresh()
-    } finally {
-      manualControllers.current.delete(controller)
+      try {
+        await refresh()
+      } finally {
+        manualControllers.current.delete(controller)
+        if (mounted.current) setBusy(false)
+      }
     }
   }, [currentVariant.probePath, refresh, status, t, trackController])
 
@@ -1166,18 +1217,19 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
   }, [currentVariant.probePath, refresh, status, t, trackController])
 
   /**
-   * Validate and store the pasted PAT (or overwrite the stored one).
+   * Validate and store the pasted PAT, then make it the active account.
    *
-   * The PAT route answers both outcomes as 200 with `ok` carrying the verdict —
-   * a refused token is an answer, not a transport failure — so the card checks
-   * `ok` and translates the stable `qoder_invalid_pat` / `qoder_missing_pat`
-   * codes into the re-generate prompt. The route is variant-fixed: the token
-   * this card saves can only ever be validated and stored for this product.
+   * Saving is additive: an already-saved token updates its own entry (the id
+   * is derived from the token), a new one is appended and activated, and the
+   * previous tokens remain selectable. Only a token that passed validation is
+   * written, so a mistyped paste can never strand the working credential.
    */
   const savePat = useCallback(async (): Promise<void> => {
     const key = authKey
     const pat = patDraft.trim()
+    const label = patLabelDraft.trim()
     if (key === undefined || pat === '' || patBusy) return
+    setPatAction('save')
     setPatBusy(true)
     setPatError(undefined)
     setPatNotice(undefined)
@@ -1188,7 +1240,7 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
         headers: { 'Content-Type': 'application/json', 'X-Qoder-Auth-Key': key },
         credentials: 'same-origin',
         signal: controller.signal,
-        body: JSON.stringify({ action: 'save-pat', pat }),
+        body: JSON.stringify({ action: 'save-pat', pat, ...label === '' ? {} : { label } }),
       })
       const value: unknown = await response.json().catch(() => undefined)
       const record = typeof value === 'object' && value !== null ? value as Record<string, unknown> : {}
@@ -1204,6 +1256,7 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
         return
       }
       setPatDraft('')
+      setPatLabelDraft('')
       setReplacing(false)
       setPatNotice(t('patSaved'))
       noteQuotaSignIn(currentVariant.id, true)
@@ -1216,18 +1269,32 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
       }
     } finally {
       manualControllers.current.delete(controller)
-      if (mounted.current) setPatBusy(false)
+      if (mounted.current) {
+        setPatBusy(false)
+        setPatAction(undefined)
+      }
     }
-  }, [authKey, currentVariant.authPath, patBusy, patDraft, refresh, t, trackController])
+  }, [authKey, currentVariant.authPath, patBusy, patDraft, patLabelDraft, refresh, t, trackController])
 
-  /** Remove the stored PAT; the host answer is `{ ok: true }`, then the card re-reads. */
-  const clearPat = useCallback(async (): Promise<void> => {
+  /**
+   * One authenticated write against this variant's PAT route.
+   *
+   * `activate`, `remove`, and `clear` answer the same `{ok, status}` shape a
+   * save does; one helper keeps the guards, the stable-error handling, and the
+   * post-write re-read together, so a switch cannot update one surface and
+   * leave another showing the previous account.
+   */
+  const patWrite = useCallback(async (
+    body: Record<string, unknown>,
+    failure: (message: string) => string,
+    action: 'clear' | 'switch' | 'remove',
+  ): Promise<boolean> => {
     const key = authKey
-    if (key === undefined || patBusy) return
+    if (key === undefined || patBusy) return false
+    setPatAction(action)
     setPatBusy(true)
     setPatError(undefined)
     setPatNotice(undefined)
-    setReplacing(false)
     const controller = trackController()
     try {
       const response = await fetch(currentVariant.authPath, {
@@ -1235,42 +1302,71 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
         headers: { 'Content-Type': 'application/json', 'X-Qoder-Auth-Key': key },
         credentials: 'same-origin',
         signal: controller.signal,
-        body: JSON.stringify({ action: 'clear' }),
+        body: JSON.stringify(body),
       })
       const value: unknown = await response.json().catch(() => undefined)
       const record = typeof value === 'object' && value !== null ? value as Record<string, unknown> : {}
       if (!response.ok || record['ok'] !== true) {
         const detail = typeof record['error'] === 'string' ? record['error'] : `HTTP ${response.status}`
-        setPatError(t('patSaveFailed', { message: detail }))
-        return
+        setPatError(failure(detail))
+        return false
       }
-      setPatDraft('')
-      // Publish the outcome as an authoritative fact: every surface shows the
-      // signed-out document at once, and a read that started before the clear
-      // can no longer roll the screens back.
-      noteQuotaStatus(currentVariant.id, { status: 'signed-out', authKey: key })
+      // Removing the last token signs the variant out. Publish that fact
+      // before the re-read: a failed refresh must not leave every surface
+      // showing an account that no longer exists.
+      const status = record['status']
+      if (typeof status === 'object' && status !== null
+        && (status as Record<string, unknown>)['state'] === 'missing') {
+        noteQuotaStatus(currentVariant.id, { status: 'signed-out', authKey: key })
+      }
       await refresh()
+      return true
     } catch (error: unknown) {
       if (mounted.current && controller.signal.aborted !== true) {
-        setPatError(t('patSaveFailed', {
-          message: error instanceof Error ? error.message : t('requestFailed'),
-        }))
+        setPatError(failure(error instanceof Error ? error.message : t('requestFailed')))
       }
+      return false
     } finally {
       manualControllers.current.delete(controller)
-      if (mounted.current) setPatBusy(false)
+      if (mounted.current) {
+        setPatBusy(false)
+        setPatAction(undefined)
+      }
     }
-  }, [authKey, currentVariant.authPath, patBusy, refresh, t, trackController])
+  }, [authKey, currentVariant.authPath, currentVariant.id, patBusy, refresh, t, trackController])
+
+  /** Remove every saved PAT; the host answer is `{ ok: true }`, then the card re-reads. */
+  const clearPat = useCallback(async (): Promise<void> => {
+    const key = authKey
+    const ok = await patWrite({ action: 'clear' }, message => t('patSaveFailed', { message }), 'clear')
+    if (!ok) return
+    setPatDraft('')
+    setReplacing(false)
+    // Publish the outcome as an authoritative fact: every surface shows the
+    // signed-out document at once, and a read that started before the clear
+    // can no longer roll the screens back.
+    if (key !== undefined) noteQuotaStatus(currentVariant.id, { status: 'signed-out', authKey: key })
+  }, [authKey, currentVariant.id, patWrite, t])
+
+  /** Make one saved entry active; the model group follows on the refresh. */
+  const switchPat = useCallback(async (id: string): Promise<void> => {
+    await patWrite({ action: 'activate', id }, message => t('patSwitchFailed', { message }), 'switch')
+  }, [patWrite, t])
+
+  /** Remove one saved entry; removing the last one signs the variant out. */
+  const removePat = useCallback(async (id: string): Promise<void> => {
+    await patWrite({ action: 'remove', id }, message => t('patRemoveFailed', { message }), 'remove')
+  }, [patWrite, t])
 
   /**
-   * 更换 PAT: open the entry over the signed-in document, pre-cleared and
-   * focused. Unlike the removed device-flow switch this needs no sign-out
-   * first — saving validates the new token and overwrites the stored one
-   * only on success, so a mistyped paste can never strand the working
-   * credential.
+   * Add PAT: open the entry over the signed-in document, pre-cleared and
+   * focused. The entry stays additive — saving validates the new token and
+   * appends it (and makes it active) only on success — so adding a second
+   * account never risks the working one.
    */
-  const beginReplace = useCallback((): void => {
+  const beginAddPat = useCallback((): void => {
     setPatDraft('')
+    setPatLabelDraft('')
     setPatError(undefined)
     setPatNotice(undefined)
     setReplacing(true)
@@ -1314,6 +1410,7 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
             onClick={() => {
               setReplacing(false)
               setPatDraft('')
+              setPatLabelDraft('')
               setPatError(undefined)
             }}
           >
@@ -1321,6 +1418,18 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
           </button>
         ) : null}
       </div>
+      {replacing ? (
+        <input
+          type="text"
+          value={patLabelDraft}
+          maxLength={48}
+          placeholder={t('patLabelPlaceholder')}
+          aria-label={t('patLabelPlaceholder')}
+          disabled={patBusy}
+          onChange={event => { setPatLabelDraft(event.target.value) }}
+          style={patInputStyle}
+        />
+      ) : null}
       {patError === undefined ? null : <p style={errorStyle}>{patError}</p>}
       {patNotice === undefined ? null : <p style={bodyStyle}>{patNotice}</p>}
     </div>
@@ -1337,11 +1446,19 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
         ? t('requestFailed')
         : t('signedOut')
 
-  const patSummaryLine = (pat: NonNullable<Extract<QoderWebStatus, { status: 'signed-in' }>['pat']>): React.ReactNode => {
+  /**
+   * The token's provenance line.
+   *
+   * The account itself is named by the toolbar above (the select, or the env
+   * token's tail), so this line keeps only the facts the toolbar does not
+   * carry: where the token came from and when it was saved.
+   */
+  const patSummaryLine = (
+    pat: NonNullable<Extract<QoderWebStatus, { status: 'signed-in' }>['pat']>,
+  ): React.ReactNode => {
     const parts = [
       patSourceText(pat.source, t),
       pat.savedAtMs === undefined ? null : t('patSavedAt', { time: formatTime(pat.savedAtMs) }),
-      pat.patTail === undefined ? null : t('patTail', { tail: `****${pat.patTail}` }),
     ].filter(part => part !== null)
     return <p style={bodyStyle}>{parts.join(' · ')}</p>
   }
@@ -1420,26 +1537,22 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
             </>
           ) : null}
 
-          <h3 style={quotaTitleStyle}>{t('accountHeading')}</h3>
-          <div style={rowStyle}>
-            <div style={statusStyle} role="status" aria-busy={status === undefined}>
-              <span aria-hidden="true" style={dotStyle(status === undefined ? 'loading' : status.status)} />
-              <span>{label}</span>
-            </div>
-            <button type="button" style={buttonStyle} disabled={busy} onClick={() => { void manualRefresh() }}>
-              {busy ? t('refreshing') : t('refresh')}
-            </button>
-            {status?.status !== 'signed-in' || status.authKey === undefined
-              ? null
-              : <>
-                  <button type="button" style={buttonStyle} disabled={busy || patBusy} onClick={beginReplace}>
-                    {t('patReplace')}
-                  </button>
-                  <button type="button" style={buttonStyle} disabled={busy || patBusy} onClick={() => { void clearPat() }}>
-                    {patBusy ? t('patClearing') : t('patClear')}
-                  </button>
-                </>}
-          </div>
+          {status?.status !== 'signed-in'
+            ? <div style={accountStatusRowStyle}>
+                <div style={statusStyle} role="status" aria-busy={status === undefined}>
+                  <span aria-hidden="true" style={dotStyle(status === undefined ? 'loading' : status.status)} />
+                  <span>{label}</span>
+                </div>
+                <button
+                  type="button"
+                  style={{ ...buttonStyle, marginLeft: 'auto' }}
+                  disabled={busy}
+                  onClick={() => { void manualRefresh() }}
+                >
+                  {busy ? t('refreshing') : t('refresh')}
+                </button>
+              </div>
+            : null}
           {readFailure === undefined && writeFailure === undefined || signedInState === undefined
             ? null
             : <p style={errorStyle}>{t('statusRefreshFailed', {
@@ -1449,25 +1562,86 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
             })}</p>}
           {status?.status === 'signed-in'
             ? <>
-                {status.pat === undefined ? null : patSummaryLine(status.pat)}
+                <div style={accountToolbarStyle}>
+                  <label
+                    style={accountFieldLabelStyle}
+                    {...savedPats.length > 0 ? { htmlFor: `qoder-pat-select-${currentVariant.id}` } : {}}
+                  >
+                    <span aria-hidden="true" style={dotStyle('signed-in')} />
+                    {t('patAccounts')}
+                  </label>
+                  {savedPats.length > 0
+                    ? <select
+                        id={`qoder-pat-select-${currentVariant.id}`}
+                        value={status.activePatId ?? ''}
+                        disabled={busy || patBusy}
+                        onChange={event => {
+                          const id = event.target.value
+                          if (id !== '') void switchPat(id)
+                        }}
+                        style={patSelectStyle}
+                      >
+                        {savedPats.map(profile => (
+                          <option key={profile.id} value={profile.id}>
+                            {profile.label ?? (profile.patTail === undefined ? profile.id : `****${profile.patTail}`)}
+                          </option>
+                        ))}
+                      </select>
+                    : <span style={bodyStyle}>
+                        {status.pat?.patTail === undefined ? t('signedIn') : `****${status.pat.patTail}`}
+                      </span>}
+                  {status.authKey === undefined
+                    ? null
+                    : <>
+                        <button type="button" style={buttonStyle} disabled={busy || patBusy} onClick={beginAddPat}>
+                          {patBusy && patAction === 'save' ? t('patSaving') : t('patAdd')}
+                        </button>
+                        {savedPats.length > 1
+                          ? <button
+                              type="button"
+                              style={buttonStyle}
+                              disabled={busy || patBusy || status.activePatId === undefined}
+                              onClick={() => {
+                                const id = status.activePatId
+                                if (id !== undefined) void removePat(id)
+                              }}
+                            >
+                              {patBusy && patAction === 'remove' ? t('patRemoving') : t('patRemove')}
+                            </button>
+                          : null}
+                        {savedPats.length > 0
+                          ? <button type="button" style={buttonStyle} disabled={busy || patBusy} onClick={() => { void clearPat() }}>
+                              {patBusy && patAction === 'clear' ? t('patClearing') : t('patClear')}
+                            </button>
+                          : null}
+                      </>}
+                </div>
+                <div style={accountMetaRowStyle}>
+                  {status.pat === undefined ? null : patSummaryLine(status.pat)}
+                </div>
                 {replacing ? patEntry() : null}
                 {status.jobTokenRefreshedAt === undefined
                   ? null
                   : <p style={bodyStyle}>{t('jobTokenRefreshed', { time: formatTime(status.jobTokenRefreshedAt) })}</p>}
-                {status.catalog === undefined
-                  ? null
-                  : <div style={rowStyle}>
-                      <span style={bodyStyle}>
+                <div style={accountMetaRowStyle}>
+                  {status.catalog === undefined
+                    ? null
+                    : <span style={bodyStyle}>
                         {status.catalog.source === 'live' && status.catalog.fetchedAt !== undefined
                           ? t('catalogLive', { time: formatTime(status.catalog.fetchedAt) })
                           : status.catalog.source === 'saved' && status.catalog.fetchedAt !== undefined
                             ? t('catalogSaved', { time: formatTime(status.catalog.fetchedAt) })
                             : t('catalogFallback')}
-                      </span>
-                      <button type="button" style={buttonStyle} disabled={busy} onClick={() => { void refreshModels() }}>
-                        {busy ? t('refreshingModels') : t('refreshModels')}
-                      </button>
-                    </div>}
+                      </span>}
+                  <button
+                    type="button"
+                    style={{ ...buttonStyle, marginLeft: 'auto' }}
+                    disabled={busy}
+                    onClick={() => { void refreshAll() }}
+                  >
+                    {busy ? t('refreshing') : t('refresh')}
+                  </button>
+                </div>
                 {status.catalog?.error === undefined
                   ? null
                   : <p style={errorStyle}>{t('catalogError', { message: status.catalog.error })}</p>}

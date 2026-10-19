@@ -7,7 +7,7 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
 import SettingsProvider from '@deepseek-ai/dsh-settings'
 import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
-import { QoderCredentialStore, qoderCredentialIdentity } from '../src/auth.ts'
+import { qoderCredentialId, QoderCredentialStore, qoderCredentialIdentity } from '../src/auth.ts'
 import { fingerprintModel } from '../src/probe-store.ts'
 import { normalizeQoderModels } from '../src/qoder/catalog.ts'
 import { modelInfoOf } from '../src/upstream.ts'
@@ -96,18 +96,37 @@ function credentialDocument(pat: string, region: 'china' | 'global' = 'china'): 
   return JSON.stringify({ version: 2, pat, region, savedAt: Date.now() })
 }
 
+/** A v3 document with several saved tokens, one of them active. */
+function multiCredentialDocument(activePat: string): string {
+  return JSON.stringify({
+    version: 3,
+    activeId: qoderCredentialId(activePat),
+    credentials: [PAT_A, PAT_B].map(pat => ({
+      id: qoderCredentialId(pat),
+      pat,
+      region: 'china',
+      savedAt: Date.now(),
+    })),
+  })
+}
+
 /** The model-list envelope the transport's `normalizeQoderModels` parses. */
 function catalogEnvelope(modelId: string, name: string): string {
+  return catalogEnvelopeMany([{ id: modelId, name }])
+}
+
+/** A model-list envelope with several rows (a per-account roster can differ). */
+function catalogEnvelopeMany(rows: readonly { id: string; name: string }[]): string {
   return JSON.stringify({
-    assistant: [{
-      key: modelId,
+    assistant: rows.map(row => ({
+      key: row.id,
       enable: true,
-      display_name: name,
+      display_name: row.name,
       max_input_tokens: 100_000,
       max_output_tokens: 1_000,
       is_vl: true,
       price_factor: 1,
-    }],
+    })),
   })
 }
 
@@ -135,6 +154,8 @@ interface UpstreamState {
   hangListFor: () => string | undefined
   /** Which roster the user's model list answers with. */
   rosterFor: (user: string) => { id: string; name: string }
+  /** Extra rows appended to that user's roster (e.g. a per-account-only model). */
+  extraRosterFor?: (user: string) => readonly { id: string; name: string }[]
   /** Count of model-list requests seen, so tests can pin "no re-fetch". */
   noteList: () => void
 }
@@ -175,7 +196,8 @@ function qoderFetch(state: UpstreamState): (url: string | URL, init?: RequestIni
         })
       }
       const roster = state.rosterFor(user)
-      return jsonResponse(JSON.parse(catalogEnvelope(roster.id, roster.name)))
+      const rows = [roster, ...state.extraRosterFor?.(user) ?? []]
+      return jsonResponse(JSON.parse(catalogEnvelopeMany(rows)))
     }
     if (href.includes('/api/v2/quota/usage')) {
       return jsonResponse({
@@ -391,6 +413,37 @@ describe('catalog lifecycle', () => {
     await vi.waitFor(async () => {
       expect((await ctx.llm.listModels('qoder')).map(model => model.id)).toEqual(['account-b-model'])
     }, { timeout: 20_000 })
+  }, 45_000)
+
+  it('keeps the model switches shared when the active account changes', async () => {
+    const { root, cnPath } = await useRoot()
+    await writeFile(cnPath, multiCredentialDocument(PAT_A))
+    // One configuration for both accounts: the disabled list is written once
+    // and is not a property of whichever PAT happens to be active.
+    await writeFile(join(root, 'settings.json'), JSON.stringify({ disabledModelsCN: ['b-disabled'] }))
+    vi.stubGlobal('fetch', qoderFetch({
+      fail: () => false,
+      hangListFor: () => undefined,
+      rosterFor: user => user === USER_B
+        ? { id: 'b-kept', name: 'B kept' }
+        : { id: 'a-model', name: 'A' },
+      extraRosterFor: user => user === USER_B ? [{ id: 'b-disabled', name: 'B disabled' }] : [],
+      noteList: () => {},
+    }))
+
+    const ctx = await boot()
+    await vi.waitFor(async () => {
+      expect((await ctx.llm.listModels('qoder')).map(model => model.id)).toEqual(['a-model'])
+    }, { timeout: 10_000 })
+
+    // Move the active pointer to the other saved token — the list itself stays.
+    await writeFile(cnPath, multiCredentialDocument(PAT_B))
+    await vi.waitFor(async () => {
+      expect((await ctx.llm.listModels('qoder')).map(model => model.id)).toEqual(['b-kept'])
+    }, { timeout: 20_000 })
+    // `b-disabled` is on B's roster but off in the shared configuration, so it
+    // must stay hidden after the switch.
+    expect((await ctx.llm.listModels('qoder')).map(model => model.id)).not.toContain('b-disabled')
   }, 45_000)
 
   /**

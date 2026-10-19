@@ -55,29 +55,60 @@ export const QODER_GLOBAL_AUTH_PATH = '/plugins/dsh-qoder-connect/global/auth'
  * One action the PAT route accepts.
  *
  * `save-pat` validates the pasted token against the variant's region and, only
- * on success, persists it; `clear` removes the stored credential. There is no
- * device flow and no credential import: the token is the whole auth surface.
+ * on success, appends it to the saved list and makes it active; `activate`
+ * switches to another saved entry; `remove` deletes one saved entry; `clear`
+ * removes every saved credential. There is no device flow and no credential
+ * import: the token is the whole auth surface.
+ *
+ * All of these are writes — `activate` changes which account signs later
+ * requests — so the route requires the in-process key even for the two that do
+ * not touch a token's bytes.
  */
-export type QoderAuthAction = 'save-pat' | 'clear'
+export type QoderAuthAction = 'save-pat' | 'activate' | 'remove' | 'clear'
 
 /** Request body accepted by the PAT route. */
 export interface QoderAuthRequest {
   action: QoderAuthAction
   /** The token to validate and store; required for `save-pat`. */
   pat?: string
+  /** Optional display label for a saved entry; `save-pat` only. */
+  label?: string
+  /** Target saved entry; required for `activate` and `remove`. */
+  id?: string
 }
 
 /** Where the credential in effect came from. */
 export type QoderCredentialSource = 'card' | 'env' | 'cli'
 
 /**
- * Redacted summary of one variant's PAT.
+ * One saved PAT, redacted for the switch select.
+ *
+ * Never the token itself: the id is a one-way hash prefix, the label is
+ * display copy, and the tail is the last four characters — enough to tell two
+ * saved tokens apart, not enough to misuse one.
+ */
+export interface QoderPatProfile {
+  id: string
+  /** Optional display label supplied when the token was saved. */
+  label?: string
+  /** Last four characters of the token. */
+  patTail?: string
+  /** When this token was saved, epoch milliseconds. */
+  savedAtMs?: number
+}
+
+/**
+ * Redacted summary of one variant's active PAT.
  *
  * Never the token itself: the browser half displays where the credential came
  * from, when it was saved, and the last four characters — enough to tell two
  * tokens apart, not enough to misuse one.
  */
 export interface QoderPatSummary {
+  /** Local id of the saved entry in effect; absent for the environment token. */
+  id?: string
+  /** Display label of the saved entry in effect, when it carries one. */
+  label?: string
   source: QoderCredentialSource
   /** When the stored token was saved, epoch milliseconds; absent for env fallback. */
   savedAtMs?: number
@@ -232,6 +263,16 @@ export type QoderWebStatus =
     region?: QoderRegion
     /** Redacted summary of the PAT in effect. */
     pat?: QoderPatSummary
+    /**
+     * Every saved token for this variant, newest first, redacted.
+     *
+     * One entry means the card has nothing to switch; two or more render the
+     * account select. The list is variant-scoped, like the credential file
+     * itself: a token minted for one region is never offered to the other.
+     */
+    patProfiles?: readonly QoderPatProfile[]
+    /** The saved entry in effect; absent when the token comes from the environment. */
+    activePatId?: string
     credits?: QoderWebCredits
     creditsError?: string
     /** The models the plugin serves, as catalog snapshots. */

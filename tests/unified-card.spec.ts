@@ -147,7 +147,7 @@ describe('Unified Qoder Plugin Card', () => {
     expect(json).toContain(en.variantTabGlobal)
 
     // 3. Default active is CN (signed-in in our mock)
-    expect(json).toContain(t('patTail', { tail: '****1111' }))
+    expect(json).toContain('****1111')
   })
 
   it('switches between China and Global tabs when clicked', async () => {
@@ -174,7 +174,7 @@ describe('Unified Qoder Plugin Card', () => {
     await act(async () => { cnTab.props.onClick() })
 
     json = JSON.stringify(view!.toJSON())
-    expect(json).toContain(t('patTail', { tail: '****1111' }))
+    expect(json).toContain('****1111')
   })
 
   it('reactively enables sidebar quota toggle when user signs in or saves PAT', async () => {

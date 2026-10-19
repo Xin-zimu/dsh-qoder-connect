@@ -1,5 +1,6 @@
 /**
- * PAT route: saves (validate-then-persist) or clears one variant's token.
+ * PAT route: saves (validate-then-persist), switches, removes, or clears the
+ * tokens of one variant.
  *
  * The state-changing endpoints the plugin exposes share one guard shape — a
  * loopback Host and Origin, plus the in-process key the card receives with its
@@ -26,19 +27,24 @@ import type { QoderAuthStatus } from './auth.ts'
 /** Largest control body accepted; a Personal Access Token is a short string. */
 const MAX_BODY_BYTES = 16 * 1024
 
-/** Outcome of a save attempt: stored, or refused with a stable reason. */
+/** Outcome of a save/activate/remove attempt: stored, or refused with a stable reason. */
 export type QoderAuthSaveResult =
   | { ok: true; status: QoderAuthStatus }
-  | { ok: false; error: 'qoder_invalid_pat' | 'qoder_missing_pat' }
+  | { ok: false; error: 'qoder_invalid_pat' | 'qoder_missing_pat' | 'qoder_unknown_pat' }
 
 /** Constructor dependencies. */
 export interface QoderAuthRouteOptions {
   /**
    * Validate one pasted token against this variant's region and, only on
-   * success, persist it. The route never decides validity itself.
+   * success, persist it and make it active. The route never decides validity
+   * itself.
    */
-  save: (pat: string) => Promise<QoderAuthSaveResult>
-  /** Remove the stored credential. */
+  save: (pat: string, label?: string) => Promise<QoderAuthSaveResult>
+  /** Switch to one already-saved token. */
+  activate: (id: string) => Promise<QoderAuthSaveResult>
+  /** Remove one saved token; the host moves the active pointer. */
+  remove: (id: string) => Promise<QoderAuthSaveResult>
+  /** Remove every saved token (`logout`). */
   clear: () => Promise<void>
   /**
    * Route path to mount. Defaults to the China variant's path so callers that
@@ -81,7 +87,15 @@ function parseRequest(text: string): QoderAuthRequest | undefined {
   if (action === 'save-pat') {
     const pat = wrapped['pat']
     if (typeof pat !== 'string' || pat.trim() === '') return undefined
-    return { action, pat }
+    const label = wrapped['label']
+    // A label is display copy, never a credential: a short string or nothing.
+    if (label !== undefined && (typeof label !== 'string' || label.length > 200)) return undefined
+    return { action, pat, ...label === undefined ? {} : { label } }
+  }
+  if (action === 'activate' || action === 'remove') {
+    const id = wrapped['id']
+    if (typeof id !== 'string' || id.trim() === '') return undefined
+    return { action, id: id.trim() }
   }
   return undefined
 }
@@ -118,7 +132,7 @@ function keyMatches(expected: string, presented: string | undefined): boolean {
  * The PAT route's handler, extracted so tests can mount it on a bare server
  * with a known key.
  *
- * @param deps - the save/clear operations for one variant.
+ * @param deps - the save/activate/remove/clear operations for one variant.
  * @param key - the in-process control key this route requires.
  * @returns the Node request handler.
  */
@@ -156,9 +170,18 @@ export function qoderAuthHandler(
         return
       }
       // A refused token is an answer, not a transport failure: the card reads
-      // the stable `qoder_invalid_pat` code and re-prompts, so both outcomes
-      // travel as 200 with `ok` carrying the verdict.
-      json(res, 200, await deps.save(request.pat as string))
+      // the stable `qoder_invalid_pat` / `qoder_unknown_pat` code and
+      // re-prompts, so both outcomes travel as 200 with `ok` carrying the
+      // verdict.
+      if (request.action === 'activate') {
+        json(res, 200, await deps.activate(request.id as string))
+        return
+      }
+      if (request.action === 'remove') {
+        json(res, 200, await deps.remove(request.id as string))
+        return
+      }
+      json(res, 200, await deps.save(request.pat as string, request.label))
     } catch (error: unknown) {
       json(res, 200, { ok: false, error: safeMessage(error) })
     }

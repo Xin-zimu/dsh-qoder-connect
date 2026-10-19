@@ -184,6 +184,22 @@ describe('Qoder plugin card', () => {
     expect(JSON.parse(String(posts[0]!.init.body))).toEqual({ action: 'save-pat', pat: 'pt-pasted' })
   })
 
+  it('sends an optional label when a second token is added', async () => {
+    await mount()
+    await press(en.patAdd)
+    expect(inputs()).toHaveLength(2)
+    await typePat('pt-second')
+    await act(async () => {
+      view!.root.findAllByType('input')[1]!.props.onChange({ target: { value: '  工作号  ' } })
+    })
+    await press(en.patSave)
+    expect(JSON.parse(String(posts[0]!.init.body))).toEqual({
+      action: 'save-pat',
+      pat: 'pt-second',
+      label: '工作号',
+    })
+  })
+
   it('reports the save lifecycle: busy label, then the signed-in body takes over', async () => {
     signedOut()
     holdPosts = true
@@ -198,7 +214,7 @@ describe('Qoder plugin card', () => {
     signedIn()
     await releasePosts({ ok: true, status: 'saved' })
     expect(inputs()).toHaveLength(0)
-    expect(buttonLabels()).toContain(en.patReplace)
+    expect(buttonLabels()).toContain(en.patAdd)
   })
 
   it('renders the stable refusal codes as the re-generate prompt, not raw wire text', async () => {
@@ -240,26 +256,86 @@ describe('Qoder plugin card', () => {
   // ---- signed-in arm: summary, replace, clear ------------------------------
 
   it('summarizes the credential in effect without ever spelling the token', async () => {
+    signedIn({ patProfiles: [{ id: 'id-one', patTail: 'abcd' }], activePatId: 'id-one' })
     await mount()
     const tree = JSON.stringify(view!.toJSON())
-    expect(tree).toContain(t('patTail', { tail: '****abcd' }))
+    expect(tree).toContain('****abcd')
     expect(tree).toContain(en.patSourceCard)
     expect(tree).not.toContain('pt-test')
-    expect(buttonLabels()).toContain(en.patReplace)
+    expect(buttonLabels()).toContain(en.patAdd)
     expect(buttonLabels()).toContain(en.patClear)
   })
 
-  it('Replace PAT opens a cancellable entry over the live document', async () => {
+  it('Add PAT opens a cancellable entry over the live document', async () => {
     await mount()
-    await press(en.patReplace)
-    expect(inputs()).toHaveLength(1)
+    await press(en.patAdd)
+    expect(inputs()).toHaveLength(2) // PAT + optional label
     await press(en.cancel)
     expect(inputs()).toHaveLength(0)
     // Canceling never touches the route: the stored PAT is still in effect.
     expect(posts).toEqual([])
   })
 
+  it('renders the saved-PAT select and switches accounts through the route', async () => {
+    const profiles = [
+      { id: 'id-two', label: '工作号', patTail: '2222', savedAtMs: 1_700_000_100_000 },
+      { id: 'id-one', patTail: '1111', savedAtMs: 1_700_000_000_000 },
+    ]
+    signedIn({
+      patProfiles: profiles,
+      activePatId: 'id-two',
+      pat: { id: 'id-two', label: '工作号', source: 'card', patTail: '2222', savedAtMs: 1_700_000_100_000 },
+    })
+    holdPosts = true
+    await mount()
+    const select = view!.root.findAllByType('select')[0]
+    expect(select).toBeDefined()
+    expect(view!.root.findAllByType('option')).toHaveLength(2)
+    const tree = JSON.stringify(view!.toJSON())
+    expect(tree).toContain('工作号')
+    expect(tree).toContain('****1111')
+
+    await act(async () => { select!.props.onChange({ target: { value: 'id-one' } }) })
+    expect(JSON.parse(String(posts[0]!.init.body))).toEqual({ action: 'activate', id: 'id-one' })
+    // No extra "switching" copy is rendered: the disabled select is the
+    // in-flight signal, so the toolbar cannot be pushed onto a second line.
+    expect(view!.root.findAllByType('select')[0]!.props.disabled).toBe(true)
+
+    // The host's post-switch document reports the other entry as active; the
+    // card re-reads it before the in-flight state clears.
+    signedIn({ patProfiles: profiles, activePatId: 'id-one' })
+    await releasePosts({ ok: true })
+    expect(view!.root.findAllByType('select')[0]!.props.value).toBe('id-one')
+  })
+
+  it('Remove current posts the remove action for the active entry', async () => {
+    signedIn({
+      patProfiles: [
+        { id: 'id-two', patTail: '2222' },
+        { id: 'id-one', patTail: '1111' },
+      ],
+      activePatId: 'id-one',
+    })
+    holdPosts = true
+    await mount()
+    await press(en.patRemove)
+    expect(JSON.parse(String(posts[0]!.init.body))).toEqual({ action: 'remove', id: 'id-one' })
+    expect(buttonLabels()).toContain(en.patRemoving)
+    signedIn()
+    await releasePosts({ ok: true })
+  })
+
+  it('shows the saved-PAT select even for a single token', async () => {
+    signedIn({ patProfiles: [{ id: 'id-one', patTail: 'abcd' }], activePatId: 'id-one' })
+    await mount()
+    const selects = view!.root.findAllByType('select')
+    expect(selects).toHaveLength(1)
+    expect(view!.root.findAllByType('option')).toHaveLength(1)
+    expect(selects[0]!.props.value).toBe('id-one')
+  })
+
   it('Clear PAT posts the clear action and re-reads to the signed-out entry', async () => {
+    signedIn({ patProfiles: [{ id: 'id-one', patTail: 'abcd' }], activePatId: 'id-one' })
     holdPosts = true
     await mount()
     await press(en.patClear)
@@ -482,7 +558,7 @@ describe('Qoder plugin card', () => {
     await press(en.refresh)
     const tree = JSON.stringify(view!.toJSON())
     expect(tree).toContain(en.statusRefreshFailed.split('{message}')[0]!)
-    expect(tree).toContain(en.signedIn) // the document is still rendered
+    expect(tree).toContain(en.patAccounts) // the document is still rendered
   })
 
   it('turns an unreadable 200 into the error arm rather than dereferencing it', async () => {
