@@ -88,7 +88,24 @@ export const KIND_STATUS: Readonly<Record<UpstreamErrorKind, number>> = {
 /** The chat-completions answer: a streaming `Response`, or a classified failure. */
 export type QoderChatResult =
   | { ok: true; response: Response }
-  | { ok: false; status: number; kind: UpstreamErrorKind; message: string }
+  | {
+    ok: false
+    status: number
+    kind: UpstreamErrorKind
+    message: string
+    /**
+     * The upstream's own "try again in N ms" answer (Qoder's queue body carries
+     * `retryAfterSeconds`, and a plain 429 may carry `Retry-After`).
+     *
+     * It has to survive this layer to be usable: the shim turns it into the
+     * `Retry-After` header and the `[retry-after=<n>s]` message tag, and the
+     * adapter reads that tag back into `failure.providerRetryAfterMs` — the
+     * only field the harness retry policy honors. Dropped here, the host can
+     * only fall back to its own backoff (observed: 19134ms against an upstream
+     * that asked for 30s, so every retry hit the still-closed window).
+     */
+    retryAfterMs?: number
+  }
 
 /** Provenance of the last successful catalog fetch. */
 export interface QoderCatalogFetch {
@@ -648,6 +665,20 @@ class ChunkEncoder {
   }
 }
 
+/**
+ * Normalize a provider retry hint for {@link QoderChatResult}.
+ *
+ * Only a positive finite number is a hint: the truncation keeps the shim's
+ * `Retry-After` header an integer number of seconds, and `undefined` keeps the
+ * optional field off the result entirely (no `retryAfterMs: undefined` noise in
+ * the shim's error body).
+ */
+export function retryHintOf(value: unknown): { retryAfterMs?: number } {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? { retryAfterMs: Math.floor(value) }
+    : {}
+}
+
 /** Turn any thrown failure into the shim's classified pre-stream result. */
 function failureResult(error: unknown): QoderChatResult {
   if (error instanceof UpstreamRequestError) {
@@ -658,7 +689,7 @@ function failureResult(error: unknown): QoderChatResult {
     const status = typeof error.failure.status === 'number' && error.failure.status >= 100 && error.failure.status <= 599
       ? error.failure.status
       : KIND_STATUS[kind]
-    return { ok: false, status, kind, message: error.failure.message }
+    return { ok: false, status, kind, message: error.failure.message, ...retryHintOf(error.failure.providerRetryAfterMs) }
   }
   return { ok: false, status: 502, kind: 'server', message: String(error) }
 }
@@ -872,7 +903,13 @@ export class QoderUpstreamClient {
         if (earlyFailure !== undefined) {
           await iterator.return?.()
           const kind = kindFromQoderFailure(earlyFailure)
-          return { ok: false, status: earlyFailure.status ?? KIND_STATUS[kind], kind, message: earlyFailure.message }
+          return {
+            ok: false,
+            status: earlyFailure.status ?? KIND_STATUS[kind],
+            kind,
+            message: earlyFailure.message,
+            ...retryHintOf(earlyFailure.providerRetryAfterMs),
+          }
         }
       }
       const stream = this.bodyStream(iterator, first, encoder)

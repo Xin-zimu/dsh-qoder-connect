@@ -308,6 +308,40 @@ describe('chatStream failure classification before the response exists', () => {
     // The iterator is released rather than left dangling.
     expect(fake.closed()).toBe(true)
   })
+
+  it('carries the provider retry hint out of a thrown transport failure', async () => {
+    // The transport already computes this from Qoder's `retryAfterSeconds`
+    // (errors.ts); it only has to survive into the shim's classified result so
+    // the shim can answer `Retry-After` and the adapter can rebuild
+    // `failure.providerRetryAfterMs` for the host retry policy.
+    const { client } = makeClient({
+      throwAt: 'stream',
+      error: new QoderLlmError('queue saturated', 'RATE_LIMIT', { status: 403, providerRetryAfterMs: 30000 }),
+    })
+    const result = await client.chatStream(USER_BODY)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.retryAfterMs).toBe(30000)
+  })
+
+  it('carries the provider retry hint out of a terminal first chunk', async () => {
+    const failure = { message: 'queue saturated', code: 'RATE_LIMIT', status: 403, providerRetryAfterMs: 30000 }
+    const { client } = makeClient({
+      chunks: [{ type: 'finish', reason: { kind: 'error', failure } }],
+    })
+    const result = await client.chatStream(USER_BODY)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.retryAfterMs).toBe(30000)
+  })
+
+  it('omits retryAfterMs when the failure carries no hint', async () => {
+    const { client } = makeClient({
+      throwAt: 'stream',
+      error: new QoderLlmError('upstream down', 'SERVER'),
+    })
+    const result = await client.chatStream(USER_BODY)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect('retryAfterMs' in result).toBe(false)
+  })
 })
 
 describe('kindFromQoderFailure and classifyUpstreamError', () => {

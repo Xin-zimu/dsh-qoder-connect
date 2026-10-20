@@ -64,14 +64,78 @@ function isJsonContentType(req: IncomingMessage): boolean {
   return typeof type === 'string' && type.trim().toLowerCase().startsWith('application/json')
 }
 
-function writeJson(res: ServerResponse, status: number, body: unknown): void {
+function writeJson(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void {
   const payload = JSON.stringify(body)
-  res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) })
+  res.writeHead(status, {
+    'Content-Type': 'application/json',
+    'Content-Length': Buffer.byteLength(payload),
+    ...headers,
+  })
   res.end(payload)
 }
 
-function writeOpenAIError(res: ServerResponse, status: number, kind: string, message: string): void {
-  writeJson(res, status, { error: { message, type: kind, code: kind } })
+/**
+ * The prefix the shim stamps onto a failure message carrying an upstream retry
+ * hint.
+ *
+ * The hint has to cross two text-only boundaries to reach the harness retry
+ * policy: pi-ai flattens an HTTP failure to its message and the adapter may only
+ * rewrite that message. So the marker is written here, in front of the 400-byte
+ * excerpt (never inside it, where truncation could cut it off), and read back by
+ * {@link retryAfterFromMessage}.
+ */
+export const RETRY_AFTER_TAG = /\[retry-after=(\d+)s\]/u
+
+/**
+ * The upstream's retry hint, in milliseconds, recovered from a shim failure
+ * message.
+ *
+ * The tagged form is the contract this plugin writes itself. The untagged
+ * `retryAfterSeconds` form is the fallback for a message the transport built
+ * before the tag existed (an installed older shim, or a caller that composed the
+ * message itself), and is the same field {@link qoderQueueSignal} reads.
+ */
+export function retryAfterFromMessage(message: string): number | undefined {
+  const tagged = RETRY_AFTER_TAG.exec(message)
+  if (tagged !== null) {
+    const seconds = Number(tagged[1])
+    return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : undefined
+  }
+  const body = /"retryAfterSeconds"\s*:\s*(\d+)/u.exec(message)
+  if (body !== null) {
+    const seconds = Number(body[1])
+    return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : undefined
+  }
+  return undefined
+}
+
+/**
+ * Seconds an OpenAI `Retry-After` header carries: the ceiling of the hint, so a
+ * client that honors it never returns before the upstream's window closed.
+ */
+function retryAfterSeconds(retryAfterMs: number): number {
+  return Math.max(1, Math.ceil(retryAfterMs / 1000))
+}
+
+function writeOpenAIError(res: ServerResponse, status: number, kind: string, message: string, retryAfterMs?: number): void {
+  const hint = typeof retryAfterMs === 'number' && Number.isFinite(retryAfterMs) && retryAfterMs > 0
+    ? Math.floor(retryAfterMs)
+    : undefined
+  if (hint === undefined) {
+    writeJson(res, status, { error: { message, type: kind, code: kind } })
+    return
+  }
+  const seconds = retryAfterSeconds(hint)
+  writeJson(
+    res,
+    status,
+    { error: { message: `[retry-after=${seconds}s] ${message}`, type: kind, code: kind } },
+    // `Retry-After` is the standard (RFC 9110, whole seconds); `retry-after-ms`
+    // is what the OpenAI SDKs read first and lets a client keep millisecond
+    // precision. The harness adapter reads neither — it reads the tag above —
+    // but any other client of this loopback endpoint gets the standard answer.
+    { 'Retry-After': String(seconds), 'retry-after-ms': String(hint) },
+  )
 }
 
 /** Read a request body with a size cap; over-limit bodies fail the request. */
@@ -234,6 +298,7 @@ export function createQoderShim(options: QoderShimOptions): QoderShim {
         KIND_STATUS[result.kind],
         result.kind,
         `${providerId} upstream ${result.kind} (http ${KIND_STATUS[result.kind]}): ${result.message.slice(0, 400)}`,
+        result.retryAfterMs,
       )
       return
     }

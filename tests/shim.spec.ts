@@ -473,6 +473,71 @@ describe('Qoder shim error mapping', () => {
     expect(body.error.message).not.toMatch(/\b(?:401|403)\b/u)
   })
 
+  it('carries the upstream retry hint as standard headers and a message tag', async () => {
+    // Qoder's queue answer asks for 30s; the shim must not flatten that away.
+    // The tag exists because the harness's pi-ai adapter drops HTTP headers, so
+    // the adapter reads it back out of the message and sets
+    // `failure.providerRetryAfterMs` — the field the retry policy honors.
+    const harness = await startShim(() => ({
+      ok: false,
+      status: 403,
+      kind: 'soft_rate',
+      message: 'Qoder service returned upstream error status throttled: {"code":"10605","retryAfterSeconds":30}',
+      retryAfterMs: 30000,
+    }))
+    const response = await fetch(`${harness.shim.baseUrl()}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', authorization: `Bearer ${harness.shim.token()}` },
+      body: JSON.stringify({ model: 'auto', messages: [{ role: 'user', content: 'hi' }] }),
+    })
+    expect(response.status).toBe(429)
+    expect(response.headers.get('retry-after')).toBe('30')
+    expect(response.headers.get('retry-after-ms')).toBe('30000')
+    const body = await response.json() as { error: { message: string, type: string } }
+    expect(body.error.type).toBe('soft_rate')
+    expect(body.error.message.startsWith('[retry-after=30s] ')).toBe(true)
+    // The upstream's 403 must not reappear in the text (pi-ai reads 401/403 as
+    // AUTH before it reads 429).
+    expect(body.error.message).not.toMatch(/\b(?:401|403)\b/u)
+  })
+
+  it('rounds a sub-second hint up and never emits Retry-After: 0', async () => {
+    const harness = await startShim(() => ({
+      ok: false,
+      status: 429,
+      kind: 'soft_rate',
+      message: 'slow down',
+      retryAfterMs: 400,
+    }))
+    const response = await fetch(`${harness.shim.baseUrl()}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', authorization: `Bearer ${harness.shim.token()}` },
+      body: JSON.stringify({ model: 'auto', messages: [{ role: 'user', content: 'hi' }] }),
+    })
+    expect(response.status).toBe(429)
+    expect(response.headers.get('retry-after')).toBe('1')
+    expect(response.headers.get('retry-after-ms')).toBe('400')
+  })
+
+  it('sends no retry headers when the failure carries no hint', async () => {
+    const harness = await startShim(() => ({
+      ok: false,
+      status: 502,
+      kind: 'server',
+      message: 'upstream exploded',
+    }))
+    const response = await fetch(`${harness.shim.baseUrl()}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', authorization: `Bearer ${harness.shim.token()}` },
+      body: JSON.stringify({ model: 'auto', messages: [{ role: 'user', content: 'hi' }] }),
+    })
+    expect(response.status).toBe(502)
+    expect(response.headers.get('retry-after')).toBeNull()
+    expect(response.headers.get('retry-after-ms')).toBeNull()
+    const body = await response.json() as { error: { message: string } }
+    expect(body.error.message.startsWith('[retry-after=')).toBe(false)
+  })
+
   it('truncates a runaway upstream message to 400 characters', async () => {
     const long = 'x'.repeat(1000)
     const harness = await startShim(() => ({

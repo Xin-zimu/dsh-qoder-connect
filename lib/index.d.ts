@@ -954,6 +954,18 @@ type QoderChatResult = {
   status: number;
   kind: UpstreamErrorKind;
   message: string;
+  /**
+   * The upstream's own "try again in N ms" answer (Qoder's queue body carries
+   * `retryAfterSeconds`, and a plain 429 may carry `Retry-After`).
+   *
+   * It has to survive this layer to be usable: the shim turns it into the
+   * `Retry-After` header and the `[retry-after=<n>s]` message tag, and the
+   * adapter reads that tag back into `failure.providerRetryAfterMs` — the
+   * only field the harness retry policy honors. Dropped here, the host can
+   * only fall back to its own backoff (observed: 19134ms against an upstream
+   * that asked for 30s, so every retry hit the still-closed window).
+   */
+  retryAfterMs?: number;
 };
 /** Provenance of the last successful catalog fetch. */
 interface QoderCatalogFetch {

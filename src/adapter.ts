@@ -11,7 +11,7 @@ import { createProvider } from '@earendil-works/pi-ai'
 import type { Api, AuthContext, CredentialStore, Model, ModelThinkingLevel, Provider, ThinkingLevelMap } from '@earendil-works/pi-ai'
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy'
 import { resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
-import type { LlmModelInfo, LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, LlmModelInfo, LlmResolvedModelInfo, PreparedAdapterCall, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
 import type { ResolvedPiAiProviderProfile } from '@deepseek-ai/dsh-llm-pi-ai'
 import { requestImageDimensions } from '@deepseek-ai/dsh-attachment'
@@ -19,7 +19,7 @@ import type { AttachmentStore, ImageAttachmentRef, ImageRequestTarget } from '@d
 import type { QoderCredentialStore } from './auth.ts'
 import type { QoderCatalog, QoderModelInfo } from './catalog.ts'
 import type { QoderProbeRecord } from './probe-store.ts'
-import type { QoderShim } from './shim.ts'
+import { retryAfterFromMessage, type QoderShim } from './shim.ts'
 import { normalizeCredits } from './upstream.ts'
 
 /** Default provider route owned by this bundle (the China variant). */
@@ -345,6 +345,62 @@ class QoderPiAiAdapter extends PiAiAdapter {
     const info = this.infoFor(model)
     if (info === undefined) return resolved
     return { ...resolved, name: withCatalogDisplay(resolved.name, info) }
+  }
+
+  /**
+   * Carry the upstream's retry hint onto the finish failure.
+   *
+   * `dsh-llm-pi-ai` maps a failed pi-ai turn onto `{ message, code }` before the
+   * chunk reaches the loop: the HTTP status and headers pi-ai's own error object
+   * still holds are flattened away, so `failure.providerRetryAfterMs` — the one
+   * field the harness retry policy honors — never arrives. The policy then falls
+   * back to its local backoff, which is capped (20s in the report that prompted
+   * this) below Qoder's 30-second queue answer, so every retry hits the same
+   * closed window.
+   *
+   * The shim stamps `[retry-after=<n>s]` in front of its error message for this
+   * layer to recover; see `retryAfterFromMessage`. Rewriting only the field,
+   * never the message, keeps the text a human reads unchanged.
+   *
+   * Both entry points are wrapped because `PiAiAdapter` has two of them and the
+   * harness uses the other one: `prepareCall()` returns
+   * `stream: (options) => this.streamWithSnapshot(options, snapshot)`, which
+   * never calls `this.stream`. Overriding `stream` alone is dead code on every
+   * harness request (verified against a live session log: the finish failure
+   * arrived as bare `{ message, code }` while a direct `adapter.stream()` call
+   * carried the hint).
+   */
+  override async *stream(options: GenerateOptions): AsyncGenerator<StreamChunk> {
+    yield* this.withRetryHint(super.stream(options))
+  }
+
+  override async prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<PreparedAdapterCall> {
+    const prepared = await super.prepareCall(provider, model, signal)
+    return {
+      ...prepared,
+      stream: (options: GenerateOptions) => this.withRetryHint(prepared.stream(options)),
+    }
+  }
+
+  /** Re-stamp `failure.providerRetryAfterMs` on every terminal failure chunk. */
+  private async *withRetryHint(inner: AsyncIterable<StreamChunk>): AsyncGenerator<StreamChunk> {
+    for await (const chunk of inner) {
+      if (chunk.type === 'finish') {
+        const { reason } = chunk
+        if ((reason.kind === 'error' || reason.kind === 'aborted')
+          && reason.failure.providerRetryAfterMs === undefined) {
+          const retryAfterMs = retryAfterFromMessage(reason.failure.message)
+          if (retryAfterMs !== undefined) {
+            yield {
+              ...chunk,
+              reason: { ...reason, failure: { ...reason.failure, providerRetryAfterMs: retryAfterMs } },
+            }
+            continue
+          }
+        }
+      }
+      yield chunk
+    }
   }
 
   /**

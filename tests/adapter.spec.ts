@@ -1,4 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
+import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { QODER_PROVIDER, createQoderAdapter, reasoningFields } from '../src/adapter.ts'
 import { QoderCredentialStore } from '../src/auth.ts'
 import { QoderCatalog, type QoderModelInfo } from '../src/catalog.ts'
@@ -218,5 +220,103 @@ describe('reasoningFields', () => {
     expect(result.thinkingLevelMap?.high).toBe('high')
     // The observed `max` is ignored: the declared set is the answer.
     expect(result.thinkingLevelMap?.max).toBeNull()
+  })
+})
+
+/**
+ * The adapter's one job on the failure path: put the upstream's retry hint back
+ * onto `failure.providerRetryAfterMs`, which `dsh-llm-pi-ai` flattens away.
+ */
+describe('Qoder adapter retry-hint recovery', () => {
+  function finishChunk(message: string, extra: Record<string, unknown> = {}): StreamChunk {
+    return {
+      type: 'finish',
+      reason: { kind: 'error', failure: { message, code: 'RATE_LIMIT', ...extra } },
+    } as StreamChunk
+  }
+
+  async function drained(adapter: PiAiAdapter, chunks: StreamChunk[]): Promise<StreamChunk[]> {
+    const stub = vi.spyOn(PiAiAdapter.prototype, 'stream').mockImplementation(async function* () {
+      for (const chunk of chunks) yield chunk
+    })
+    try {
+      const out: StreamChunk[] = []
+      for await (const chunk of adapter.stream({} as never)) out.push(chunk)
+      return out
+    } finally {
+      stub.mockRestore()
+    }
+  }
+
+  it('rebuilds providerRetryAfterMs from the shim message tag', async () => {
+    const { adapter } = createQoderAdapter({
+      catalog: new QoderCatalog([modelInfo()]),
+      store: unusedStore(),
+      shim: fakeShim(),
+    })
+    const out = await drained(adapter, [
+      finishChunk('[retry-after=30s] qoder upstream soft_rate (http 429): throttled'),
+    ])
+    const finish = out.at(-1)
+    expect(finish?.type).toBe('finish')
+    if (finish?.type === 'finish' && finish.reason.kind === 'error') {
+      expect(finish.reason.failure.providerRetryAfterMs).toBe(30000)
+      // The human-readable text is untouched.
+      expect(finish.reason.failure.message).toContain('[retry-after=30s]')
+      expect(finish.reason.failure.code).toBe('RATE_LIMIT')
+    }
+  })
+
+  it('falls back to the untagged retryAfterSeconds body and never overrides an existing hint', async () => {
+    const { adapter } = createQoderAdapter({
+      catalog: new QoderCatalog([modelInfo()]),
+      store: unusedStore(),
+      shim: fakeShim(),
+    })
+    const out = await drained(adapter, [
+      finishChunk('{"retryAfterSeconds":30}', {}),
+      finishChunk('upstream already reported', { providerRetryAfterMs: 5000 }),
+      finishChunk('plain failure'),
+    ])
+    const [untagged, existing, plain] = out
+    if (untagged?.type === 'finish' && untagged.reason.kind === 'error') {
+      expect(untagged.reason.failure.providerRetryAfterMs).toBe(30000)
+    }
+    if (existing?.type === 'finish' && existing.reason.kind === 'error') {
+      expect(existing.reason.failure.providerRetryAfterMs).toBe(5000)
+    }
+    if (plain?.type === 'finish' && plain.reason.kind === 'error') {
+      expect('providerRetryAfterMs' in plain.reason.failure).toBe(false)
+    }
+  })
+
+  it('stamps the hint on the prepareCall stream, which is the path the harness uses', async () => {
+    // `PiAiAdapter.prepareCall()` returns `stream: () => this.streamWithSnapshot(...)`
+    // — it never calls `this.stream`, so overriding `stream` alone is dead code
+    // on every harness request. This exercises the wrapped `prepareCall`.
+    const { adapter } = createQoderAdapter({
+      catalog: new QoderCatalog([modelInfo()]),
+      store: unusedStore(),
+      shim: fakeShim(),
+    })
+    const chunks = [finishChunk('[retry-after=22s] qoder upstream soft_rate (http 429): throttled')]
+    const stub = vi.spyOn(PiAiAdapter.prototype, 'prepareCall').mockResolvedValue({
+      model: { provider: 'qoder', id: 'model' } as never,
+      stream: async function* () {
+        for (const chunk of chunks) yield chunk
+      },
+    })
+    try {
+      const prepared = await adapter.prepareCall('qoder', 'model')
+      const out: StreamChunk[] = []
+      for await (const chunk of prepared.stream({} as never)) out.push(chunk)
+      const finish = out.at(-1)
+      expect(finish?.type).toBe('finish')
+      if (finish?.type === 'finish' && finish.reason.kind === 'error') {
+        expect(finish.reason.failure.providerRetryAfterMs).toBe(22000)
+      }
+    } finally {
+      stub.mockRestore()
+    }
   })
 })
