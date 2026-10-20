@@ -81,7 +81,7 @@
 
 前置条件：
 
-- DSH 核心 `0.1.7-rc.1` 及以上（本插件 peer 依赖 `@deepseek-ai/*` `>=0.1.7-rc.1` 线）；
+- DSH 核心 `0.2.1-rc.1` 及以上（本插件 peer 依赖 `@deepseek-ai/*` `>=0.2.1-rc.1` 线）；
 - Node.js `^22.19.0 || >=24.0.0`（`package.json` engines）；
 - 你自己的 Qoder 账号，以及至少一枚个人访问令牌。
 
@@ -94,6 +94,15 @@ dsh plugin --profile web add dsh-qoder-connect
 
 按你使用的 profile 换 `--profile` 的值（`web` / `desktop` / `tui`，如 `dsh plugin --profile desktop add dsh-qoder-connect`）。装到哪个 profile，数据就落在哪个 profile 目录里，web / desktop / tui 各自独立。没有浏览器卡片的终端环境（TUI）下依旧可用 CLI 保存 PAT 并驱动模型；设置卡片与侧栏额度卡需要 Web/Desktop 界面。
 
+> **DSH 低于 `0.2.1-rc.1`？** 请改用最后一个支持 0.1.7 线的版本 **[v0.2.5](https://github.com/masknull/dsh-qoder-connect/releases/tag/v0.2.5)**（要求 DSH ≥ `0.1.7-rc.1`）：
+>
+> ```sh
+> # GitHub（推荐，指定 tag）
+> dsh plugin --profile web add github:masknull/dsh-qoder-connect#v0.2.5
+> # 或从 npm 安装
+> dsh plugin --profile web add dsh-qoder-connect@0.2.5
+> ```
+>
 > **DSH 低于 `0.1.7-rc.1`？** 请改用最后一个支持 0.1.5 线的版本 **[v0.2.0](https://github.com/masknull/dsh-qoder-connect/releases/tag/v0.2.0)**（要求 DSH ≥ `0.1.5-rc.2`）：
 >
 > ```sh
@@ -103,7 +112,7 @@ dsh plugin --profile web add dsh-qoder-connect
 > dsh plugin --profile web add dsh-qoder-connect@0.2.0
 > ```
 >
-> 从 0.1.5 升级上来的老用户：本版本已移除旧宿主 `settings.yaml` 的自动迁移；如需保留旧配置，请先经 **[v0.1.9](https://github.com/masknull/dsh-qoder-connect/releases/tag/v0.1.9)**（首个带数据迁移的版本）完成迁移后，再升级本版本。
+> 从 0.1.5 升级上来的老用户：新版本已移除旧宿主 `settings.yaml` 的自动迁移；如需保留旧配置，请先经 **[v0.1.9](https://github.com/masknull/dsh-qoder-connect/releases/tag/v0.1.9)**（首个带数据迁移的版本）完成迁移后，再升级。
 
 ## 配置与使用
 

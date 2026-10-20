@@ -81,7 +81,7 @@ Enable daily automatic check-in in the settings card and set each variant's own 
 
 Prerequisites:
 
-- DSH core `0.1.7-rc.1` or newer (this plugin peers on the `@deepseek-ai/*` `>=0.1.7-rc.1` line);
+- DSH core `0.2.1-rc.1` or newer (this plugin peers on the `@deepseek-ai/*` `>=0.2.1-rc.1` line);
 - Node.js `^22.19.0 || >=24.0.0` (per `package.json` engines);
 - your own Qoder account and at least one Personal Access Token.
 
@@ -94,6 +94,15 @@ dsh plugin --profile web add dsh-qoder-connect
 
 Swap the `--profile` value for the profile you use (`web` / `desktop` / `tui`, e.g. `dsh plugin --profile desktop add dsh-qoder-connect`) — data stays inside that profile, so web / desktop / tui never collide. On a terminal-only profile (TUI) there is no browser card: manage the PAT and check status through the bundled CLI instead; the settings card and sidebar widgets require Web or Desktop.
 
+> **DSH older than `0.2.1-rc.1`?** Use **[v0.2.5](https://github.com/masknull/dsh-qoder-connect/releases/tag/v0.2.5)** instead — the last release on the 0.1.7 line (DSH ≥ `0.1.7-rc.1`):
+>
+> ```sh
+> # From GitHub (recommended, pin the tag)
+> dsh plugin --profile web add github:masknull/dsh-qoder-connect#v0.2.5
+> # Or from npm
+> dsh plugin --profile web add dsh-qoder-connect@0.2.5
+> ```
+>
 > **DSH older than `0.1.7-rc.1`?** Use **[v0.2.0](https://github.com/masknull/dsh-qoder-connect/releases/tag/v0.2.0)** instead — the last release supporting the 0.1.5 line (DSH ≥ `0.1.5-rc.2`):
 >
 > ```sh
@@ -103,7 +112,7 @@ Swap the `--profile` value for the profile you use (`web` / `desktop` / `tui`, e
 > dsh plugin --profile web add dsh-qoder-connect@0.2.0
 > ```
 >
-> Upgrading from 0.1.5? This release removed the automatic migration of the old host's `settings.yaml`. To carry your old configuration over, migrate through **[v0.1.9](https://github.com/masknull/dsh-qoder-connect/releases/tag/v0.1.9)** (the first release with the data migration) first, then upgrade to this release.
+> Upgrading from 0.1.5? Newer releases removed the automatic migration of the old host's `settings.yaml`. To carry your old configuration over, migrate through **[v0.1.9](https://github.com/masknull/dsh-qoder-connect/releases/tag/v0.1.9)** (the first release with the data migration) first, then upgrade.
 
 ## Configuration
 
