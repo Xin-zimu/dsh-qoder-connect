@@ -417,9 +417,8 @@ test('QoderTransport surfaces the auth failure when the re-auth retry is rejecte
   assert.equal(exchanges, 3)
 })
 
-// The verbatim body Qoder answered with on 2026-09-26 22:32-22:36, for both
-// regions: a saturated per-model queue announced with HTTP 403 (or a 200 SSE
-// envelope carrying statusCodeValue 403).
+// The queue body, for both regions: a saturated per-model queue announced with
+// HTTP 403, or a 200 SSE envelope carrying statusCodeValue 403.
 const qoderQueueBody = JSON.stringify({
   code: '10605',
   message: JSON.stringify({
@@ -434,11 +433,8 @@ const qoderQueueBody = JSON.stringify({
 })
 
 test('QoderTransport does not exchange a job token when the upstream answer is a queue', async () => {
-  // Coding that 403 as AUTH made the self-heal exchange fresh tokens against a
-  // queue no token can jump — three exchanges and a 4-second delay per chat,
-  // every chat, for the whole window — and, because the host retries
-  // RATE_LIMIT but deliberately never AUTH, it also suppressed the automatic
-  // retry that would have ridden out the 30-second window.
+  // Coding that 403 as AUTH made the self-heal exchange tokens against a queue no
+  // token can jump, and muted the retry that would ride out the 30-second window.
   let exchanges = 0
   let chatCalls = 0
   const refreshed: number[] = []
@@ -525,12 +521,260 @@ test('QoderTransport reads a queued HTTP 403 from the chat error body', async ()
   assert.equal(exchanges, 1)
 })
 
+test('QoderTransport polls the pending queue entry and replays the same chat body', async () => {
+  // Poll the pending entry and replay the same body; a fresh request would join
+  // the queue at the tail again.
+  let chatCalls = 0
+  const bodies: string[] = []
+  let polls = 0
+  const waits: { attempt: number, waitMs: number, queueCount?: number }[] = []
+  const transport = createQoderTransport({
+    region: 'global',
+    resolvePat: () => Promise.resolve('pt-queue-poll'),
+    resolveMachineId: () => 'machine-test',
+    // Small budget: after the replay is rejected again the wait must run out
+    // rather than sit on a real 30-second poll interval.
+    queueWaitBudgetMs: () => 60,
+    onQueueWait: info => {
+      waits.push({ attempt: info.attempt, waitMs: info.waitMs, ...info.queueCount === undefined ? {} : { queueCount: info.queueCount } })
+    },
+    fetch: (async (input: URL | Request, init?: RequestInit): Promise<Response> => {
+      const url = String(input)
+      if (url.includes('/jobToken/exchange')) return new Response(JSON.stringify({ token: 'jt-queue-poll' }))
+      if (url.includes('/userinfo')) return new Response(JSON.stringify({ id: 'user-queue-poll' }))
+      if (url.includes('/ask/queue/status')) {
+        polls++
+        // First poll clears the entry; the ones after the rejected replay keep
+        // it queued, so the budget is what ends the wait.
+        if (polls === 1) {
+          return new Response(JSON.stringify({
+            isQueued: false,
+            queueCount: 0,
+            waitTime: 0,
+            retryAfterSeconds: 2,
+            serviceAvailable: true,
+          }))
+        }
+        return new Response(JSON.stringify({
+          isQueued: true,
+          queueCount: 900,
+          waitTime: 120,
+          retryAfterSeconds: 2,
+          serviceAvailable: true,
+        }))
+      }
+      if (url.includes('/agent_chat_generation')) {
+        chatCalls++
+        bodies.push(Buffer.from(init?.body as Uint8Array).toString('base64'))
+        return new Response(qoderQueueBody, { status: 403 })
+      }
+      throw new Error(`unexpected URL: ${url}`)
+    }) as typeof fetch,
+  })
+  const request: GenerateOptions = {
+    provider: 'qoder-official',
+    model: 'cmodel',
+    messages: [createUserMessage({ content: [{ type: 'text', text: 'Hello' }], source: { kind: 'user' } })],
+  }
+
+  await assert.rejects(async () => {
+    for await (const _chunk of transport.stream(request)) continue
+  }, (error: Error) => error instanceof QoderLlmError && error.code === 'RATE_LIMIT')
+
+  assert.equal(chatCalls, 2)
+  assert.ok(polls >= 1)
+  // The replay rotates request_id/chat_record_id (the queue key, request_set_id,
+  // stays), so the encoded body differs.
+  assert.notEqual(bodies[0], bodies[1])
+  // The clearing round is the grant, not a wait: it reports no round at all,
+  // so the row's numbering never skips one.
+  assert.equal(waits.length, 0)
+})
+
+test('QoderTransport completes the turn when the queue clears before the replay', async () => {
+  let chatCalls = 0
+  let polls = 0
+  const okChunk = JSON.stringify({
+    id: 'chat-1',
+    model: 'cmodel',
+    choices: [{ index: 0, delta: { role: 'assistant', content: 'hi' }, finish_reason: null }],
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+  })
+  const okBody = `data: ${JSON.stringify({ statusCodeValue: 200, body: okChunk })}\n\ndata: [DONE]\n\n`
+  const transport = createQoderTransport({
+    region: 'global',
+    resolvePat: () => Promise.resolve('pt-queue-ok'),
+    resolveMachineId: () => 'machine-test',
+    fetch: (async (input: URL | Request): Promise<Response> => {
+      const url = String(input)
+      if (url.includes('/jobToken/exchange')) return new Response(JSON.stringify({ token: 'jt-queue-ok' }))
+      if (url.includes('/userinfo')) return new Response(JSON.stringify({ id: 'user-queue-ok' }))
+      if (url.includes('/ask/queue/status')) {
+        polls++
+        return new Response(JSON.stringify({
+          isQueued: false,
+          queueCount: 0,
+          waitTime: 0,
+          retryAfterSeconds: 2,
+          serviceAvailable: true,
+        }))
+      }
+      if (url.includes('/agent_chat_generation')) {
+        chatCalls++
+        if (chatCalls === 1) return new Response(qoderQueueBody, { status: 403 })
+        return new Response(okBody, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+      }
+      throw new Error(`unexpected URL: ${url}`)
+    }) as typeof fetch,
+  })
+  const request: GenerateOptions = {
+    provider: 'qoder-official',
+    model: 'cmodel',
+    messages: [createUserMessage({ content: [{ type: 'text', text: 'Hello' }], source: { kind: 'user' } })],
+  }
+
+  const chunks = []
+  for await (const chunk of transport.stream(request)) chunks.push(chunk)
+  assert.equal(polls, 1)
+  assert.equal(chatCalls, 2)
+  const finish = chunks.find(chunk => chunk.type === 'finish')
+  assert.equal(finish?.type === 'finish' ? finish.reason.kind : undefined, 'stop')
+})
+
+test('QoderTransport gives up when the queue does not clear inside the budget', async () => {
+  let polls = 0
+  const transport = createQoderTransport({
+    region: 'global',
+    resolvePat: () => Promise.resolve('pt-queue-budget'),
+    resolveMachineId: () => 'machine-test',
+    queueWaitBudgetMs: () => 40,
+    fetch: (async (input: URL | Request): Promise<Response> => {
+      const url = String(input)
+      if (url.includes('/jobToken/exchange')) return new Response(JSON.stringify({ token: 'jt-queue-budget' }))
+      if (url.includes('/userinfo')) return new Response(JSON.stringify({ id: 'user-queue-budget' }))
+      if (url.includes('/ask/queue/status')) {
+        polls++
+        return new Response(JSON.stringify({
+          isQueued: true,
+          queueCount: 500,
+          waitTime: 120,
+          retryAfterSeconds: 2,
+          serviceAvailable: true,
+        }))
+      }
+      if (url.includes('/agent_chat_generation')) return new Response(qoderQueueBody, { status: 403 })
+      throw new Error(`unexpected URL: ${url}`)
+    }) as typeof fetch,
+  })
+  const request: GenerateOptions = {
+    provider: 'qoder-official',
+    model: 'cmodel',
+    messages: [createUserMessage({ content: [{ type: 'text', text: 'Hello' }], source: { kind: 'user' } })],
+  }
+
+  await assert.rejects(async () => {
+    for await (const _chunk of transport.stream(request)) continue
+  }, (error: Error) => error instanceof QoderLlmError && error.code === 'RATE_LIMIT')
+  // One poll answers immediately, one runs after the single budget-sized sleep;
+  // neither clears the entry, so the failure is handed to the host.
+  assert.equal(polls, 2)
+})
+
+test('QoderTransport polls when the queue answer arrives inside the SSE envelope', async () => {
+  // The queue answer can arrive as HTTP 200 + statusCodeValue 403, which throws
+  // from the SSE parser.
+  let chatCalls = 0
+  let polls = 0
+  const queueEnvelope = `data: ${JSON.stringify({ statusCodeValue: 403, body: qoderQueueBody })}\n\n`
+  const okChunk = JSON.stringify({
+    id: 'chat-envelope',
+    model: 'cmodel',
+    choices: [{ index: 0, delta: { role: 'assistant', content: 'hi' }, finish_reason: null }],
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+  })
+  const okBody = `data: ${JSON.stringify({ statusCodeValue: 200, body: okChunk })}\n\ndata: [DONE]\n\n`
+  const transport = createQoderTransport({
+    region: 'global',
+    resolvePat: () => Promise.resolve('pt-envelope-queue'),
+    resolveMachineId: () => 'machine-test',
+    fetch: (async (input: URL | Request): Promise<Response> => {
+      const url = String(input)
+      if (url.includes('/jobToken/exchange')) return new Response(JSON.stringify({ token: 'jt-envelope-queue' }))
+      if (url.includes('/userinfo')) return new Response(JSON.stringify({ id: 'user-envelope-queue' }))
+      if (url.includes('/ask/queue/status')) {
+        polls++
+        return new Response(JSON.stringify({
+          isQueued: false,
+          queueCount: 0,
+          waitTime: 0,
+          retryAfterSeconds: 2,
+          serviceAvailable: true,
+        }))
+      }
+      if (url.includes('/agent_chat_generation')) {
+        chatCalls++
+        const body = chatCalls === 1 ? queueEnvelope : okBody
+        return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+      }
+      throw new Error(`unexpected URL: ${url}`)
+    }) as typeof fetch,
+  })
+  const request: GenerateOptions = {
+    provider: 'qoder-official',
+    model: 'cmodel',
+    messages: [createUserMessage({ content: [{ type: 'text', text: 'Hello' }], source: { kind: 'user' } })],
+  }
+
+  const chunks = []
+  for await (const chunk of transport.stream(request)) chunks.push(chunk)
+  assert.equal(polls, 1)
+  assert.equal(chatCalls, 2)
+  const finish = chunks.find(chunk => chunk.type === 'finish')
+  assert.equal(finish?.type === 'finish' ? finish.reason.kind : undefined, 'stop')
+})
+
+test('QoderTransport stops a queue wait as soon as the caller aborts', async () => {
+  const controller = new AbortController()
+  let polls = 0
+  const transport = createQoderTransport({
+    region: 'global',
+    resolvePat: () => Promise.resolve('pt-queue-abort'),
+    resolveMachineId: () => 'machine-test',
+    onQueueWait: () => controller.abort(),
+    fetch: (async (input: URL | Request): Promise<Response> => {
+      const url = String(input)
+      if (url.includes('/jobToken/exchange')) return new Response(JSON.stringify({ token: 'jt-queue-abort' }))
+      if (url.includes('/userinfo')) return new Response(JSON.stringify({ id: 'user-queue-abort' }))
+      if (url.includes('/ask/queue/status')) {
+        polls++
+        return new Response(JSON.stringify({
+          isQueued: true,
+          queueCount: 900,
+          waitTime: 300,
+          retryAfterSeconds: 30,
+          serviceAvailable: true,
+        }))
+      }
+      if (url.includes('/agent_chat_generation')) return new Response(qoderQueueBody, { status: 403 })
+      throw new Error(`unexpected URL: ${url}`)
+    }) as typeof fetch,
+  })
+  const request: GenerateOptions = {
+    provider: 'qoder-official',
+    model: 'cmodel',
+    signal: controller.signal,
+    messages: [createUserMessage({ content: [{ type: 'text', text: 'Hello' }], source: { kind: 'user' } })],
+  }
+
+  await assert.rejects(async () => {
+    for await (const _chunk of transport.stream(request)) continue
+  }, (error: Error) => error instanceof QoderLlmError && error.code === 'ABORTED')
+  assert.equal(polls, 1)
+})
+
 test('QoderTransport reads the daily-limit 403 as QUOTA and does not re-auth', async () => {
-  // dsh-qoder-connect#10, end to end: the upstream answers inside its SSE
-  // envelope with statusCodeValue 403 and the daily billing counter's own body.
-  // Coded AUTH this reached dsh-llm-pi-ai as AUTH, so the UI said "API 密钥无效"
-  // and the user regenerated a PAT that was never the problem — while the counter
-  // simply resets the next day.
+  // End to end: the SSE envelope carries statusCodeValue 403 with the daily
+  // billing counter's body — QUOTA, never AUTH, since no fresh PAT fixes it.
   let chatCalls = 0
   let exchanges = 0
   const refreshFailures: number[] = []
@@ -584,10 +828,8 @@ test('QoderTransport reads the daily-limit 403 as QUOTA and does not re-auth', a
 })
 
 test('QoderTransport reports an exhausted self-heal once, not once per host retry', async () => {
-  // The observed outage: one upstream rejection that no fresh token could
-  // clear, retried 59 times by the host across 75 steps. The transport
-  // re-heals inside every one of those, so the notice needs a latch or the
-  // conversation fills with identical rows.
+  // One rejection no fresh token can clear, retried by the host across many steps:
+  // the transport re-heals inside every one, so the notice needs a latch.
   let exchanges = 0
   let chatCalls = 0
   const failures: Array<{ at: number; status?: number }> = []
@@ -690,10 +932,8 @@ test('QoderTransport re-arms the failed-heal notice after a chat is accepted', a
 })
 
 test('QoderTransport does not print a stale success notice after a failed heal', async () => {
-  // The observed defect: a heal at 16:56 whose own retry was also rejected
-  // left its success notice pending. A chat accepted 51 minutes later flushed
-  // it, printing "jobToken 已自动刷新（16:56:13）" next to a 17:47 message —
-  // directly contradicting the failure row already shown for the same heal.
+  // A heal whose own retry was rejected leaves its notice pending; a chat accepted
+  // much later must not flush it over the failure row already shown.
   let exchanges = 0
   let chatCalls = 0
   let acceptNext = false
@@ -887,5 +1127,87 @@ test('QoderUsageReader retries a 401 usage read once with a fresh job token', as
   assert.equal(usageCalls, 2)
   assert.equal(exchanges, 2)
   assert.equal(account.usage?.userQuota?.total, 300)
+})
+
+test('QoderTransport replays when the entry clears even without capacity', async () => {
+  // The official client treats isQueued:false as the grant; serviceAvailable is
+  // not part of that decision.
+  let polls = 0
+  let chatCalls = 0
+  const transport = createQoderTransport({
+    region: 'global',
+    resolvePat: () => Promise.resolve('pt-queue-capacity'),
+    resolveMachineId: () => 'machine-test',
+    queueWaitBudgetMs: () => 80,
+    fetch: (async (input: URL | Request): Promise<Response> => {
+      const url = String(input)
+      if (url.includes('/jobToken/exchange')) return new Response(JSON.stringify({ token: 'jt-queue-capacity' }))
+      if (url.includes('/userinfo')) return new Response(JSON.stringify({ id: 'user-queue-capacity' }))
+      if (url.includes('/ask/queue/status')) {
+        polls++
+        return new Response(JSON.stringify({
+          isQueued: false,
+          serviceAvailable: false,
+          queueCount: 0,
+          waitTime: 0,
+          retryAfterSeconds: 2,
+        }))
+      }
+      if (url.includes('/agent_chat_generation')) {
+        chatCalls++
+        return new Response(qoderQueueBody, { status: 403 })
+      }
+      throw new Error(`unexpected URL: ${url}`)
+    }) as typeof fetch,
+  })
+  const request: GenerateOptions = {
+    provider: 'qoder-official',
+    model: 'cmodel',
+    messages: [createUserMessage({ content: [{ type: 'text', text: 'Hello' }], source: { kind: 'user' } })],
+  }
+
+  await assert.rejects(async () => {
+    for await (const _chunk of transport.stream(request)) continue
+  }, (error: Error) => error instanceof QoderLlmError && error.code === 'RATE_LIMIT')
+  assert.ok(polls >= 1)
+  // Replayed once: the cleared entry is a grant.
+  assert.equal(chatCalls, 2)
+})
+
+test('QoderTransport hands the queue answer to the host when the wait is off', async () => {
+  let polls = 0
+  let chatCalls = 0
+  const transport = createQoderTransport({
+    region: 'global',
+    resolvePat: () => Promise.resolve('pt-queue-off'),
+    resolveMachineId: () => 'machine-test',
+    queueWait: () => false,
+    fetch: (async (input: URL | Request): Promise<Response> => {
+      const url = String(input)
+      if (url.includes('/jobToken/exchange')) return new Response(JSON.stringify({ token: 'jt-queue-off' }))
+      if (url.includes('/userinfo')) return new Response(JSON.stringify({ id: 'user-queue-off' }))
+      if (url.includes('/ask/queue/status')) {
+        polls++
+        return new Response(JSON.stringify({ isQueued: false, queueCount: 0, waitTime: 0, retryAfterSeconds: 2 }))
+      }
+      if (url.includes('/agent_chat_generation')) {
+        chatCalls++
+        return new Response(qoderQueueBody, { status: 403 })
+      }
+      throw new Error(`unexpected URL: ${url}`)
+    }) as typeof fetch,
+  })
+  const request: GenerateOptions = {
+    provider: 'qoder-official',
+    model: 'cmodel',
+    messages: [createUserMessage({ content: [{ type: 'text', text: 'Hello' }], source: { kind: 'user' } })],
+  }
+
+  await assert.rejects(async () => {
+    for await (const _chunk of transport.stream(request)) continue
+  }, (error: Error) => error instanceof QoderLlmError && error.code === 'RATE_LIMIT')
+  // No poll, no replay: the failure keeps its hint for the host.
+  assert.equal(polls, 0)
+  assert.equal(chatCalls, 1)
 })
 

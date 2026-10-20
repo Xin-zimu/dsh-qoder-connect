@@ -1,16 +1,12 @@
 /**
  * Local record of reasoning-effort probes.
  *
- * What this stores is an *observation*, never a claim about the upstream: a
- * model's row is only consulted when the catalog carries no explicit
- * `supportedEfforts` set, and it always loses to a declared set. The plan this
- * implements (`docs/reasoning-effort-probe-plan.md` §5) requires that a result
- * is invalidated whenever the model's catalog row changes, so every record
- * carries a fingerprint of the fields the probe depended on.
- *
- * The file lives in the plugin's own state directory, never beside the
- * product's files, and carries no token, prompt, or response body — only
- * model ids, effort spellings, and timestamps.
+ * What this stores is an *observation*, never a claim about the upstream: it is
+ * only consulted when the catalog carries no explicit `supportedEfforts` set, and
+ * it always loses to a declared set. A result is invalidated whenever the model's
+ * catalog row changes, so every record carries a fingerprint of the fields the
+ * probe depended on. The file lives in the plugin's state directory and carries
+ * no token, prompt, or response body.
  *
  * @module dsh-qoder-connect/probe-store
  */
@@ -29,10 +25,8 @@ export const QODER_PROBE_FILENAME = '.qoder-probe.json'
 const PROBE_FORMAT_VERSION = 1
 
 /**
- * How long an observation stays usable. Conservative on purpose: the plan's
- * whole argument is that upstream metadata moves fast, so a result that has
- * outlived its fingerprint's usefulness should not quietly keep granting a
- * picker entry.
+ * How long an observation stays usable. Conservative on purpose: upstream
+ * metadata moves fast, so a stale result must not keep granting a picker entry.
  */
 const DEFAULT_TTL_MS = 14 * 24 * 60 * 60 * 1000
 
@@ -63,12 +57,9 @@ export interface QoderProbeRecord {
    * The account this observation was made under, as a one-way hash of the
    * credential in effect.
    *
-   * An effort set is a fact about one account's entitlement as much as about
-   * the model: the same model id can accept different levels under a different
-   * subscription. Without this a record outlived the account that produced it,
-   * so signing out and in as someone else inherited the previous account's
-   * detected levels. Records written before this field existed carry no
-   * identity and are therefore never reused.
+   * An effort set is a fact about one account's entitlement as much as about the
+   * model, so a record must not outlive its account. Records written before this
+   * field existed carry no identity and are therefore never reused.
    */
   account?: string
 }
@@ -81,11 +72,9 @@ interface ProbeDocument {
 /**
  * Plugin-owned probe record path inside the plugin's state directory.
  *
- * One file per variant. The two regions serve overlapping model ids with
- * different entitlements, and {@link fingerprintModel} covers only
- * `id`/`reasoning`/`supportsImages` — never the provider — so a single shared
- * file would let one variant's observation answer for the other. The paths
- * differ; the format does not.
+ * One file per variant: the regions serve overlapping ids with different
+ * entitlements, and {@link fingerprintModel} never covers the provider, so a
+ * shared file would let one variant's observation answer for the other.
  */
 export function qoderProbePath(filename: string = QODER_PROBE_FILENAME): string {
   return join(qoderStateDir(), filename)
@@ -163,8 +152,7 @@ export class QoderProbeStore {
   private records: Record<string, QoderProbeRecord> | undefined
 
   constructor(options: QoderProbeStoreOptions | string) {
-    // A bare string stays accepted for the pre-plan call sites that only cared
-    // about the path.
+    // A bare string stays accepted for call sites that only cared about the path.
     const opts: QoderProbeStoreOptions = typeof options === 'string'
       ? { path: options, pluginVersion: '0.0.0' }
       : options
@@ -237,12 +225,11 @@ export class QoderProbeStore {
   }
 
   /**
-   * Drop every record that belongs to one account, leaving the other saved
-   * accounts' observations intact.
+   * Drop every record that belongs to one account, leaving other accounts'
+   * observations intact.
    *
-   * Used when a saved token is removed: its detected effort levels are that
-   * account's data, and no other account can use them. A plain {@link clear}
-   * here would erase the observations of every account the user still has.
+   * A saved token's detected effort levels are that account's data; a plain
+   * {@link clear} would erase the observations of every account still saved.
    */
   clearFor(account: string): void {
     const records = this.load()
@@ -300,12 +287,8 @@ export class QoderProbeStore {
 }
 
 /**
- * Order observations newest-first for display.
- *
- * The store keeps insertion order so the file reads chronologically, but the
- * card wants the most recent detection at the top: a sweep the user just ran
- * should not appear below every earlier one, which is what appending to an
- * insertion-ordered list does.
+ * Order observations newest-first for display: the card wants the most recent
+ * detection at the top, while the file keeps insertion order.
  */
 export function newestFirst<T extends { probedAt: number }>(records: readonly T[]): T[] {
   return [...records].sort((a, b) => b.probedAt - a.probedAt)

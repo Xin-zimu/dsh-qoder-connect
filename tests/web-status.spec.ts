@@ -218,8 +218,7 @@ describe('signed-out document', () => {
 
 describe('model snapshot reporting', () => {
   /**
-   * The card needs every model's capacity and rate facts, verbatim and
-   * unfiltered: no rounding, no plugin-invented tiers, and no invented
+   * Capacity and rate facts ride verbatim: no rounding, no invented tiers, and no
    * numbers where the upstream was silent.
    */
   it('reports capacity, efforts, and price factor per row', async () => {

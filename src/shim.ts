@@ -1,16 +1,13 @@
 /**
- * Loopback OpenAI-compatible endpoint. The pi-ai provider points here; the
- * shim guards the local boundary and hands the raw JSON body to the upstream
- * client, which translates it onto the Qoder transport. It binds 127.0.0.1
- * only and never serves another interface.
+ * Loopback OpenAI-compatible endpoint. The pi-ai provider points here; the shim
+ * guards the local boundary and hands the raw JSON body to the upstream client,
+ * which translates it onto the Qoder transport. Binds 127.0.0.1 only.
  *
- * Inbound hardening: the loopback bind alone is not a trust boundary (any
- * local process or a DNS-rebinding page can reach 127.0.0.1), so every
- * request must carry a loopback Host header, browser-sent Origins must be
- * loopback, chat POSTs must be application/json, and the Authorization
- * header must carry the shim's per-process shared secret. The plugin's
- * own client satisfies all four by construction; local attackers cannot
- * read the secret out of the plugin process's memory.
+ * The loopback bind alone is not a trust boundary (any local process or a
+ * DNS-rebinding page can reach 127.0.0.1), so every request must carry a loopback
+ * Host header, browser-sent Origins must be loopback, chat POSTs must be
+ * application/json, and the Authorization header must carry the shim's per-process
+ * shared secret.
  *
  * @module dsh-qoder-connect/shim
  */
@@ -37,9 +34,8 @@ export interface QoderShim {
   baseUrl(): string
   /**
    * The per-process shared secret the plugin's own client must carry as
-   * `Authorization: Bearer <token>`. Lives only in memory; the adapter
-   * resolves this instead of the upstream credential, because the shim
-   * resolves the real credential itself via the store.
+   * `Authorization: Bearer <token>`. Lives only in memory; the shim resolves the
+   * real credential itself via the store.
    */
   token(): string
   /** Stop serving and destroy open connections. */
@@ -78,11 +74,9 @@ function writeJson(res: ServerResponse, status: number, body: unknown, headers: 
  * The prefix the shim stamps onto a failure message carrying an upstream retry
  * hint.
  *
- * The hint has to cross two text-only boundaries to reach the harness retry
- * policy: pi-ai flattens an HTTP failure to its message and the adapter may only
- * rewrite that message. So the marker is written here, in front of the 400-byte
- * excerpt (never inside it, where truncation could cut it off), and read back by
- * {@link retryAfterFromMessage}.
+ * The hint must cross two text-only boundaries to reach the harness retry policy,
+ * so the marker is written in front of the 400-byte excerpt (never inside it,
+ * where truncation could cut it off) and read back by {@link retryAfterFromMessage}.
  */
 export const RETRY_AFTER_TAG = /\[retry-after=(\d+)s\]/u
 
@@ -90,10 +84,8 @@ export const RETRY_AFTER_TAG = /\[retry-after=(\d+)s\]/u
  * The upstream's retry hint, in milliseconds, recovered from a shim failure
  * message.
  *
- * The tagged form is the contract this plugin writes itself. The untagged
- * `retryAfterSeconds` form is the fallback for a message the transport built
- * before the tag existed (an installed older shim, or a caller that composed the
- * message itself), and is the same field {@link qoderQueueSignal} reads.
+ * The tagged form is the contract this plugin writes itself; the untagged
+ * `retryAfterSeconds` form is the fallback for a message composed elsewhere.
  */
 export function retryAfterFromMessage(message: string): number | undefined {
   const tagged = RETRY_AFTER_TAG.exec(message)
@@ -130,10 +122,9 @@ function writeOpenAIError(res: ServerResponse, status: number, kind: string, mes
     res,
     status,
     { error: { message: `[retry-after=${seconds}s] ${message}`, type: kind, code: kind } },
-    // `Retry-After` is the standard (RFC 9110, whole seconds); `retry-after-ms`
-    // is what the OpenAI SDKs read first and lets a client keep millisecond
-    // precision. The harness adapter reads neither — it reads the tag above —
-    // but any other client of this loopback endpoint gets the standard answer.
+    // `Retry-After` is the standard (RFC 9110, whole seconds); `retry-after-ms` is
+    // what the OpenAI SDKs read first. The harness adapter reads the tag above,
+    // but any other client of this endpoint gets the standard answer.
     { 'Retry-After': String(seconds), 'retry-after-ms': String(hint) },
   )
 }
@@ -158,18 +149,17 @@ function readBody(req: IncomingMessage): Promise<Buffer> {
 }
 
 /**
- * Start the loopback endpoint. Requests carry any bearer; the loopback bind
- * is the boundary, and the upstream credential comes from the store alone.
+ * Start the loopback endpoint. The upstream credential comes from the store alone;
+ * the bearer checked is the per-process shared secret.
  */
 export function createQoderShim(options: QoderShimOptions): QoderShim {
   const { store, client, catalog } = options
   const logger = options.logger
   const providerId = options.providerId
 
-  // Per-process shared secret. Lives only in memory; the adapter resolves it
-  // as the OpenAI apiKey, which pi-ai sends as `Authorization: Bearer ...`.
-  // The shim never forwards it upstream — the real credential comes from the
-  // store. A local attacker who can hit the port still cannot forge this.
+  // Per-process shared secret. Lives only in memory; the adapter resolves it as
+  // the OpenAI apiKey, which pi-ai sends as `Authorization: Bearer ...`. It is
+  // never forwarded upstream — the real credential comes from the store.
   const SHARED_SECRET = randomBytes(32).toString('base64url')
 
   /** Constant-time bearer check; absent or mismatched bearers are rejected. */
@@ -187,10 +177,9 @@ export function createQoderShim(options: QoderShimOptions): QoderShim {
   }
 
   const server: Server = createServer((req, res) => {
-    // `handle` contains its own failures, but the attempt is wrapped once more:
-    // an escaped rejection here is an unhandled rejection, which Node turns
-    // into process termination — one refused local request must never be able
-    // to take the whole Harness down.
+    // `handle` contains its own failures, but the attempt is wrapped once more: an
+    // escaped rejection is an unhandled rejection, which Node turns into process
+    // termination.
     void handle(req, res).catch((error: unknown) => {
       logger?.warn('dsh-qoder-connect: loopback request failed', error)
       try {
@@ -220,9 +209,7 @@ export function createQoderShim(options: QoderShimOptions): QoderShim {
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
       // Inbound hardening: every request must name the loopback host, and
-      // browser-sent origins must be loopback too. The plugin's own client
-      // always satisfies both; DNS-rebinding pages and cross-origin POSTs
-      // do not.
+      // browser-sent origins must be loopback too.
       if (!hostIsLoopback(req.headers.host)) {
         writeOpenAIError(res, 403, 'host_not_allowed', 'Host header must name the loopback interface')
         return
@@ -283,16 +270,20 @@ export function createQoderShim(options: QoderShimOptions): QoderShim {
     const raw = (await readBody(req)).toString('utf8')
 
     const controller = new AbortController()
-    req.on('close', () => controller.abort())
+    // The response closing before it ends is the client going away — a stopped
+    // turn. Listening on the request instead would fire as soon as its body was
+    // read, which is not a cancellation.
+    res.on('close', () => {
+      if (!res.writableEnded) controller.abort('client closed the response')
+    })
     const result = await client.chatStream(raw, controller.signal)
 
     if (!result.ok) {
       // The message quotes the shim's OUTBOUND status, never the upstream's
-      // internal one: the harness's pi-ai error classifier matches 401/403 in
-      // message text before anything else, so quoting the upstream's 403 here
-      // (as "(http 403)") turned a queue answer into a reported credential
-      // failure ("API 密钥无效"). The upstream's real status still travels in
-      // the transport failure's structured `status` field.
+      // internal one: the harness's pi-ai error classifier matches 401/403 in the
+      // message text, so quoting an upstream 403 here would report a queue answer
+      // as a credential failure. The real status travels in the structured
+      // `status` field.
       writeOpenAIError(
         res,
         KIND_STATUS[result.kind],

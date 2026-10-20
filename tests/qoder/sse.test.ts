@@ -234,9 +234,8 @@ test('parseQoderSse preserves explicit upstream error statuses', async () => {
 })
 
 test('parseQoderSse forwards the envelope body into the error message', async () => {
-  // A non-200 envelope's body carries the upstream's own reason (quota, region
-  // permission, risk control, ...). Discarding it left every such rejection
-  // reading as a bare "invalid API key", so the real cause was invisible.
+  // A non-200 envelope's body carries the upstream's own reason (quota, region,
+  // risk control); discarding it made every rejection read as a bare "invalid API key".
   const upstreamBody = JSON.stringify({ code: 403, message: 'quota exhausted for this model' })
   await assert.rejects(async () => {
     for await (const _chunk of parseQoderSse(streamOf([

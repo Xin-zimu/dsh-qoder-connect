@@ -1,17 +1,11 @@
 /**
  * Plugin-owned settings scope over the Host's settings face.
  *
- * The configuration this plugin edits used to be written through the host's
- * settings service (`settingsScope` on 0.1.5, `configForms` on 0.1.7). On 0.1.7
- * every such write persists through the profile patch
- * (`configEditor.edit`), which reconciles the whole loader tree and hot-reloads
- * the plugin's fiber (~1–1.5 s) and refreshes every client mirror — so each
- * toggle of a sidebar-quota switch paid a full tree recompose.
- *
- * The host half now serves this plugin's configuration from its own settings
- * file over a loopback route; this module is the browser half of that contract,
- * implementing the same {@link QuotaSettingsScope} surface the card was written
- * against, so the card needs no change at all.
+ * The host half serves this plugin's configuration from its own settings file
+ * over a loopback route (writing through the host's config editor would
+ * recompose the whole loader tree on every toggle); this module is the browser
+ * half, implementing the same {@link QuotaSettingsScope} surface the card was
+ * written against.
  */
 
 import type { QuotaSection, QuotaSettingsScope, QuotaSettingsSnapshot } from './QuotaSettingsCard.tsx'

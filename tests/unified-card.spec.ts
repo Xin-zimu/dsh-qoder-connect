@@ -23,11 +23,9 @@ const tZh = (key: QoderSettingsKey, params: Record<string, unknown> = {}): strin
   )
 
 /**
- * The shared status store is module state that outlives a test, and an
- * expanding card no longer re-reads a document that is still fresh — so each
- * test starts the clock well past the card's minute. A publish inside the
- * test then lands at the current time and stays fresh, which is what the
- * dedup assertions read.
+ * The shared status store outlives a test and a fresh document is not re-read,
+ * so each test starts the clock well past the card's minute; a publish then
+ * lands at the current time, which is what the dedup assertions read.
  */
 let clock = Date.parse('2024-05-01T00:00:00.000Z')
 
@@ -410,9 +408,8 @@ describe('Unified Qoder Plugin Card', () => {
   })
 
   it('prints the cycle USED percentage beside each package label in the sidebar card', async () => {
-    // Issue #14's shape: the row already carried the REMAINING ratio, and the
-    // label now carries the same ratio read as usage — Qoder desktop's
-    // "60 / 2,400 (已使用 3%)" phrasing, one line down in our own card.
+    // The label carries the USAGE ratio (Qoder desktop's "60 / 2,400 (已使用 3%)"),
+    // not the remaining one, one line down in our own card.
     setQuotaToggles(true, false)
     noteQuotaSignIn('qoder', true)
     noteQuotaStatus('qoder', {
@@ -477,10 +474,8 @@ describe('Unified Qoder Plugin Card', () => {
   })
 
   it('shows a dedicated campaign package in the sidebar row set', async () => {
-    // Qoder Global grants campaign credits in `dedicatedResourcePackages`; the
-    // host maps them onto rows, and the card must draw them like any other
-    // package. Before this mapping existed the 2,000-credit SOTA grant was
-    // simply absent from every surface.
+    // Campaign credits arrive in `dedicatedResourcePackages` and must be drawn like
+    // any other package, not dropped from every surface.
     setQuotaToggles(false, true)
     noteQuotaSignIn('qoder-global', true)
     noteQuotaStatus('qoder-global', {
@@ -528,11 +523,8 @@ describe('Unified Qoder Plugin Card', () => {
   })
 
   it('lists a campaign grant in the dashboard ledger with its own expiry', async () => {
-    // The panel is the itemised ledger: the SOTA grant must appear there with
-    // its OWN deadline, printed as a date the user can read rather than the
-    // raw UTC instant, and with the account's year-9999 sentinel nowhere in
-    // sight. With no account-wide expiry to state, the panel says what it does
-    // know — when this PAT was authorized.
+    // The ledger prints the grant's OWN deadline as a localized date, never the raw UTC
+    // instant or the year-9999 sentinel; with no account-wide expiry it names the PAT's.
     noteQuotaSignIn('qoder-global', true)
     noteQuotaStatus('qoder-global', {
       status: 'signed-in',
@@ -576,11 +568,8 @@ describe('Unified Qoder Plugin Card', () => {
     expect(dated).toHaveLength(1)
     expect(dated[0]).not.toMatch(/T\d{2}:\d{2}/)
 
-    // The ledger's figure column: every row the upstream reported, live rows
-    // first and the spent personal quota sunk to the bottom (the panel is the
-    // itemised ledger — collapsing a spent row here would destroy the only
-    // place its standing allowance is visible). The grant keeps its own
-    // 2,000 / 2,000 rather than being summed into the package beside it.
+    // The ledger keeps every reported row (live first, spent sunk to the bottom) and the
+    // grant keeps its own 2,000 / 2,000 rather than being summed into the package beside it.
     const amounts = panel!.root
       .findAll(node => node.props.className === 'qdp-numText')
       .map(node => node.children.filter((child): child is string => typeof child === 'string').join(''))
@@ -594,11 +583,8 @@ describe('Unified Qoder Plugin Card', () => {
   })
 
   it('states a real cycle deadline alone, never beside the PAT stand-in', async () => {
-    // The panel's two bottom lines are alternatives, not siblings: an account
-    // whose upstream reports a real cycle deadline must state that deadline and
-    // must NOT also print when the PAT was authorized. The plugin card's status
-    // tab already gates the same fact this way; the panel let both through,
-    // which is the asymmetry this case pins down.
+    // The two bottom lines are alternatives: a real cycle deadline must be stated and the
+    // PAT's authorization NOT also printed, matching the plugin card's status tab.
     noteQuotaSignIn('qoder-global', true)
     noteQuotaStatus('qoder-global', {
       status: 'signed-in',
@@ -657,12 +643,15 @@ describe('Unified Qoder Plugin Card', () => {
 
     const switches = contentRenderer!.root.findAll(n => n.props.role === 'switch')
     expect(switches.length).toBeGreaterThanOrEqual(2)
-    for (const sw of switches) {
-      expect(sw.props.disabled).toBe(true)
-    }
+    // Account-bound toggles are disabled while unsigned; the queue-wait toggle
+    // is a plugin behavior switch and stays enabled.
+    const disabledSwitches = switches.filter(sw => sw.props.disabled === true)
+    expect(disabledSwitches.length).toBeGreaterThanOrEqual(2)
 
     // Even if onToggle was triggered directly with next=true, write() must intercept and drop it
-    const toggleRows = contentRenderer!.root.findAll(n => typeof n.props.onToggle === 'function')
+    const toggleRows = contentRenderer!.root
+      .findAll(n => typeof n.props.onToggle === 'function')
+      .slice(0, 2)
     for (const row of toggleRows) {
       await act(async () => {
         row.props.onToggle(true)
@@ -746,10 +735,8 @@ describe('Unified Qoder Plugin Card', () => {
       checkInTab.props.onClick()
     })
 
-    // Verify check-in log entries rendered. Two rows, one grant: the
-    // `already-claimed` row carries an amount in the record (it is the day's
-    // benefit value), but that action obtained nothing, so only the `claimed`
-    // row may print "+100" — otherwise one day reads as two grants of 100.
+    // Two log rows, one grant: only the `claimed` row may print "+100", or one day
+    // reads as two grants of 100.
     const amounts = view!.root.findAll(n => n.children.includes('+100'))
     expect(amounts).toHaveLength(1)
     const alreadyClaimed = view!.root.findAll(n => n.children.includes(en.autoCheckInStatusAlready))
@@ -818,9 +805,8 @@ describe('Unified Qoder Plugin Card', () => {
   })
 
   it('refuses a check-in time before the 10:00 window opening', async () => {
-    // A moment before 10:00 can never claim anything — the upstream has not
-    // opened the day's benefit yet — so the field must not be able to store one
-    // and leave the plugin looking broken for a reason the user chose.
+    // Before 10:00 the upstream has not opened the benefit, so the field must not store
+    // such a moment and leave the plugin looking broken.
     const mockSet = vi.fn()
     const fakeScope = {
       getSnapshot: () => ({

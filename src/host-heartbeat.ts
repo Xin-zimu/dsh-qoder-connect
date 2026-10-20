@@ -1,12 +1,8 @@
 /**
- * Host-side heartbeat: a small JSON file written into the plugin's data
- * directory once the `qoder` providers are registered. The status CLI reads it
- * to report whether the host bundle is alive, independent of the browser card.
- *
- * The browser (client) bundle cannot write files; its health is reported
- * only through `console.error` on failure (see `src/client/index.tsx`).
- * This asymmetry is intentional: the host is the load-bearing half, and
- * a missing heartbeat unambiguously means the host never started.
+ * Host-side heartbeat: a small JSON file written into the plugin's data directory
+ * once the `qoder` providers are registered. The status CLI reads it to report
+ * whether the host bundle is alive, independent of the browser card (the browser
+ * bundle cannot write files, and the host is the load-bearing half).
  *
  * @module dsh-qoder-connect/host-heartbeat
  */
@@ -40,9 +36,8 @@ export function qoderHostHeartbeatPath(): string {
 }
 
 /**
- * Write (or overwrite) the heartbeat after the host bundle registered the
- * provider. A failed write is non-fatal: the host is already running, and
- * the status CLI will simply report "heartbeat missing" rather than failing.
+ * Write (or overwrite) the heartbeat after the host registered the provider.
+ * A failed write is non-fatal: the CLI then reports "heartbeat missing".
  */
 export async function writeHostHeartbeat(): Promise<void> {
   const document: QoderHostHeartbeat = {
@@ -54,8 +49,7 @@ export async function writeHostHeartbeat(): Promise<void> {
   }
   try {
     // The state/ directory is normally created by the catalog/probe stores;
-    // ensure it here so the heartbeat never silently disappears when the
-    // host writes it before (or without) those first touches.
+    // ensure it here so the heartbeat never disappears when written first.
     await mkdir(qoderStateDir(), { recursive: true })
     await writeFile(qoderHostHeartbeatPath(), JSON.stringify(document), 'utf8')
   } catch {
@@ -104,16 +98,11 @@ export async function readHostHeartbeat(): Promise<QoderHostHeartbeat | undefine
 
 /**
  * Absolute start time (epoch ms) of the process holding `pid`, or `undefined`
- * when it cannot be determined (no such PID, platform lacks a readable source).
+ * when it cannot be determined.
  *
- * - macOS / Linux: `ps -o lstart=` prints a local-time "EEE MMM DD HH:MM:SS YYYY";
- *   `Date.parse` resolves it against the local clock, which matches how
- *   `registeredAt` (a `Date.now()` absolute value) is expressed.
- * - Windows: WMI `CreationDate` is UTC (`YYYYMMDDHHMMSS.mmm+zzzz`); parsed with
- *   `Date.UTC`, again comparable to `registeredAt`.
- *
- * Failures return `undefined` so callers can fall back to plain PID liveness
- * rather than mis-report a running host as dead.
+ * macOS/Linux use `ps -o lstart=` parsed against the local clock; Windows uses
+ * WMI `CreationDate` in UTC. Failures return `undefined` so callers fall back to
+ * plain PID liveness instead of mis-reporting a live host as dead.
  */
 export function processStartTimeMs(pid: number): number | undefined {
   try {
@@ -144,19 +133,10 @@ export function processStartTimeMs(pid: number): number | undefined {
 
 /**
  * Whether the heartbeat's PID is still alive *and* still the same process that
- * registered it. A stale heartbeat (host crashed without clearing the file)
- * is distinguished from a live host by two checks:
- *
- * 1. `process.kill(pid, 0)` — the PID exists (signal 0 tests existence).
- * 2. The process holding that PID started at or before `registeredAt`. A host
- *    that registered the heartbeat must have been started before writing it,
- *    so `start <= registeredAt`; a recycled PID belongs to an unrelated process
- *    started after the host died, so `start > registeredAt` correctly reads dead.
- *
- * PID-only detection is not enough: after a crash the OS may hand the same PID
- * to an unrelated process, and the un-cleared stale heartbeat would otherwise
- * produce a false "Host running". When the process start time cannot be read
- * (e.g. unsupported platform) the check degrades to plain PID liveness.
+ * registered it: signal 0 tests existence, and the holder's start time must be at
+ * or before `registeredAt`. PID-only detection is not enough — the OS may recycle
+ * the PID after a crash, producing a false "Host running". When the start time is
+ * unreadable the check degrades to plain PID liveness.
  */
 export function isHeartbeatProcessAlive(heartbeat: QoderHostHeartbeat): boolean {
   try {

@@ -192,12 +192,9 @@ async function readStdin(): Promise<string> {
 }
 
 /**
- * Drop the saved catalog and probe records that belong to one token.
- *
- * The host does this when a saved token is removed from the card; the CLI
- * writes the same files, so it has to leave the same state behind. Leaving them
- * would orphan another account's only copy — or resurrect data for a token the
- * user just deleted.
+ * Drop the saved catalog and probe records that belong to one token, exactly as the
+ * host does when a token is removed from the card — leaving them would resurrect
+ * data for a token the user just deleted.
  */
 function forgetAccount(variant: QoderVariant, credential: { pat: string }): void {
   const identity = qoderCredentialIdentity(credential)
@@ -212,9 +209,8 @@ async function patSet(variant: QoderVariant, file: string | undefined, inline: s
   const store = makeStore(variant)
   const pat = await readPat(file, inline)
   process.stdout.write(`Validating a token against ${variant.displayName} (${variant.region})…\n`)
-  // Validate before writing: a file the plugin saved should always be a file
-  // the plugin believes works. A refusal costs one discovery call, a bad save
-  // costs every later request an opaque 401.
+  // Validate before writing: a saved file should always be one the plugin believes
+  // works. A refusal costs one discovery call; a bad save costs every later request.
   if (!await validateApiKey(pat, variant.region)) {
     process.stderr.write(`dsh-qoder-connect: the token was refused by ${variant.displayName} (${variant.region}). Nothing was saved.\n`)
     process.stderr.write('If this token belongs to the other Qoder product, use --provider for that one.\n')
@@ -299,9 +295,8 @@ async function patRemove(variant: QoderVariant, id: string): Promise<number> {
 
 async function patClear(variant: QoderVariant): Promise<number> {
   const store = makeStore(variant)
-  // Only this variant's stored credentials are removed, so signing out of
-  // one product never affects the other. An environment token is not ours to
-  // remove; say so rather than pretend the state is fully signed out.
+  // Only this variant's stored credentials are removed, so signing out of one
+  // product never affects the other. An environment token is not ours to remove.
   const saved = await store.entries()
   for (const entry of saved) forgetAccount(variant, entry)
   await store.clear()
@@ -321,8 +316,8 @@ async function catalogRefresh(variant: QoderVariant): Promise<number> {
   const models = await client.fetchModels()
   const identity = qoderCredentialIdentity(credential)
   const fetch = client.lastCatalog
-  // The CLI writes the same saved-catalog file the host reads, so a refresh
-  // here survives a restart of the plugin exactly like a live fetch would.
+  // The CLI writes the same saved-catalog file the host reads, so a refresh here
+  // survives a plugin restart exactly like a live fetch would.
   new QoderCatalogStore({ path: qoderCatalogPath(variant.catalogFilename) }).set(identity, {
     source: fetch?.source ?? 'unknown',
     fetchedAtMs: fetch?.fetchedAtMs ?? Date.now(),
@@ -347,9 +342,8 @@ export async function run(argv: readonly string[]): Promise<number> {
   const action = rawAction as Action
   const jsonOutput = flags.includes('--json')
 
-  // `--provider <id>` (or `--provider=<id>`); absent means the China provider,
-  // so every invocation without a flag keeps acting on `qoder`. `--file <path>`
-  // names the file `pat set` reads the token from.
+  // `--provider <id>` (or `--provider=<id>`); absent means the China provider.
+  // `--file <path>` names the file `pat set` reads the token from.
   let providerId: string | undefined
   let file: string | undefined
   const rest: string[] = []

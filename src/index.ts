@@ -1,14 +1,9 @@
 /**
  * Qoder models for DeepSeek Harness, driven by Personal Access Tokens.
- * Registers one provider per product variant — `qoder` for the China region
- * and `qoder-global` for the international one — while streaming, tool calls,
- * compaction, and permissions stay Harness-owned.
  *
- * The two variants are assembled by the same factory and differ only in their
- * {@link QoderVariant} descriptor: each gets its own credential store,
- * transport, catalog, upstream client, shim, adapter, probe state, and routes.
- * Neither variant's startup, catalog fetch, or credential state can stop the
- * other from registering — a user with only one token sees only that group.
+ * One provider per variant — `qoder` (China) and `qoder-global` — built by the
+ * same factory and differing only in their {@link QoderVariant} descriptor.
+ * Streaming, tool calls, compaction, and permissions stay Harness-owned.
  *
  * @module dsh-qoder-connect
  */
@@ -22,13 +17,16 @@ import { createAuthKey, registerQoderAuthRoute } from './auth-route.ts'
 import { FALLBACK_QODER_MODELS, QoderCatalog } from './catalog.ts'
 import { qoderCatalogPath, QoderCatalogStore } from './catalog-store.ts'
 import { createQoderAdapter } from './adapter.ts'
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { createQoderShim } from './shim.ts'
 import { QoderProbeService } from './probe-service.ts'
 import { newestFirst, QoderProbeStore, qoderProbePath } from './probe-store.ts'
 import { QoderUpstreamClient, validateApiKey } from './upstream.ts'
 import { createQoderTransport, type QoderCheckInResult, type QoderTransport } from './qoder/transport/index.ts'
 import { getMachineId } from './qoder/transport/machine-id.ts'
-import { configurePluginPaths, qoderMachineIdPath } from './paths.ts'
+import { configurePluginPaths, qoderMachineIdPath, qoderPluginDataDir, qoderStateDir } from './paths.ts'
+import { queueCopy } from './copy.ts'
 import { registerQoderStatusRoute } from './web-status.ts'
 import { createProbeKey, registerQoderProbeRoute } from './probe-route.ts'
 import { CheckInScheduler, DEFAULT_CHECK_IN_MINUTE, EARLIEST_CHECK_IN_MINUTE, JsonFileCheckInStore, normalizeCheckInMinute } from './checkin-scheduler.ts'
@@ -36,7 +34,7 @@ import type { QoderModelInfo } from './catalog.ts'
 import type { QoderWebCatalog, QoderWebProbeSection } from './status-paths.ts'
 import { QODER_SETTINGS_FACE_PATH } from './status-paths.ts'
 import { clearHostHeartbeat, writeHostHeartbeat } from './host-heartbeat.ts'
-import { emitJobTokenHint, emitJobTokenRefreshFailedHint, installJobTokenHint } from './job-token-hint.ts'
+import { emitJobTokenHint, emitJobTokenRefreshFailedHint, emitQueueHint, emitQueueHintTo, installJobTokenHint } from './job-token-hint.ts'
 import { SettingsStore } from './settings-store.ts'
 import { QODER_CONNECT_VERSION } from './version.ts'
 import { CHINA_VARIANT, GLOBAL_VARIANT, QODER_VARIANTS, type QoderVariant } from './variants.ts'
@@ -145,60 +143,38 @@ export {
 /** Stable Cordis plugin name. */
 export const name = 'llm-qoder'
 
-/** The model registry required before the provider can register. */
+/** The model registry the provider needs before it can register. */
 export const inject = ['llm']
 
 /**
- * Settings namespace owning the China card's section.
+ * Settings namespace for the China card's section.
  *
- * DSH 0.1.2 dropped the `settingsNamespace()` branding function: a namespace is
- * now a nominal string, validated by the type system where it is used rather
- * than at runtime by a function call. The brand is compile-time only, so this
- * stays the plain string it always was — every comparison, descriptor lookup,
- * and `dsh` config file still sees `'qoder'`. It is cast once here so the
- * public constant carries the seam's type without pulling the brand helper
- * into this package (upstream DSH plugins, `dsh-llm-pi-ai` included, pass
- * their namespaces as plain string literals).
+ * A namespace is a nominal string checked at compile time only; the cast keeps
+ * the public constant typed without pulling the branding helper into this package.
  */
 export const QODER_SETTINGS_NS = 'qoder' as SettingsNamespace
 
 /**
- * Settings namespace owning the global card's section.
+ * Settings namespace for the global card's section.
  *
- * One namespace per card, not one shared: the settings Plugins tab dispatches a
- * card by rendering `settings.plugin.item` with `entryKey = ns` for each
- * namespace the Host serves, and skips an entry whose key names no served
- * namespace. With a single installed section, the global card registers
- * into the slot but is never rendered — the card list is built from the Host's
- * sections, not from the slot's entries. Each card therefore needs its own
- * installed section whose namespace equals the card's slot key.
+ * One namespace per card: the Plugins tab dispatches a card per served
+ * namespace, so a single section would leave the other card registered but
+ * never rendered.
  */
 export const QODER_GLOBAL_SETTINGS_NS = 'qoder-global' as SettingsNamespace
 
 /**
- * Settings namespace owning the shared quota-card section.
- *
- * One card above the two variant cards configures both sidebar quota widgets
- * (China and global) from a single place, so its toggles cannot live in
- * either variant's section — they are per-variant fields on a cross-variant
- * card. The Plugins tab dispatches by namespace, so this section is what makes
- * that card render (see {@link QODER_GLOBAL_SETTINGS_NS} for the mechanism).
+ * Settings namespace for the shared quota card, whose per-variant fields
+ * configure both sidebar widgets from one place.
  */
 export const QODER_QUOTA_SETTINGS_NS = 'qoder-quota' as SettingsNamespace
 
 /**
- * How often the credential files are re-checked, in milliseconds.
+ * How often the credential files are re-checked, in milliseconds. A local
+ * existence/parse read only — never the network, never a reasoning probe.
  *
- * A startup-only catalog fetch cannot notice a token saved while DSH is
- * already running, so the model group would not appear until a restart. This
- * poll is a cheap existence/parse read of at most a few local files: it never
- * contacts the network and never runs a reasoning probe.
- *
- * `DSH_QODER_POLL_MS` overrides it. That exists so the sweep can be
- * exercised end to end in tests and shortened while diagnosing a slow
- * sign-in on a real machine; it is not a product setting and no UI exposes it.
- * The value is clamped to a sane range so a mistaken override cannot turn the
- * poll into a busy loop.
+ * `DSH_QODER_POLL_MS` overrides it for tests and diagnosis: clamped, not a
+ * product setting, and no UI exposes it.
  */
 const CREDENTIAL_POLL_MS = 30_000
 
@@ -214,39 +190,24 @@ function credentialPollMs(): number {
 }
 
 /**
- * How long to wait before retrying a catalog fetch that failed.
+ * How many credential sweeps to wait before retrying a failed catalog fetch.
  *
- * The credential sweep deliberately does not re-fetch a catalog it already has
- * (the same token carries no new model information). But a *failed* fetch must
- * not be treated the same way: without a retry, one transient network blip at
- * startup would leave the group on the built-in fallback roster until the user
- * noticed and pressed refresh. This bound keeps that recovery automatic while
- * still honoring the "not every round" rule — at most one attempt per
- * interval, and none at all once a live catalog lands.
- *
- * Expressed as a multiple of the sweep rather than a fixed duration so the two
- * stay in proportion under the `DSH_QODER_POLL_MS` override.
+ * A live catalog is never re-fetched on a sweep (the same token carries no new
+ * model information), but a *failed* one must recover on its own — one startup
+ * blip must not pin the group to the fallback roster until a manual refresh.
+ * A multiple of the sweep so the `DSH_QODER_POLL_MS` override scales both.
  */
 const CATALOG_RETRY_SWEEPS = 10
 
 /** Plugin configuration. */
 export interface Config {
-  /**
-   * Whether the user has authorized sending probe requests about reasoning
-   * efforts. Off by default: a probe spends real credit, so nothing is sent
-   * until the user explicitly agrees.
-   */
+  /** Whether the user authorized reasoning-effort probes (each one spends real credit). */
   probeConsent?: boolean
   /** Use the largest context window the global catalog explicitly offers. */
   useMaximumContextWindow?: boolean
-  /** The China variant's own maximum-window preference, persisted in its section. */
+  /** The China variant's own maximum-window preference. */
   useMaximumContextWindowCN?: boolean
-  /**
-   * Per-model context-window overrides for the global variant (model id →
-   * tokens). Kept for schema compatibility; the card no longer writes
-   * per-model overrides because the upstream honours only the default and
-   * the maximum, nothing between.
-   */
+  /** Per-model context-window overrides, global (model id → tokens); kept for schema compatibility. */
   modelContextWindows?: Record<string, number>
   /** The China variant's per-model overrides; see {@link Config.modelContextWindows}. */
   modelContextWindowsCN?: Record<string, number>
@@ -266,35 +227,22 @@ export interface Config {
   checkInMinuteCN?: number
   /** When the Global variant checks in, as minutes past midnight in UTC+8 (600 = 10:00). */
   checkInMinuteGlobal?: number
-  /**
-   * Sidebar quota refresh interval in milliseconds. One shared value (both
-   * cards poll on it) because the two widgets hit the same rate-limited
-   * billing family; the floor guards against a typo hammering the quota
-   * endpoint, which serves no cache.
-   */
+  /** Sidebar quota refresh interval in ms, shared by both cards (same rate-limited upstream). */
   quotaPollMs?: number
+  /**
+   * Wait out Qoder's model queue inside the plugin (default on). When off, a
+   * queue answer keeps its retry hint and is handed to the host instead.
+   */
+  queueWait?: boolean
+  /** Upper bound of that wait, in seconds (10–3600). */
+  queueWaitSeconds?: number
 }
 
 /**
- * Mark one configuration field as a live projected setting, when the host has
- * that concept at all.
- *
- * DSH 0.1.7 projects a `.volatile()` field into the profile's settings form and
- * hands the plugin a STABLE REFERENCE instead of the value; a field without the
- * mark never reaches the form — `dsh-settings`' `describe()` skips an entry
- * whose schema has no volatile field (`lib/index.js:411-421`), which is exactly
- * what makes the browser-side `configForms` namespace exist. DSH 0.1.5's
- * schemastery has no `volatile` at all, so calling it there is a `TypeError`
- * that would take the whole plugin down with it. The method is therefore
- * probed, never assumed.
- *
- * Only TOP-LEVEL fields are marked: a volatile field may not sit inside another
- * volatile field, and schemastery rejects a volatile node reached through a
- * collection (`validateVolatileSchema`), while the 0.1.7 client writes a single
- * path segment (`ConfigFormController.set` → `path: [field]`). Every field this
- * plugin exposes is already a top-level member of {@link Config}, so marking
- * the field itself is both legal and the only granularity the write path can
- * address.
+ * Mark one configuration field as a projected (volatile) setting, when the host
+ * has that concept: a projected field reaches the settings form and arrives as a
+ * stable reference instead of a value. The method is probed, never assumed — an
+ * older host has none and would throw. Only top-level fields may be marked.
  *
  * @param field - the field's schema.
  * @returns the projected schema on a host that supports projection, else the field itself.
@@ -311,13 +259,8 @@ function volatileField<T extends object>(field: T): T {
 }
 
 /**
- * Read one configuration field through the volatile indirection.
- *
- * On DSH 0.1.7 a `.volatile()` field arrives as a reference object whose value
- * is read with `.get()` (`@deepseek-ai/dsh-agent-default-model`,
- * `lib/index.js:38-41`); on DSH 0.1.5 the plain value arrives directly. Every
- * read of a projected field goes through here, so both hosts yield the value
- * itself.
+ * Read one configuration field through the volatile indirection: a projected
+ * field is a reference read with `.get()`, a plain field arrives as its value.
  *
  * @param config - the raw plugin configuration, in either host's shape.
  * @param field - field name inside the configuration object.
@@ -331,13 +274,8 @@ function readField(config: Config | undefined, field: keyof Config): unknown {
 }
 
 /**
- * Read one declared field with its declared type.
+ * Typed face of {@link readField} for a single declared field.
  *
- * The typed face of {@link readField}, for the few call sites that want a
- * single field rather than a whole {@link readConfig}.
- *
- * @param config - the raw plugin configuration, in either host's shape.
- * @param field - field name inside the configuration object.
  * @returns the field's plain value, or undefined when it is absent.
  */
 function readConfigField<K extends keyof Config>(config: Config | undefined, field: K): Config[K] {
@@ -352,11 +290,7 @@ const MAXIMUM_CONTEXT_WINDOW_FIELD = volatileField(z.boolean().default(true)
 /** The China variant's own maximum-window preference. */
 const MAXIMUM_CONTEXT_WINDOW_CN_FIELD = volatileField(z.boolean().default(true)
   .description('Use the largest context window declared by Qoder (China) when alternatives are available (on by default)'))
-/**
- * Per-model window overrides (model id → tokens). The card writes one entry
- * per selector change; the field is optional so an absent map means "no
- * overrides" rather than a default object the host must keep in sync.
- */
+/** Per-model window overrides (model id → tokens); absent means "no overrides". */
 const MODEL_CONTEXT_WINDOWS_FIELD = volatileField(z.dict(z.number().min(1), z.string())
   .description('Per-model context-window overrides for Qoder Global (model id → tokens)'))
 /** Disabled models list (blacklist) */
@@ -369,18 +303,9 @@ const QUOTA_TOGGLE_FIELD = volatileField(z.boolean().default(false)
 const AUTO_CHECK_IN_FIELD = volatileField(z.boolean().default(false)
   .description('每天自动签到领取算力额度（默认关闭）'))
 /**
- * When a variant checks in, as minutes past midnight in UTC+8.
- *
- * Stored as a plain minute count rather than a "HH:mm" string so the schema
- * itself rejects an impossible time: a browser time input yields 0–1439, and
- * anything outside that range fails Host validation instead of silently
- * scheduling a request at a moment that never arrives.
- *
- * The floor is the window's own opening rather than midnight, because a moment
- * before 10:00 is impossible in the same sense: the upstream has not opened the
- * day's benefit yet, so the run can only read the *previous* window's status
- * and settle a day that was never claimed. Refusing the value is the point — it
- * is not a time this plugin could honour.
+ * When a variant checks in, as minutes past UTC+8 midnight (0–1439), so the
+ * schema itself rejects an impossible time. The floor is the upstream window's
+ * 10:00 opening: an earlier run could only settle the previous day.
  */
 const CHECK_IN_MINUTE_FIELD = volatileField(z.number()
   .default(DEFAULT_CHECK_IN_MINUTE)
@@ -388,11 +313,9 @@ const CHECK_IN_MINUTE_FIELD = volatileField(z.number()
   .max(1439)
   .description('每日自动签到的时刻（自 UTC+8 午夜起的分钟数，600 = 10:00；最早 10:00，即活动窗口开启时刻）'))
 /**
- * Quota poll interval: default 5 minutes, floor 1 minute. The status route
- * performs a live upstream billing call per request with no cache, so an
- * aggressively small interval translates directly into upstream load; the
- * floor is the smallest value the UI offers rather than a silent clamp —
- * smaller staged values fail Host validation and refuse to save.
+ * Quota poll interval: default 5 minutes, floor 1 minute. The status route makes
+ * a live, uncached upstream billing call per request, so the floor is the
+ * smallest value the UI offers rather than a silent clamp.
  */
 export const QUOTA_POLL_DEFAULT_MS = 300_000
 export const QUOTA_POLL_MIN_MS = 60_000
@@ -400,6 +323,25 @@ const QUOTA_POLL_FIELD = volatileField(z.number()
   .default(QUOTA_POLL_DEFAULT_MS)
   .min(QUOTA_POLL_MIN_MS)
   .description('Sidebar quota card refresh interval in milliseconds (default 300000, minimum 60000)'))
+/**
+ * Queue wait: when on, a 10605 answer is polled inside the plugin and replayed.
+ * When off, the failure keeps its retry hint and goes to the host unchanged.
+ */
+const QUEUE_WAIT_FIELD = volatileField(z.boolean().default(true)
+  .description('Retry inside the plugin: polls the model queue, then replays. Off hands the request result to the host unchanged'))
+/**
+ * How long one call may wait in the model queue, in seconds.
+ *
+ * Only a floor is enforced: the wait is a budget the user owns, and the loop
+ * divides it by whatever pace the upstream reports, so a value larger than the
+ * upstream's own countdown simply spans more rounds.
+ */
+export const QUEUE_WAIT_SECONDS_DEFAULT = 540
+export const QUEUE_WAIT_SECONDS_MIN = 1
+const QUEUE_WAIT_SECONDS_FIELD = volatileField(z.number()
+  .default(QUEUE_WAIT_SECONDS_DEFAULT)
+  .min(QUEUE_WAIT_SECONDS_MIN)
+  .description('How long the plugin may wait in the model queue, in seconds; each poll still waits the pace Qoder reports'))
 
 export const Config: z<Config> = z.object({
   probeConsent: PROBE_CONSENT_FIELD,
@@ -407,11 +349,9 @@ export const Config: z<Config> = z.object({
   useMaximumContextWindowCN: MAXIMUM_CONTEXT_WINDOW_CN_FIELD,
   modelContextWindows: MODEL_CONTEXT_WINDOWS_FIELD,
   modelContextWindowsCN: MODEL_CONTEXT_WINDOWS_FIELD,
-  // The disabled-model lists live at the TOP level, and they must: DSH 0.1.7
-  // projects an entry's settings form from this schema (its `describe()` reads
-  // `entry.fiber.runtime.Config`), so a field that is not declared here reaches
-  // neither the settings document nor the Models page's provider directory —
-  // which is exactly how "设置-模型 里看不到模型开关" happened.
+  // Must be declared at the TOP level: the host projects an entry's settings
+  // form from this schema, so an undeclared field reaches neither the settings
+  // document nor the Models page.
   disabledModels: DISABLED_MODELS_FIELD,
   disabledModelsCN: DISABLED_MODELS_FIELD,
   sidebarQuotaCN: QUOTA_TOGGLE_FIELD,
@@ -421,17 +361,13 @@ export const Config: z<Config> = z.object({
   checkInMinuteCN: CHECK_IN_MINUTE_FIELD,
   checkInMinuteGlobal: CHECK_IN_MINUTE_FIELD,
   quotaPollMs: QUOTA_POLL_FIELD,
+  queueWait: QUEUE_WAIT_FIELD,
+  queueWaitSeconds: QUEUE_WAIT_SECONDS_FIELD,
 })
 
 /**
- * The field groups the configuration is merged from, one list per card.
- *
- * Writing the merge out by hand is what broke auto check-in: the quota group
- * grew four fields (`autoCheckInCN`, `autoCheckInGlobal`, `checkInMinuteCN`,
- * `checkInMinuteGlobal`) while the merge kept copying only the three that
- * predated them, so `current().autoCheckInCN` read `undefined` forever and the
- * scheduler saw the toggle as permanently off. The card saved it, the file
- * held it, and nothing ever acted on it.
+ * The field groups the configuration is merged from, one list per card: a field
+ * added to {@link Config} but missing here is never read.
  */
 export const CN_SECTION_KEYS = [
   'probeConsent',
@@ -454,6 +390,8 @@ export const QUOTA_SECTION_KEYS = [
   'checkInMinuteCN',
   'checkInMinuteGlobal',
   'quotaPollMs',
+  'queueWait',
+  'queueWaitSeconds',
 ] as const satisfies readonly (keyof Config)[]
 
 /** Every declared configuration field, in the order the sections are merged. */
@@ -471,9 +409,8 @@ function pickFields<K extends keyof Config>(
   const value = source()
   const picked: Partial<Config> = {}
   for (const key of keys) {
-    // Through `readField`: on 0.1.7 the source's projected fields are
-    // references, and a reference must never be copied into the merged
-    // configuration the rest of the plugin compares against.
+    // Through `readField`: a projected field is a reference and must never be
+    // copied into the merged configuration.
     const field = readField(value, key)
     if (field !== undefined) (picked as Record<string, unknown>)[key] = field
   }
@@ -481,13 +418,8 @@ function pickFields<K extends keyof Config>(
 }
 
 /**
- * Unwrap a whole configuration object into plain values.
- *
- * The merged configuration is read through {@link pickFields}/{@link readField}
- * everywhere else, but the plugin also reads its initial config directly while
- * it assembles its runtimes — before any settings section has handed over a
- * source. On 0.1.7 those direct reads would otherwise compare a reference
- * object against `true`/`undefined` and silently see "not set" for every field.
+ * Unwrap a whole configuration object into plain values, for the direct reads
+ * made before any settings section supplies a source.
  *
  * @param config - the raw plugin configuration, in either host's shape.
  * @returns the same configuration with every declared field read out.
@@ -506,20 +438,16 @@ interface VariantRuntime {
   probeStore: QoderProbeStore
   probeService: QoderProbeService
   /**
-   * The last catalogs that loaded, keyed by account.
-   *
-   * Sits between the live fetch and the built-in roster in the degradation
-   * order: a restart, or a fetch that fails while offline, serves what this
-   * token was last actually shown instead of the one-off snapshot compiled
-   * into the plugin.
+   * The last catalogs that loaded, keyed by account: serves what this token was
+   * last actually shown, ahead of the compiled-in roster, after a restart or a
+   * fetch that fails while offline.
    */
   savedCatalogs: QoderCatalogStore
   /** The static roster this variant falls back to. */
   fallback: readonly QoderModelInfo[]
   /**
    * Where the served models came from, in degradation order:
-   * `live` (fetched now) → `saved` (this account's last successful fetch) →
-   * `fallback` (the roster compiled into the plugin).
+   * `live` → `saved` (this account's last fetch) → `fallback` (built-in roster).
    */
   catalogSource: 'live' | 'saved' | 'fallback'
   /** When the served catalog was fetched, for `live` and `saved`. */
@@ -529,36 +457,33 @@ interface VariantRuntime {
   /** When the last catalog attempt started, for the retry backoff. */
   lastFetchAtMs: number
   /**
-   * Bumped whenever this variant's catalog generation changes — a token
-   * switch, a sign-out, or a new fetch superseding an older one. A request
-   * carries the generation it started under and refuses to write back if the
-   * generation has moved on, so a slow answer can never resurrect data the
-   * plugin has since decided to drop (spec §5: late responses are discarded).
+   * Bumped on a token switch, a sign-out, or a newer fetch. A request carries
+   * the generation it started under and refuses to write back once it moved, so
+   * a slow answer cannot resurrect data the plugin has since dropped.
    */
   catalogGeneration: number
   /**
    * The in-flight catalog fetch, scoped to the identity and generation it began
-   * under. A caller may only join the same scope; a token change cancels the
-   * old request and immediately starts one for the newly adopted account.
+   * under; a token change aborts it and starts one for the new account.
    */
   inflightFetch: CatalogFetch | undefined
   /** Notify the model directory that this variant's answers changed. */
   invalidate: () => void
+  /** Host session of the most recent adapter call; the transport has no session id. */
+  sessionRef: { id: string | undefined }
+  /** Configured queue-wait budget in ms, read per call. */
+  queueBudgetMs: () => number
   /** Whether the provider registered successfully. */
   registered: boolean
   /**
-   * When the self-heal last auto-refreshed this variant's job token, epoch ms.
-   * Recorded by the transport's `onJobTokenRefreshed` callback and surfaced on
-   * the card's status document, so the otherwise invisible recovery shows.
+   * When the self-heal last auto-refreshed this variant's job token, epoch ms;
+   * surfaced on the card so the recovery shows.
    */
   jobTokenRefreshedAt: () => number | undefined
   /**
-   * Claim today's daily benefit for this variant's account.
-   *
-   * A capability the check-in scheduler and the card's manual button both
-   * need, surfaced as a named field rather than read out of the transport with
-   * an `as unknown as` cast: such a cast fails silently (a renamed private
-   * field turns every check-in into a no-op) instead of failing to compile.
+   * Claim today's daily benefit for this variant's account, used by both the
+   * check-in scheduler and the card's manual button. A named field rather than a
+   * cast out of the transport, which would fail silently instead of compiling.
    */
   checkIn: (signal?: AbortSignal) => Promise<QoderCheckInResult>
 }
@@ -575,43 +500,23 @@ interface CatalogFetch {
 const credentialIdentity = qoderCredentialIdentity
 
 /**
- * The static catalog a variant serves before its first successful fetch.
- *
- * Both regions share one roster transcribed from the transport's built-in
- * model defaults: unlike the WorkBuddy-era endpoints, the Qoder pools are
- * region-specific only in what discovery lists, and inventing a second roster
- * from nothing would misdescribe whichever variant it was not captured from.
+ * The static catalog a variant serves before its first successful fetch: one
+ * roster for both regions, transcribed from the transport's model defaults.
  */
 function fallbackFor(_variant: QoderVariant): readonly QoderModelInfo[] {
   return FALLBACK_QODER_MODELS
 }
 
-/**
- * The hint row's summary line: what happened, and when.
- *
- * Named here rather than in the hint module because the text is this plugin's
- * user-facing wording, and the transport callback that produces it runs before
- * the plugin's own scope exists.
- */
+/** The hint row's summary line: what happened, and when. */
 function jobTokenHintText(at: number): string {
   const time = new Date(at).toLocaleTimeString('zh-CN', { hour12: false })
   return `jobToken 已自动刷新（${time}）— 旧令牌被上游拒绝，已自动重换并恢复`
 }
 
 /**
- * The failed-heal row's summary line.
- *
- * Deliberately does not name a cause: the upstream rejection that survived a
- * fresh token is not necessarily an authorization problem at all, and the real
- * reason travels in the failure message itself (see the SSE envelope body).
- * Claiming "quota" or "revoked" here would be a guess presented as a finding.
- *
- * It also must not point the reader at "the error above": the failed heal does
- * not always belong to a chat whose failure renders a card in this
- * conversation. A heal inside the session-title request — same transport,
- * same shared notice state — fails silently there, so the row used to send
- * users looking for an error card that does not exist. The row states only
- * what is known: the retry ran, it did not recover, the request failed.
+ * The failed-heal row's summary line. Deliberately names no cause — the real
+ * reason travels in the failure message — and must not point at "the error
+ * above", since the heal may belong to a request that renders no card.
  */
 function jobTokenRefreshFailedHintText(at: number): string {
   const time = new Date(at).toLocaleTimeString('zh-CN', { hour12: false })
@@ -627,12 +532,10 @@ function createVariantRuntime(
   identityOf: (variantId: string) => string | undefined,
 ): VariantRuntime {
   const store = new QoderCredentialStore({ variant, logger: ctx.logger })
-  // The self-heal's auto-refresh record, surfaced on the card. Per variant:
-  // each region's transport reports its own refreshes.
+  // The self-heal's auto-refresh record, surfaced on the card (per variant).
   let jobTokenRefreshedAt: number | undefined
-  // The attachment service may not exist when the client and transport are
-  // constructed (and a headless profile never has one), so both get a stable
-  // facade that resolves the real store per request.
+  // The attachment service may be absent at construction (a headless profile
+  // never has one), so both get a facade that resolves the real store per request.
   const resolveAttachmentService = (): AttachmentStore => {
     const service = ctx.get('attachments')
     if (service === undefined) {
@@ -648,29 +551,85 @@ function createVariantRuntime(
       await resolveAttachmentService().readImageRequest(attachment, policy, signal),
     saveImage: async request => await resolveAttachmentService().saveImage(request),
   }
+  // Queue decisions go to a file the user can hand back verbatim.
+  const queueDiagPath = join(qoderPluginDataDir(), 'log', 'queue.log')
+  rotateQueueLog(queueDiagPath)
+  const writeQueueDiag = (line: string): void => {
+    try {
+      mkdirSync(dirname(queueDiagPath), { recursive: true })
+      appendFileSync(queueDiagPath, `${new Date().toISOString()} ${variant.id} ${line}\n`)
+    } catch {
+      // Diagnostics only; never affect the chat.
+    }
+  }
+  // The adapter sees the host session; the shim-based transport does not.
+  const sessionRef: { id: string | undefined } = { id: undefined }
+  // Last row written, and the next round that may print one (doubling).
+  let lastQueueHint = { attempt: 0, at: 0 }
+  let nextQueueHintAt = 1
   const transport = createQoderTransport({
     region: variant.region,
     resolvePat: () => store.patPromise(),
+    // A settings toggle must reach the next call, not the next restart.
+    queueWait: () => current().queueWait !== false,
+    // The configured wait is the only cap: each poll still waits the upstream's
+    // own retryAfterSeconds, and a shorter budget simply ends the wait sooner.
+    queueWaitBudgetMs: () => Math.max(
+      QUEUE_WAIT_SECONDS_MIN * 1_000,
+      (current().queueWaitSeconds ?? QUEUE_WAIT_SECONDS_DEFAULT) * 1_000,
+    ),
     // Keep the machine-id seed inside the plugin's own data directory
     // (state/) instead of letting the transport write it near $HOME.
     resolveMachineId: () => getMachineId([qoderMachineIdPath()]),
     attachments,
+    onDiag: writeQueueDiag,
     onJobTokenRefreshed: info => {
       jobTokenRefreshedAt = info.at
       ctx.logger.warn(
         `dsh-qoder-connect: ${variant.displayName} job token was auto-refreshed after an upstream rejection`,
       )
-      // The visible channel: one line in the conversation that triggered the
-      // refresh (the request this heal happened inside).
+      // The visible channel: one line in the conversation that triggered the refresh.
       emitJobTokenHint(info.at, jobTokenHintText(info.at))
     },
     onJobTokenRefreshFailed: info => {
-      // The heal ran and lost. Announced at most once per outage by the
-      // transport, so a long rejection storm prints one row, not one per retry.
+      // The heal ran and lost; announced at most once per outage.
       ctx.logger.warn(
         `dsh-qoder-connect: ${variant.displayName} job token refresh did not recover the chat (upstream status ${info.status ?? 'unknown'})`,
       )
       emitJobTokenRefreshFailedHint(info.at, jobTokenRefreshFailedHintText(info.at))
+    },
+    onQueueWait: info => {
+      // `llm/retry` is the host's own retry state machine: writing it from here
+      // corrupted sessions whenever a wait was interrupted or its round numbers
+      // skipped. This row is a plain log line that touches no state machine.
+      if (info.cleared === true) return
+      const now = Date.now()
+      // The session-title request shares this provider, so two calls can open a
+      // wait at the same moment; one row per burst is the point.
+      if (now - lastQueueHint.at < 5_000) return
+      // Rounds 1, 2, 4, 8, 16…: a long budget prints in log2(rounds) rows
+      // instead of one every fixed interval.
+      if (info.attempt < nextQueueHintAt) return
+      nextQueueHintAt = Math.max(info.attempt + 1, info.attempt * 2)
+      lastQueueHint = { attempt: info.attempt, at: now }
+      const copy = queueCopy()
+      const text = copy.hint({
+        display: variant.displayName,
+        attempt: info.attempt,
+        ...info.waitTimeMs === undefined ? {} : { waitSeconds: Math.ceil(info.waitTimeMs / 1000) },
+      })
+      const sessionId = info.sessionId ?? sessionRef.id
+      const sessions = ctx.get('sessions') as
+        | { get(id: string): QueueHintSession | undefined }
+        | undefined
+      const session = sessionId === undefined ? undefined : sessions?.get(sessionId)
+      if (session === undefined) {
+        writeQueueDiag(`hint fallback: no session (sessionId=${sessionId ?? 'none'})`)
+        emitQueueHint(text)
+        return
+      }
+      writeQueueDiag(`hint row attempt=${info.attempt}`)
+      emitQueueHintTo(session, text)
     },
   })
   const client = new QoderUpstreamClient({
@@ -682,13 +641,9 @@ function createVariantRuntime(
   })
   const fallback = fallbackFor(variant)
   const catalog = new QoderCatalog(fallback)
-  // Read the initial preferences through the caller's LIVE configuration view
-  // (`current()`), never the bare entry config: the plugin-owned settings file
-  // is the live source, and reading the entry here made every restart forget
-  // the disabled-model list — the entry is empty by then (its row was cleaned
-  // up), so the catalog came back "all models enabled" and the picker offered
-  // models the user had switched off. `readField` unwraps the volatile
-  // references on 0.1.7.
+  // Read initial preferences through the LIVE `current()` view, never the bare
+  // entry config: the plugin-owned settings file is the live source, and the
+  // entry is empty once its row has been cleaned.
   const initial = current()
   if (variant.id !== CHINA_VARIANT.id) {
     catalog.setUseMaximumContextWindow(initial.useMaximumContextWindow === true)
@@ -698,19 +653,16 @@ function createVariantRuntime(
     if (initial.modelContextWindowsCN !== undefined) catalog.setModelContextWindows(initial.modelContextWindowsCN)
     if (initial.disabledModelsCN !== undefined) catalog.setDisabledModels(initial.disabledModelsCN)
   }
-  // Start hidden: a variant must serve no models until a token has actually
-  // been adopted, so a signed-out variant is empty rather than showing a roster
-  // whose models could only fail. `adoptIdentity` is what reveals it, and it
-  // treats "never seen, still signed out" as no change — which is only correct
-  // if the pre-adoption state is already hidden.
+  // Start hidden: a variant must serve no models until a token has actually been
+  // adopted, so a signed-out variant is empty rather than showing a roster that
+  // could only fail. `adoptIdentity` is what reveals it.
   catalog.setVisible(false)
   const probeStore = new QoderProbeStore({
     pluginVersion: QODER_CONNECT_VERSION,
     path: qoderProbePath(variant.probeFilename),
   })
-  // One file per variant, for the same reason the probe records are split: the
-  // two regions can disagree about rates and windows for shared model ids, so
-  // a saved China roster must never be served as a global one.
+  // One file per variant: the two regions can disagree about rates and windows
+  // for shared model ids, so a saved China roster must never serve as a global one.
   const savedCatalogs = new QoderCatalogStore({ path: qoderCatalogPath(variant.catalogFilename) })
   const probeService = new QoderProbeService({
     store: probeStore,
@@ -718,9 +670,7 @@ function createVariantRuntime(
     credentials: store,
     client,
     consent: () => current().probeConsent === true,
-    // Observations are per account: the service reads and writes its records
-    // against this identity, so one token's detected levels never answer for
-    // another's, and an in-flight sweep cannot store under a new token.
+    // Per account: one token's detected levels never answer for another's.
     account: () => identityOf(variant.id),
   })
   return {
@@ -742,6 +692,8 @@ function createVariantRuntime(
     invalidate: () => {},
     registered: false,
     jobTokenRefreshedAt: () => jobTokenRefreshedAt,
+    sessionRef,
+    queueBudgetMs: () => Math.max(1, current().queueWaitSeconds ?? QUEUE_WAIT_SECONDS_DEFAULT) * 1_000,
     checkIn: (signal?: AbortSignal) => transport.checkIn(signal),
   }
 }
@@ -749,42 +701,35 @@ function createVariantRuntime(
 /** The catalog provenance the card displays. */
 function catalogSection(runtime: VariantRuntime): QoderWebCatalog {
   return {
-    // The source is what the models on screen actually came from, so the card
-    // can distinguish a fresh fetch from a saved one from the built-in roster —
-    // "stale" and "offline" are different problems for the user.
+    // What the models on screen actually came from: "stale" and "offline" are
+    // different problems for the user.
     source: runtime.catalogSource,
-    // The served catalog's own fetch time, which for a saved list is when it
-    // was fetched, not when the process started.
+    // The served catalog's own fetch time, not when the process started.
     ...runtime.catalogFetchedAtMs === undefined ? {} : { fetchedAt: runtime.catalogFetchedAtMs },
     ...runtime.catalogError === undefined ? {} : { error: runtime.catalogError },
   }
 }
 
 /**
- * Whether a model can be probed by hand: it reasons and the upstream declares
- * no effort set for it.
- *
- * Deliberately *not* filtered by whether a result already exists. Dropping a
- * model once it has been detected made the list shrink with use, so
- * re-detecting one model — after an upstream change, say — meant clearing every
- * other result first. The list stays stable and the card marks which entries
- * already have an answer.
+ * Whether a model can be probed by hand: it reasons and the upstream declares no
+ * effort set for it. Deliberately not filtered by whether a result already
+ * exists, so the list stays stable as use grows.
  */
 function isProbeCandidate(info: QoderModelInfo): boolean {
   if (info.reasoning?.supports !== true) return false
   return (info.reasoning.supportedEfforts?.length ?? 0) === 0
 }
 
+/** The slice of a session the queue notice needs. */
+interface QueueHintSession {
+  append(type: string, data: unknown): unknown
+}
+
 /** Compact probe state for one card: consent, candidates, observations. */
 function probeSection(runtime: VariantRuntime, consent: boolean): QoderWebProbeSection {
   const models = runtime.catalog.current()
-  // Read results through the *same* judgement the adapter uses, rather than
-  // straight from the store. A raw record can be stale in ways the adapter
-  // already discounts — its catalog row changed, it aged past the TTL, or the
-  // upstream has since declared an effort set (which always wins) — and showing
-  // one would have the card promise levels the model picker does not offer. A
-  // model the upstream dropped leaves the catalog entirely, so it drops out
-  // here too.
+  // Read results through the same judgement the adapter uses, not straight from
+  // the store: a raw record can be stale in ways the adapter already discounts.
   const results = models.flatMap(info => {
     const record = runtime.probeService.recordFor(info.id)
     if (record === undefined) return []
@@ -800,21 +745,57 @@ function probeSection(runtime: VariantRuntime, consent: boolean): QoderWebProbeS
     consent,
     running: runtime.probeService.isRunning(),
     candidates: models.filter(isProbeCandidate).map(info => info.id),
-    // Newest first: a detection the user just ran belongs at the top, not
-    // appended below every earlier one.
+    // Newest first: a detection just run belongs at the top.
     results: newestFirst(results),
   }
 }
 
+/** How many days a rotated queue log is kept. */
+const QUEUE_LOG_KEEP_DAYS = 7
+/** Timestamp format of a rotated queue log: `queue.20261021020410.log`. */
+const QUEUE_LOG_ROTATED = /^queue\.\d{14}\.log$/u
+
 /**
- * Run a detached promise without letting its failure kill the host.
+ * Archive the previous run's queue log and prune old archives.
  *
- * Node terminates the whole process on an unhandled rejection (exit code 1),
- * which the desktop shell reports as the backend having "exited unexpectedly"
- * — so a failing heartbeat write, loopback close, or background sweep in this
- * plugin would take the entire Harness down with it. Every fire-and-forget
- * call therefore carries a handler; a failure is a diagnostic, never a reason
- * for the host to die.
+ * Runs once per process, not per plugin reload: the two variants share the file,
+ * and rolling on every reload would shred one run into several archives.
+ */
+function rotateQueueLog(logPath: string): void {
+  const marker = globalThis as { __qoderQueueLogRolled?: boolean }
+  if (marker.__qoderQueueLogRolled === true) return
+  marker.__qoderQueueLogRolled = true
+  try {
+    const dir = dirname(logPath)
+    mkdirSync(dir, { recursive: true })
+    if (existsSync(logPath) && statSync(logPath).size > 0) {
+      const now = new Date()
+      const stamp = [
+        now.getFullYear(),
+        String(now.getMonth() + 1).padStart(2, '0'),
+        String(now.getDate()).padStart(2, '0'),
+        String(now.getHours()).padStart(2, '0'),
+        String(now.getMinutes()).padStart(2, '0'),
+        String(now.getSeconds()).padStart(2, '0'),
+      ].join('')
+      copyFileSync(logPath, join(dir, `queue.${stamp}.log`))
+      writeFileSync(logPath, '')
+    }
+    const cutoff = Date.now() - QUEUE_LOG_KEEP_DAYS * 24 * 60 * 60 * 1000
+    for (const name of readdirSync(dir)) {
+      if (!QUEUE_LOG_ROTATED.test(name)) continue
+      const path = join(dir, name)
+      if (statSync(path).mtimeMs < cutoff) unlinkSync(path)
+    }
+  } catch {
+    // Diagnostics only; never affect startup.
+  }
+}
+
+/**
+ * Run a detached promise without letting its failure kill the host: Node turns an
+ * unhandled rejection into process termination, so every fire-and-forget call
+ * carries a handler and a failure stays a diagnostic.
  */
 function detach(ctx: Context, work: Promise<unknown>, what: string): void {
   void work.catch((error: unknown) => {
@@ -823,15 +804,11 @@ function detach(ctx: Context, work: Promise<unknown>, what: string): void {
 }
 
 /**
- * Start one variant: its loopback endpoint, provider registration, and
- * configuration-card wiring.
+ * Start one variant: its loopback endpoint, provider registration, and card
+ * wiring. Registration waits for the shim to hold a port, because the models read
+ * the shim origin at construction time; a failure stays contained to this variant.
  *
- * Registration waits for the shim to hold a port, because the provider's
- * models read the shim origin at construction time. A failure here is
- * contained to this variant: the caller logs it and the other keeps working.
- *
- * @param seedCatalog - adopt the current credential into this runtime's
- *   catalog immediately; supplied by `apply` (it owns `adoptIdentity`).
+ * @param seedCatalog - adopt the current credential immediately (supplied by `apply`).
  * @returns whether the provider registered.
  */
 async function startVariant(ctx: Context, runtime: VariantRuntime, seedCatalog: () => Promise<void>): Promise<boolean> {
@@ -851,8 +828,6 @@ async function startVariant(ctx: Context, runtime: VariantRuntime, seedCatalog: 
   }
 
   try {
-    // Constructed only once the listener holds a port: the provider's models
-    // read the shim origin at construction time.
     const qoder = createQoderAdapter({
       providerId: variant.id,
       displayName: variant.displayName,
@@ -861,6 +836,8 @@ async function startVariant(ctx: Context, runtime: VariantRuntime, seedCatalog: 
       catalog,
       resolveAttachments: () => ctx.get('attachments'),
       observe: modelId => probeService.recordFor(modelId),
+      onSession: id => { runtime.sessionRef.id = id },
+      queueBudgetMs: runtime.queueBudgetMs,
     })
     runtime.invalidate = () => {
       qoder.invalidate()
@@ -871,21 +848,16 @@ async function startVariant(ctx: Context, runtime: VariantRuntime, seedCatalog: 
     let releaseDirectory: (() => void) | undefined
     try {
       releaseAdapter = ctx.llm.registerAdapter([variant.id], qoder.adapter)
-      // The settings namespace the Models page resolves this directory row
-      // against: 0.1.7 serves one settings form per profile ENTRY, keyed by
-      // `entry.options.id` (dsh-settings `describe()`), so the row must name
-      // that id. A profile that composes this bundle without an explicit id
-      // falls back to the package name, which is not a served name — the row
-      // then renders with no configuration, so `variant.id` (this provider's
-      // own id) is the last-resort key rather than a wrong one.
+      // The row must name the settings form THIS host serves: the host keys one form
+      // per profile entry (`entry.options.id`), so a missing id falls back to
+      // `variant.id` rather than to the unserved package name.
       const entryId = (ctx as unknown as { fiber?: { entry?: { options?: { id?: string } } } }).fiber?.entry?.options?.id
       const settingsNs = (entryId ?? variant.id) as SettingsNamespace
       releaseDirectory = ctx.llm.registerConfigurableProviders([{
         provider: variant.id,
         displayName: variant.displayName,
-        // Each variant's directory entry joins its own settings form; the
-        // Models settings page resolves `settingsNs` against the served forms,
-        // so the name must be the one THIS host serves (see above).
+        // Each variant's entry joins its own form; the Models page resolves
+        // `settingsNs` against the forms THIS host serves.
         settingsNs,
         settingsPath: [],
         declared: false,
@@ -904,21 +876,16 @@ async function startVariant(ctx: Context, runtime: VariantRuntime, seedCatalog: 
         detach(ctx, shim.close(), 'loopback endpoint close')
       })
     } catch {
-      // The plugin was disposed during registration; release immediately — the
-      // plugin-level disposer already closed every shim.
+      // Disposed during registration: release immediately — the plugin-level
+      // disposer already closed every shim.
       releaseAdapter?.()
       releaseDirectory?.()
       detach(ctx, shim.close(), 'loopback endpoint close')
     }
     runtime.registered = true
-    // Seed the catalog BEFORE returning, not in the later sweep.
-    //
-    // A 0.1.7 settings write hot-reloads this fiber; the fresh runtime's
-    // catalog starts hidden, and until the sweep runs `adoptIdentity` the
-    // status route answers with zero models — the card's post-write refresh
-    // lands exactly in that window and shows "暂无可配置的模型" until the user
-    // presses refresh. Seeding here closes the window: by the time the routes
-    // are live the catalog already holds the saved/fallback roster.
+    // Seed the catalog BEFORE returning, not in the later sweep: a settings write
+    // hot-reloads this fiber, the fresh catalog starts hidden, and the card's
+    // post-write refresh would otherwise land on an empty model list.
     detach(ctx, seedCatalog(), `${variant.id} catalog seed`)
     return true
   } catch (error: unknown) {
@@ -929,21 +896,11 @@ async function startVariant(ctx: Context, runtime: VariantRuntime, seedCatalog: 
 }
 
 /**
- * State that MUST survive a fiber reload, module-level on purpose.
- *
- * DSH 0.1.7's configuration write (`configEditor.edit`) reconciles the profile
- * tree, which hot-reloads the entry's fiber — `apply()` runs again with a fresh
- * closure. Anything re-minted per apply is therefore invalidated by every
- * settings write: the browser cards hold the keys the status document handed
- * them, so a per-apply key turns each write into a wave of 403s ("刷新失败"),
- * and a per-apply identity map makes the sweep re-fetch the catalog from
- * upstream on every write (the burst of requests and most of the latency).
- *
- * Keys and identity/fetch bookkeeping are per-PROCESS secrets and caches, not
- * per-instance state, so they live here once. A reload keeps the same keys (no
- * 403 storm) and a same-account, freshly-fetched sweep (no refetch burst).
+ * State that MUST survive a fiber reload: the in-process control keys, minted once
+ * per process. A settings write re-runs `apply()` with a fresh closure, so a
+ * per-apply key would 403 every card and a per-apply identity map would re-fetch
+ * the catalog on every write.
  */
-/** The in-process control keys, minted once per process. */
 let processKeys: { probe: string; auth: string } | undefined
 function controlKeys(): { probe: string; auth: string } {
   processKeys ??= { probe: createProbeKey(), auth: createAuthKey() }
@@ -959,16 +916,9 @@ function trustedSettingsRequest(req: { method?: string | undefined; headers: Rec
 }
 
 /**
- * The schema defaults, READ off each field's own `meta.default`.
- *
- * Two ways this was got wrong before, both silent and both destructive: a
- * hand-written table drifted from the schema (so the schema's own defaults
- * were classified as real overrides and the legacy settings document could
- * never win), and `validate({})` was then tried instead — which on this
- * schemastery answers with hollow `{}` per field instead of applying the
- * defaults, which is worse than nothing because it looks like it worked.
- * Walking `Config.dict` for `meta.default` is the only honest source: it is
- * the value schemastery itself substituted during validation.
+ * The schema defaults, read off each field's own `meta.default` — the value
+ * schemastery itself substituted during validation. A hand-written table drifts,
+ * and `validate({})` answers hollow per-field values instead of the defaults.
  */
 const DEFAULT_FOR_FIELD: Partial<Record<keyof Config, unknown>> = (() => {
   const out: Partial<Record<keyof Config, unknown>> = {}
@@ -978,9 +928,8 @@ const DEFAULT_FOR_FIELD: Partial<Record<keyof Config, unknown>> = (() => {
       if (fallback !== undefined) (out as Record<string, unknown>)[key] = fallback
     }
   } catch {
-    // An unreadable schema leaves the map partial: every field then reads as
-    // "no default", which keeps the entry authoritative — the pre-migration
-    // behaviour — rather than guessing.
+    // An unreadable schema leaves the map partial, which keeps the entry
+    // authoritative rather than guessing.
   }
   if (Object.keys(out).length === 0) {
     // A schema that cannot be walked keeps the literal table below.
@@ -999,6 +948,8 @@ const DEFAULT_FOR_FIELD: Partial<Record<keyof Config, unknown>> = (() => {
       checkInMinuteCN: 600,
       checkInMinuteGlobal: 600,
       quotaPollMs: 300_000,
+      queueWait: true,
+      queueWaitSeconds: QUEUE_WAIT_SECONDS_DEFAULT,
     }
   }
   return out
@@ -1014,15 +965,10 @@ interface QoderSettingsWriteTarget {
 }
 
 /**
- * Register the settings face (GET/POST) the browser cards read and write
- * through, answering the whole entry configuration as three layers.
- *
- * `value` carries every declared field, so a card rendering the quota section
- * sees the same merged view the host itself reads; `user` is the settings file
- * exactly as stored (presence marks an override), which is what the staged-edit
- * form's "written/reset" display needs. A POST validates the fields it is
- * allowed to touch, writes the file, applies the new view in memory, and
- * re-arms the check-in scheduler (the old 0.1.5 section `onChange` behaviour).
+ * Register the settings face (GET/POST) the browser cards read and write through:
+ * `value` (the merged view the host reads), `user` (the settings file as stored,
+ * where presence marks an override), and `base`. A POST validates, writes,
+ * applies in memory, and re-arms the check-in scheduler.
  */
 function registerQoderSettingsFace(
   ctx: Context,
@@ -1059,8 +1005,7 @@ function registerQoderSettingsFace(
         }
         const invalid = validateSettingsPatch(patch as Record<string, unknown>)
         if (invalid !== undefined) { jsonFace(res, 400, { error: invalid }); return }
-        // A card write: the file holds live user edits from here on (see the
-        // seed rule on `apply`), so a stale profile row can never regress it.
+        // A card write: the file holds live user edits from here on.
         store.patch(patch as Record<string, unknown>, true)
         apply(current())
         rearm()
@@ -1104,7 +1049,13 @@ function validateSettingsPatch(patch: Record<string, unknown>): string | undefin
       case 'sidebarQuotaGlobal':
       case 'autoCheckInCN':
       case 'autoCheckInGlobal':
+      case 'queueWait':
         if (typeof value !== 'boolean') return `${field} must be a boolean`
+        break
+      case 'queueWaitSeconds':
+        if (typeof value !== 'number' || !Number.isInteger(value) || value < QUEUE_WAIT_SECONDS_MIN) {
+          return `${field} must be an integer of at least ${QUEUE_WAIT_SECONDS_MIN} second`
+        }
         break
       case 'disabledModels':
       case 'disabledModelsCN':
@@ -1128,23 +1079,16 @@ function validateSettingsPatch(patch: Record<string, unknown>): string | undefin
 
 /**
  * Delete this plugin's own fields from the profile entry config, leaving every
- * other key of the row untouched.
+ * other key untouched — one-time, right after the settings file is seeded, so no
+ * second source of truth remains. The write rides `configEditor`, probed on the
+ * plugin context first and on the settings service's owner context second.
  *
- * One-time, right after the settings file has been seeded: the entry returns to
- * its shipped state, so no second source of truth remains. The write rides
- * `configEditor` — the 0.1.7 profile-patch editor — probed on the plugin
- * context first and on the settings service's owner context second, because
- * that is where the host root mounts it.
- *
- * @param ctx - plugin context.
  * @param ownKeys - this plugin's declared config fields.
  */
 async function cleanupEntryConfig(ctx: Parameters<typeof apply>[0], ownKeys: readonly string[]): Promise<void> {
-  // RETRIES, deliberately: `configEditor.edit` writes under the profile's
-  // package.json lock, and every plugin migrating on the same boot contends for
-  // that ONE lock — four sibling plugins seeding at once measured exactly one
-  // winner and three "timed out waiting for the writer lock" failures. The
-  // write is idempotent, so backing off (with jitter) makes the rest land.
+  // Retries, deliberately: `configEditor.edit` writes under the profile's lock and
+  // sibling plugins migrating on the same boot contend for that ONE lock. The
+  // write is idempotent, so backing off with jitter makes the rest land.
   const attempts = 10
   for (let attempt = 0; attempt < attempts; attempt++) {
     try {
@@ -1153,16 +1097,13 @@ async function cleanupEntryConfig(ctx: Parameters<typeof apply>[0], ownKeys: rea
         get?: (name: string) => unknown
         fiber?: { entry?: unknown }
       }
-      // configEditor 双路探测：本 ctx 直取（0.1.7 官方写法），失败再从 settings
-      // 服务的 ownerContext（宿主根 ctx，configEditor 挂在那里）取。
+      // configEditor 双路探测：先取本 ctx，再在 settings 服务的 ownerContext 取一次
       const own: unknown = typeof probe.get === 'function'
         ? (() => { try { return probe.get.call(ctx, 'configEditor') } catch { return undefined } })()
         : undefined
       const editor = (own ?? await new Promise<unknown>(resolve => {
         ctx.inject(['settings'], settingsCtx => {
-          // `ownerContext` is private on the 0.1.7 SettingsForms class, so it
-          // reaches this probe through the double cast rather than the typed
-          // face — the shape the host's own root context mounts it as.
+          // `ownerContext` is private, so it is reached through a double cast.
           const owner = (settingsCtx.settings as unknown as { ownerContext?: { get?: (name: string) => unknown } } | undefined)?.ownerContext
           const viaOwner = typeof owner?.get === 'function'
             ? (() => { try { return owner.get.call(owner, 'configEditor') } catch { return undefined } })()
@@ -1172,12 +1113,9 @@ async function cleanupEntryConfig(ctx: Parameters<typeof apply>[0], ownKeys: rea
       })) as { edit(entry: unknown, change: (raw: Record<string, unknown>, inherited: Record<string, unknown>) => Record<string, unknown>): Promise<void> } | undefined
       const entry = probe.fiber?.entry
       if (editor !== undefined && entry !== undefined) {
-        // The change callback returns INHERITED plus the row's foreign keys, not
-        // "the row minus our keys": the profile's composition check
-        // (`isDeepStrictEqual(next, inherited)`) is what lets the editor drop the
-        // row's user layer entirely, and a hand-built `{}` fails that check
-        // whenever a bundle layer still carries a config for this entry.
-        // Any other plugin's (or the user's own) keys on the row stay.
+        // Return INHERITED plus the row's foreign keys, not "the row minus our
+        // keys": the editor's composition check is what lets it drop the user
+        // layer, and any other plugin's (or the user's own) keys stay.
         await editor.edit(entry, (raw, inherited) => {
           const next: Record<string, unknown> = { ...(inherited ?? {}) }
           for (const [key, value] of Object.entries(raw ?? {})) {
@@ -1188,9 +1126,7 @@ async function cleanupEntryConfig(ctx: Parameters<typeof apply>[0], ownKeys: rea
         })
         return
       }
-      // No editor and no entry: nothing to clean (the row does not exist yet,
-      // or this host does not expose the profile patch). Idempotent by nature,
-      // so a later apply retries.
+      // No editor and no entry: nothing to clean; a later apply retries.
       return
     } catch (error: unknown) {
       if (attempt === attempts - 1) {
@@ -1206,28 +1142,20 @@ async function cleanupEntryConfig(ctx: Parameters<typeof apply>[0], ownKeys: rea
 const lastIdentities = new Map<string, string>()
 
 /**
- * When a variant's catalog was last fetched LIVE from upstream, per identity.
- *
- * A reload reseeds the catalog from the saved file; without this record the
- * sweep's retry rule (`stale && due`) sees `lastFetchAtMs = 0` and re-fetches
- * immediately — one upstream round trip per variant per settings write.
+ * When a variant's catalog was last fetched LIVE, per identity. Shared across
+ * reloads so the retry rule (`stale && due`) does not re-fetch on every settings
+ * write.
  */
 const lastLiveFetchAt = new Map<string, number>()
 
 /**
- * Start both variants: their loopback endpoints, the `qoder` and
- * `qoder-global` providers, their configuration cards, and their
- * credential-driven catalog lifecycles.
- *
- * Each variant registers unconditionally; what varies is whether its catalog is
- * *visible*. An empty catalog is how DSH hides a model group (the host filters
- * out groups with no models), which keeps a token saved after startup working
- * without re-registering the provider.
+ * Start both variants: loopback endpoints, the `qoder` and `qoder-global`
+ * providers, their cards, and their credential-driven catalog lifecycles. Each
+ * variant registers unconditionally; an empty catalog is how DSH hides a group,
+ * which keeps a token saved after startup working without re-registering.
  */
 export function apply(ctx: Context, config: Config): void {
-  // Before anything reads a path: the first `SettingsStore` below already calls
-  // `qoderPluginDataDir()`, and every store built afterwards freezes what it got.
-  //
+  // Before anything reads a path: every store built below freezes what it gets.
   // `ctx.get` rather than `inject` — a profile context is absent in compositions
   // booted without a profile, and this plugin still has to load there.
   const profileContext = ctx.get('profileContext') as { dir?: unknown } | undefined
@@ -1236,34 +1164,21 @@ export function apply(ctx: Context, config: Config): void {
     diagnostics: ctx.logger,
   })
 
-  // Live configuration source: the composition entry (the profile row, read
-  // through the volatile indirection — on 0.1.7 every projected field is a
-  // reference object whose value comes from `.get()`) with the plugin-owned
-  // settings file layered on top. `current()` — the one reader the whole
-  // plugin consults — hands out plain values on both hosts.
-  //
-  // The entry stays as the fallback layer so a hand-edited profile row still
-  // seeds a fresh install; the file is where every write lands (see the
-  // `settings-store` module for why: a profile-patch write costs a full tree
-  // reconcile and a fiber reload on every switch).
+  // Live configuration source: the composition entry (read through the volatile
+  // indirection) with the plugin-owned settings file layered on top. The entry
+  // stays as the fallback layer so a hand-edited profile row still seeds a fresh
+  // install; every write lands in the file (a profile patch would cost a full tree
+  // reconcile and a fiber reload per switch).
   const store = new SettingsStore()
   let current = (): Config => ({ ...readConfig(config), ...store.values() }) as Config
 
   /**
-   * One-time seed: per field — the file never held it → take the entry; the
-   * card HAS written this file → keep the file; the entry carries a
-   * NON-DEFAULT value → take the entry; the entry only carries the schema
-   * default → keep the file.
-   *
-   * That last clause is load-bearing: a bundle layer's insert config does NOT
-   * reach the composition (verified with `dsh --dump-config`), so once the
-   * one-time cleanup has emptied the entry row the entry answers pure defaults —
-   * treating those as authoritative would erase the user's values on the next
-   * boot. Re-checked on every apply, which is also what closes the volatile
-   * commit timing window.
-   *
-   * When the entry is authoritative, its own fields are then deleted from the
-   * profile row, so no second source of truth remains.
+   * One-time seed, per field: the file never held it — take the entry; the entry
+   * carries a NON-DEFAULT value — take the entry; otherwise keep the file. The
+   * default-skipping clause is load-bearing — once cleanup has emptied the entry
+   * row, treating its pure defaults as authoritative would erase the user's
+   * values. Re-checked on every apply, which also closes the volatile commit
+   * timing window; when the entry wins, its own fields are deleted from the row.
    */
   const migrateOwnSettings = (): void => {
     const seeded: Record<string, unknown> = {}
@@ -1271,10 +1186,8 @@ export function apply(ctx: Context, config: Config): void {
       const entryValue = readField(config, key)
       const holds = Object.hasOwn(store.user, key)
       if (!holds) {
-        // First seed — the first NON-DEFAULT candidate, and only then an
-        // explicit default so the stored layer stays complete. A schema
-        // default (an empty array, `true` for a toggle that defaults on) is
-        // not a value to seed on.
+        // First seed: prefer the first NON-DEFAULT candidate — a schema default
+        // (an empty array, a toggle's `true`) is not a value to seed on.
         if (entryValue !== undefined && JSON.stringify(entryValue) !== JSON.stringify(DEFAULT_FOR_FIELD[key])) seeded[key] = entryValue
         else if (entryValue !== undefined) seeded[key] = entryValue
         continue
@@ -1291,13 +1204,10 @@ export function apply(ctx: Context, config: Config): void {
   migrateOwnSettings()
 
   // A volatile-only configuration change — every field of this Config is
-  // `.volatile()` — commits through the loader's volatile fast path: the
-  // references are updated IN PLACE and `apply()` is NOT run again. Seeding
-  // only inside `apply` would never observe values arriving that way. This
-  // event fires on exactly that commit (the same mechanism the built-in
-  // `dsh-llm-pi-ai` uses), so the seed rule re-evaluates. The event is a
-  // Host-internal channel the typings do not declare, so it reaches `on`
-  // through the string-keyed escape hatch rather than the typed event map.
+  // `.volatile()` — commits through the loader's volatile fast path and does NOT
+  // re-run `apply()`. This event fires on exactly that commit, so the seed rule
+  // re-evaluates. The event is a Host-internal channel the typings do not
+  // declare, hence the string-keyed escape hatch.
   const eventSink = ctx as unknown as { on: (event: string, listener: () => void) => void }
   eventSink.on('loader/volatile-update', () => { migrateOwnSettings() })
 
@@ -1324,8 +1234,7 @@ export function apply(ctx: Context, config: Config): void {
           ? cfg.checkInMinuteCN
           : cfg.checkInMinuteGlobal
         // A missing or out-of-range stored value must never leave a variant
-        // unscheduled, so it falls back to the documented default rather than
-        // to "now" or to an instant that never comes.
+        // unscheduled: fall back to the documented default.
         return normalizeCheckInMinute(stored ?? DEFAULT_CHECK_IN_MINUTE)
       },
       onClaimed: () => {
@@ -1341,12 +1250,9 @@ export function apply(ctx: Context, config: Config): void {
   })
   checkInScheduler.start()
   /**
-   * The startup catch-up, run once more from the settings source callback.
-   *
-   * `start()` above runs while the plugin is still assembling: the section
-   * that stores these toggles has not handed over its values yet, so that
-   * sweep reads the raw plugin config, sees no toggle, and skips the day. The
-   * retry is what makes "boot after 10:00" actually claim.
+   * The startup catch-up, re-run once from the settings source callback:
+   * `start()` above runs while the plugin is still assembling, before the section
+   * holding these toggles hands over its values, so that sweep skips the day.
    */
   let startupCatchUpDone = false
   const runStartupCatchUpOnce = (): void => {
@@ -1355,15 +1261,12 @@ export function apply(ctx: Context, config: Config): void {
     checkInScheduler.catchUp()
   }
 
-  // The session-visible hint row for a self-heal: appends the harness's own
-  // log-only `command/run` + `command/done` pair to the running conversation,
-  // so the recovery shows as one line and registers nothing globally.
+  // The session-visible hint row for a self-heal: one line, nothing global.
   installJobTokenHint(ctx)
 
-  // Same-origin routes backing each Plugin-configuration card; the webServer
-  // service is optional (a headless profile serves no browser).
-  // Keys are per-process (see {@link controlKeys}): a 0.1.7 settings write
-  // reloads this fiber, and per-apply keys would invalidate every card's key.
+  // Same-origin routes backing each card; the webServer service is optional.
+  // Keys are per-process (see {@link controlKeys}), since a settings write
+  // reloads this fiber.
   const { probe: probeKey, auth: authKey } = controlKeys()
   let setMaximumContextWindow: ((enabled: boolean) => Promise<{ state: string; reason?: string }>) | undefined
   let setMaximumContextWindowCN: ((enabled: boolean) => Promise<{ state: string; reason?: string }>) | undefined
@@ -1371,21 +1274,11 @@ export function apply(ctx: Context, config: Config): void {
   let setModelsEnabledCN: ((options: { models: readonly string[]; enabled: boolean }) => Promise<{ state: string; reason?: string }>) | undefined
   /**
    * Point a variant at an account identity, invalidating whatever the previous
-   * one left behind.
-   *
-   * One helper for all four transitions (sweep sign-in, sweep sign-out, manual
-   * refresh, card save) because each of them used to do its own partial
-   * version, and the manual path forgot pieces the sweep did. Every transition
-   * bumps {@link VariantRuntime.catalogGeneration}, which is what makes an
-   * in-flight request from before the change refuse to write back.
-   *
-   * Probe observations are dropped whenever the account actually changes —
-   * including sign-out, and including the "signed out, then in as someone else"
-   * sequence that used to look like a first sighting and let the new account
-   * inherit the old one's detected levels. They are deliberately NOT cleared on
-   * a first sign-in: no previous account's data could leak there, and clearing
-   * would delete records this very account owns (written before a restart, or
-   * seeded while all of this is running).
+   * one left behind. One helper for every transition (sweep, manual refresh, card
+   * save), so none can forget a step; each bumps
+   * {@link VariantRuntime.catalogGeneration}, which makes an in-flight request from
+   * before the change refuse to write back. Probe observations are dropped
+   * whenever the account actually changes, but never on a first sign-in.
    *
    * @param identity - the account now in effect, or `undefined` when signed out.
    */
@@ -1393,24 +1286,15 @@ export function apply(ctx: Context, config: Config): void {
     const id = runtime.variant.id
     const known = lastIdentities.get(id)
     // "Same identity" may only short-circuit when THIS runtime has already
-    // adopted: a fresh catalog starts hidden (`createVariantRuntime` sets
-    // `visible=false`), and DSH 0.1.7's configuration write hot-reloads the
-    // fiber, so every settings write produces exactly such a fresh runtime.
-    // Short-circuiting on identity alone there skips the seeding AND the
-    // `setVisible(true)`, the provider registers with zero models, and the
-    // card's model list and context-window section go empty — and stay empty,
-    // because `all()` answers nothing while hidden even after a later fetch
-    // succeeds, and the refresh button routes through this same function.
+    // adopted: a fresh catalog starts hidden, and every settings write
+    // hot-reloads into exactly such a runtime — skipping the seeding and
+    // `setVisible(true)` would leave the card's model list empty for good.
     if (known === identity && runtime.catalog.isVisible()) return
     const hadCredential = known !== undefined
     if (identity === undefined) lastIdentities.delete(id)
     else lastIdentities.set(id, identity)
-    // Any change of identity invalidates in-flight work and the rendered
-    // catalog. Probe records are deliberately LEFT in place: they are keyed by
-    // account and filtered on read (see `QoderProbeStore.get`), so they cannot
-    // leak across accounts — and clearing here would erase every other saved
-    // account's observations on a single switch. Removing a token is the one
-    // transition that drops its records (see the PAT route's `remove`).
+    // Any change of identity invalidates in-flight work and the rendered catalog.
+    // Probe records stay: they are keyed by account and filtered on read.
     runtime.catalogGeneration += 1
     runtime.inflightFetch?.controller.abort()
     runtime.inflightFetch = undefined
@@ -1418,12 +1302,8 @@ export function apply(ctx: Context, config: Config): void {
       runtime.invalidate()
     }
     if (identity === undefined) {
-      // Signed out: hide the group, and drop the models so they are not left
-      // registered-but-invisible if visibility ever flips back. The signed-out
-      // account's saved catalog is forgotten as well — it is that account's
-      // data, and it is keyed by identity so nothing else can serve it, but
-      // keeping it would only be useful if that same account returned, and the
-      // file is not a place to accumulate departed accounts' catalogs.
+      // Signed out: hide the group and drop the models, and forget this account's
+      // saved catalog — it is that account's data, keyed by identity.
       if (known !== undefined) runtime.savedCatalogs.delete(known)
       runtime.catalog.set(runtime.fallback)
       runtime.catalogSource = 'fallback'
@@ -1432,12 +1312,9 @@ export function apply(ctx: Context, config: Config): void {
       if (runtime.catalog.setVisible(false)) runtime.invalidate()
       return
     }
-    // Serve this account's best-known catalog until a fetch lands. The saved
-    // catalog is preferred over the built-in roster: the roster is a snapshot
-    // taken once, while the saved one is what this account (from this source)
-    // was actually served. This covers both a switch and a restart — on a
-    // restart `hadCredential` is false, and the saved catalog is exactly what
-    // stops the group from falling back to the compiled-in list.
+    // Serve this account's best-known catalog until a fetch lands: the saved one is
+    // what this account was actually served, the roster only a one-off snapshot.
+    // Covers a switch and a restart alike.
     const saved = runtime.savedCatalogs.get(identity)
     if (saved !== undefined) {
       runtime.catalog.set([...saved.models])
@@ -1454,11 +1331,8 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   /**
-   * Apply catalog preferences from a configuration view, in memory.
-   *
-   * Shared by the probe-route setters and the settings face's POST: both write
-   * the plugin-owned settings file and then land the new view here, which is
-   * what the cards see on their next status read.
+   * Apply catalog preferences from a configuration view, in memory. Shared by the
+   * probe-route setters and the settings face's POST.
    */
   const applyCatalogSettings = (next: Config): void => {
     let changed = false
@@ -1503,9 +1377,8 @@ export function apply(ctx: Context, config: Config): void {
           const nextRunAt = checkInScheduler.nextRunAt(runtime.variant.id)
           return {
             ...record,
-            // Rides the record so the card can show the pending moment: a day
-            // already claimed stays silent by design, and without this the
-            // user cannot tell a waiting timer from a missing one.
+            // Rides the record so the card can show the pending moment; a day
+            // already claimed stays silent by design.
             ...nextRunAt === undefined ? {} : { nextRunAt },
           }
         },
@@ -1513,24 +1386,18 @@ export function apply(ctx: Context, config: Config): void {
       registerQoderAuthRoute(webCtx, {
         path: runtime.variant.authPath,
         save: async (pat, label) => {
-          // Validate against the region this variant owns *before* anything is
-          // written: a token that cannot answer discovery is refused with a
-          // stable code, and the file never holds a credential the plugin has
-          // not seen work.
+          // Validate against this variant's region before anything is written: the
+          // file never holds a credential the plugin has not seen work.
           if (!await validateApiKey(pat, runtime.variant.region)) {
             return { ok: false, error: 'qoder_invalid_pat' as const }
           }
           const entry = await runtime.store.add(pat, label)
-          // Saving a token is the one transition the sweep would otherwise only
-          // notice on its next tick; adopt it here so the model group appears
-          // at once.
+          // Adopt at once so the model group appears without waiting for the sweep.
           const identity = credentialIdentity(entry)
           adoptIdentity(runtime, identity)
-          // AWAIT the fetch: the card re-reads the status the moment this answer
-          // lands, so returning first left it rendering the built-in roster
-          // until the next poll or a manual refresh. `fetchCatalog` contains
-          // its own failures (they surface as `catalog.error`), so a slow or
-          // failing upstream can never turn a valid save into an error.
+          // AWAIT the fetch: the card re-reads status the moment this answer lands.
+          // `fetchCatalog` contains its own failures, so a bad upstream cannot fail
+          // a valid save.
           await fetchCatalog(runtime, identity)
           return { ok: true, status: await runtime.store.status() }
         },
@@ -1538,10 +1405,9 @@ export function apply(ctx: Context, config: Config): void {
           const entry = await runtime.store.activate(id)
           if (entry === undefined) return { ok: false, error: 'qoder_unknown_pat' as const }
           const identity = credentialIdentity(entry)
-          // Seed from this account's saved catalog immediately — the switch
-          // answers without a network round trip — then refresh in the
-          // background. `fetchCatalog` is scoped to the identity, so a slow
-          // answer cannot overwrite a later switch's state.
+          // Seed from this account's saved catalog at once, then refresh in the
+          // background; `fetchCatalog` is identity-scoped, so a slow answer cannot
+          // overwrite a later switch's state.
           adoptIdentity(runtime, identity)
           detach(ctx, fetchCatalog(runtime, identity), `${runtime.variant.id} catalog refresh after switch`)
           return { ok: true, status: await runtime.store.status() }
@@ -1549,14 +1415,13 @@ export function apply(ctx: Context, config: Config): void {
         remove: async id => {
           const removed = await runtime.store.remove(id)
           if (removed === undefined) return { ok: false, error: 'qoder_unknown_pat' as const }
-          // The departing account's detected levels and saved roster are that
-          // account's data: drop them, leave every other saved account alone.
+          // The departing account's detected levels and saved roster are its data:
+          // drop them, leave every other account alone.
           const finished = credentialIdentity(removed)
           runtime.probeStore.clearFor(finished)
           runtime.savedCatalogs.delete(finished)
-          // `remove` already moved the active pointer to the first remaining
-          // entry; adopt whatever is in effect now (or hide the group when the
-          // list is empty).
+          // `remove` already moved the active pointer; adopt whatever is in effect
+          // now (or hide the group when the list is empty).
           const active = await runtime.store.current().catch(() => undefined)
           const identity = active === undefined ? undefined : credentialIdentity(active)
           adoptIdentity(runtime, identity)
@@ -1566,9 +1431,8 @@ export function apply(ctx: Context, config: Config): void {
           return { ok: true, status: await runtime.store.status() }
         },
         clear: async () => {
-          // Drop every saved account's account-scoped data before the file
-          // goes: otherwise the catalogs and probe records would be orphaned
-          // (and would reappear if the same token were ever saved again).
+          // Drop every saved account's scoped data before the file goes: otherwise
+          // the catalogs and probe records would be orphaned.
           const saved = await runtime.store.entries().catch(() => [])
           for (const entry of saved) {
             const identity = credentialIdentity(entry)
@@ -1590,16 +1454,14 @@ export function apply(ctx: Context, config: Config): void {
         clear: () => { runtime.probeStore.clear(); runtime.invalidate() },
         refresh: async () => {
           if (stopped) return { state: 'failed', reason: 'plugin is stopping' }
-          // Re-read the credential first: the user pressed this because the list
-          // looks wrong, and a token saved since the last sweep is the common
-          // cause. Re-registering is unnecessary — visibility is what changes,
-          // and the sweep owns that.
+          // Re-read the credential first: a token saved since the last sweep is the
+          // common cause. Re-registering is unnecessary — the sweep owns visibility.
           let credential
           try {
             credential = await runtime.store.current()
           } catch (error: unknown) {
-            // A refused credential (wrong region, unreadable file) is a report,
-            // not a crash out of the route.
+            // A refused credential (wrong region, unreadable file) is a report, not
+            // a crash out of the route.
             return {
               state: 'failed',
               reason: error instanceof Error ? error.message.slice(0, 300) : String(error),
@@ -1610,9 +1472,8 @@ export function apply(ctx: Context, config: Config): void {
             return { state: 'signed-out' }
           }
           const identity = credentialIdentity(credential)
-          // Same transition the sweep performs: a switch reached through the
-          // manual path must drop the previous account's data *now*, not when
-          // the fetch lands, or a failed fetch leaves those models pickable.
+          // Same transition the sweep performs: drop the previous account's data
+          // now, not when the fetch lands, or a failed fetch leaves its models pickable.
           adoptIdentity(runtime, identity)
           await fetchCatalog(runtime, identity)
           return runtime.catalogError === undefined
@@ -1666,16 +1527,9 @@ export function apply(ctx: Context, config: Config): void {
       }, probeKey)
     }
 
-    // The settings face the browser cards read and write through. It answers
-    // the whole entry's configuration as three layers (value = effective,
-    // base = schema defaults, user = the settings file), which is exactly the
-    // shape the 0.1.7 configForm used to mirror — the client-side cards keep
-    // their staged-edit form untouched.
-    //
-    // The key is minted per plugin lifetime and rides the GET response (that
-    // response already passed the loopback guard, like the probe routes); the
-    // POST authorizes with it. Both guards are re-checked here: these routes
-    // spend nothing upstream but they do rewrite the user's configuration.
+    // The settings face the browser cards read and write through: three layers —
+    // value = effective, base = schema defaults, user = the settings file. The key
+    // rides the GET; the POST authorizes with it. Both guards are loopback-checked.
     registerQoderSettingsFace(webCtx, {
       store, config, current,
       apply: applyCatalogSettings,
@@ -1683,30 +1537,18 @@ export function apply(ctx: Context, config: Config): void {
     })
   })
 
-  // Each settings section is what makes its namespace "served" — which is how
-  // both the Plugins tab (card dispatch) and the Models settings page (provider
-  // directory join) find this plugin's halves. One section per card, because the
-  // tab renders a card by `entryKey = ns` and never interprets one: a section
-  // that is not installed leaves its card registered but undispatched, and a
-  // provider whose `settingsNs` names no section joins nothing.
+  // Each settings section is what makes its namespace "served", which is how the
+  // Plugins tab (card dispatch) and the Models page (provider directory) find this
+  // plugin. One section per card, because a card renders by `entryKey = ns`.
   //
-  // 两条宿主线共用一个写入口：插件自有文件（见 settings-store.ts）。
-  //
-  // 曾经这里按宿主形态分岔——0.1.5 用 `installSection` + `settings.update`
-  // （watch 回调原地生效、毫秒级），0.1.7 用 `configEditor.edit`（每次写入都
-  // reconcile 整棵 loader 树 + fiber 热重载，约 1~1.5 秒，并刷新所有客户端
-  // 镜像）。现在两侧都不再向宿主编程配置：写落自有 JSON 文件，随后原地
-  // apply（catalog 偏好、签到定时器重排、invalidate），0.1.5/0.1.7 行为一致。
-  //
-  // `configure({auto:false})` 保留：它只关掉宿主为这个 entry 自动生成的表单页
-  // （本插件自带卡片），与持久化通路无关。
+  // 两条宿主线共用一个写入口：写落插件自有 JSON 文件（见 settings-store.ts），
+  // 随后原地 apply（catalog 偏好、签到定时器重排、invalidate），行为一致；
+  // `configure({auto:false})` 只关掉宿主自动生成的表单页，与持久化无关。
   ctx.inject(['settings'], settingsCtx => {
     /**
-     * `auto: false` turns OFF the host's generated form page for this entry —
-     * the plugin ships its own card, which is now the only editor. It must be
-     * called as a METHOD: on 0.1.7 `configure` is a SettingsForms class method
-     * (it reads `this.presentations`), and extracting it as a free function
-     * throws a TypeError that used to kill the whole settings callback.
+     * `auto: false` turns OFF the host's generated form page for this entry (the
+     * plugin ships its own card). It must be called as a METHOD: `configure` reads
+     * `this`, so extracting it as a free function throws.
      */
     const settingsService = settingsCtx.settings as unknown as {
       configure?: (presentation: { auto: boolean }, owner?: unknown) => unknown
@@ -1723,14 +1565,11 @@ export function apply(ctx: Context, config: Config): void {
     }
 
     /**
-     * The four setters, now one implementation on both hosts: write the
-     * plugin-owned settings file, then apply the new view in memory. No
-     * profile-patch write means no tree reconcile, no fiber reload, and no
-     * client-mirror storm per toggle.
+     * One implementation on both hosts: write the plugin-owned settings file, then
+     * apply the new view in memory — no profile patch, no fiber reload.
      */
     const write = (patch: Record<string, unknown>): void => {
-      // A card-originated write (every caller here is a user action on the
-      // settings card), so the file becomes authoritative from this point on.
+      // A card-originated write, so the file becomes authoritative from here on.
       store.patch(patch, true)
       applyCatalogSettings(current())
       checkInScheduler.rearm()
@@ -1772,24 +1611,11 @@ export function apply(ctx: Context, config: Config): void {
   })
 
   /**
-   * Fetch one variant's catalog for the current credential.
-   *
-   * Shared by the credential sweep and the card's manual refresh, and written
-   * so that concurrent callers cost one request and cannot interleave badly:
-   *
-   * - **One request at a time.** A second caller joins the in-flight fetch
-   *   instead of starting its own (spec §5: one catalog request per variant at
-   *   a time).
-   * - **Generation-checked write-back.** The request records the generation it
-   *   started under and writes nothing if the generation moved on — which is
-   *   what a slow answer from a superseded account must not do. Checking only
-   *   the *identity* was not enough: two refreshes for the same account can
-   *   still finish out of order, and the older one would win.
-   * - **`resolve()`, not `current()`.** A catalog fetch demands a usable token;
-   *   the difference from `current()` is that its absence surfaces as the same
-   *   classified `MISSING_CREDENTIAL` failure every other request path reports,
-   *   rather than as a silent "no credential" that would hide a bad file on
-   *   disk behind an env override.
+   * Fetch one variant's catalog for the current credential, shared by the sweep and
+   * the card's manual refresh. One request at a time (a second caller joins the
+   * in-flight fetch); the write is generation-checked, so a late answer from a
+   * superseded account changes nothing; and it calls `resolve()` rather than
+   * `current()` so a missing token surfaces as `MISSING_CREDENTIAL`.
    */
   const fetchCatalog = async (runtime: VariantRuntime, identity: string): Promise<void> => {
     const inflight = runtime.inflightFetch
@@ -1797,17 +1623,15 @@ export function apply(ctx: Context, config: Config): void {
     if (inflight !== undefined && inflight.identity === identity && inflight.generation === generation) {
       return inflight.promise
     }
-    // A caller should normally reach this only after `adoptIdentity()` has
-    // already cancelled a previous generation. Keep this guard local as well:
-    // no stale request may prevent the current account from fetching now.
+    // Kept local too: no stale request may prevent the current account from fetching.
     inflight?.controller.abort()
     const controller = new AbortController()
     let run: Promise<void>
     run = (async (): Promise<void> => {
       let models: readonly QoderModelInfo[]
       try {
-        // Establish the identity that owns this fetch from the file-backed
-        // credential; discovery itself reads the token through the same store.
+        // The file-backed credential owns this fetch; discovery reads the token
+        // through the same store.
         const credential = await runtime.store.resolve()
         const resolvedIdentity = credentialIdentity(credential)
         if (resolvedIdentity !== identity) {
@@ -1816,9 +1640,8 @@ export function apply(ctx: Context, config: Config): void {
           return
         }
         models = await runtime.client.fetchModels(controller.signal)
-        // The token can also change while the upstream request is in flight.
-        // Re-read before publishing so the just-finished roster still belongs
-        // to the credential that is currently in effect.
+        // The token can also change mid-flight; re-read before publishing so the
+        // roster still belongs to the credential in effect.
         const latest = await runtime.store.current()
         const latestIdentity = latest === undefined ? undefined : credentialIdentity(latest)
         if (latestIdentity !== identity) {
@@ -1827,8 +1650,8 @@ export function apply(ctx: Context, config: Config): void {
           return
         }
       } catch (error: unknown) {
-        // Report only if this attempt is still the current one; a failure from
-        // a superseded attempt must not overwrite the newer state's error.
+        // Report only if this attempt is still the current one: a superseded
+        // attempt's failure must not overwrite the newer state.
         if (stopped || runtime.catalogGeneration !== generation) return
         runtime.lastFetchAtMs = Date.now()
         runtime.catalogError = error instanceof Error ? error.message.slice(0, 300) : String(error)
@@ -1841,19 +1664,15 @@ export function apply(ctx: Context, config: Config): void {
       }
       if (stopped || runtime.catalogGeneration !== generation) return
       runtime.lastFetchAtMs = Date.now()
-      // Shared across fiber reloads: a 0.1.7 settings write re-applies this
-      // plugin, and the new instance must not re-fetch what was just fetched.
+      // Shared across fiber reloads so a re-applied plugin does not re-fetch.
       lastLiveFetchAt.set(identity, runtime.lastFetchAtMs)
       runtime.catalog.set([...models])
       runtime.catalogSource = 'live'
       runtime.catalogFetchedAtMs = runtime.client.lastCatalog?.fetchedAtMs ?? Date.now()
       runtime.catalogError = undefined
-      // Remember it for this account, so a restart — or a later fetch that
-      // fails — can serve what this account was actually shown rather than the
-      // snapshot compiled into the plugin. A failure to persist is reported and
-      // swallowed: the live catalog is already serving, and `fetchCatalog`
-      // promises its callers that it never rejects (an escaped rejection from a
-      // background sweep would terminate the host).
+      // Remember it for this account, so a restart or a later failing fetch serves
+      // it instead of the compiled-in snapshot. A persist failure is logged and
+      // swallowed: `fetchCatalog` promises its callers that it never rejects.
       if (lastIdentities.get(runtime.variant.id) === identity) {
         try {
           runtime.savedCatalogs.set(identity, {
@@ -1877,18 +1696,9 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   /**
-   * Reconcile one variant with its credentials.
-   *
-   * Four transitions matter, and each is a different action:
-   *
-   * - **none → some** (first sighting): reveal the group and fetch a catalog.
-   * - **none → some, identity changed**: additionally drop the previous
-   *   account's observations, so another token's probe answers cannot be read
-   *   as the new one's.
-   * - **some → none**: hide the group and stop serving its models.
-   * - **same identity**: nothing to do — a PAT neither rotates nor expires, so
-   *   re-fetching on every sweep would hit the catalog endpoint for no new
-   *   information.
+   * Reconcile one variant with its credentials: reveal the group and fetch a
+   * catalog on a first sighting, hide it when signed out, and do nothing when the
+   * identity is unchanged (a PAT neither rotates nor expires).
    */
   const syncVariant = async (runtime: VariantRuntime): Promise<void> => {
     if (stopped || !runtime.registered) return
@@ -1908,17 +1718,10 @@ export function apply(ctx: Context, config: Config): void {
     const identity = credentialIdentity(credential)
     const known = lastIdentities.get(runtime.variant.id)
     if (known === identity && runtime.catalog.isVisible()) {
-      // Same account, already showing something. One case still needs a fetch:
-      // an earlier attempt failed, so the group is on the fallback roster and
-      // nothing else will ever replace it. Retry on a slow backoff rather than
-      // every sweep, so a persistent outage does not become a request loop.
-      // Any non-live source is stale: both the saved catalog and the built-in
-      // roster are worth replacing with a fresh fetch on the same backoff.
-      //
-      // The freshness read is per-IDENTITY and survives a fiber reload: a 0.1.7
-      // settings write reloads this plugin, and the new instance's
-      // `lastFetchAtMs` starts at 0 — without the shared record every write
-      // would immediately re-fetch both variants from upstream.
+      // Same account, already showing something. Still fetch when the group is not
+      // live: an earlier failure left it on the fallback or saved roster and nothing
+      // else would replace it — on a slow backoff, so an outage is not a request
+      // loop. Freshness is per-identity and survives a fiber reload.
       const stale = runtime.catalogSource !== 'live'
       const fetchedAt = lastLiveFetchAt.get(identity) ?? 0
       const due = Date.now() - fetchedAt >= credentialPollMs() * CATALOG_RETRY_SWEEPS
@@ -1936,15 +1739,12 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   /**
-   * Start both variants, then begin the credential sweep.
-   *
-   * The chain carries its own failure handler: without one, a rejection here
-   * would be an unhandled rejection — which Node turns into process
-   * termination, taking the whole Harness down over one plugin's startup.
+   * Start both variants, then begin the credential sweep. The chain carries its own
+   * failure handler: an unhandled rejection here would terminate the host.
    */
   detach(ctx, Promise.all(runtimes.map(async runtime => startVariant(ctx, runtime, async () => {
-    // The immediate seed: adopt whatever credential is in effect right now, so
-    // a reloaded fiber never serves an empty catalog while the sweep catches up.
+    // The immediate seed, so a reloaded fiber never serves an empty catalog while
+    // the sweep catches up.
     if (stopped) return
     let credential
     try {
@@ -1959,11 +1759,8 @@ export function apply(ctx: Context, config: Config): void {
     }
   }))).then(() => {
     if (stopped) return
-    // The host bundle is live: write a heartbeat so the status CLI can report
-    // host health without a browser. Cleared on disposal; a stale heartbeat
-    // after a crash is detected by PID in the reader. Written when at least one
-    // variant registered, since that is what "the host bundle serves models"
-    // means for this plugin.
+    // The host bundle is live: write a heartbeat so the status CLI can report host
+    // health without a browser (cleared on disposal; a stale one is detected by PID).
     if (runtimes.some(runtime => runtime.registered)) detach(ctx, writeHostHeartbeat(), 'host heartbeat write')
 
     detach(ctx, syncAll(), 'credential sweep')

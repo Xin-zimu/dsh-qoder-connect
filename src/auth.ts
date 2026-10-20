@@ -1,39 +1,22 @@
 /**
- * Qoder credential storage — a list of Personal Access Tokens per variant,
- * one of which is active.
+ * Qoder credential storage — a list of Personal Access Tokens per variant, one of
+ * which is active.
  *
- * Every credential the plugin holds is a PAT the human pasted into the
- * variant's card (or saved by the CLI, or exported into the environment).
- * There is no device flow, no token refresh, and no expiry: a PAT is valid
- * until the user revokes it, so this store only reads, writes, and deletes a
- * small JSON document.
+ * Every credential is a PAT the human pasted into the variant's card (or saved by
+ * the CLI, or exported into the environment). There is no device flow, no refresh,
+ * and no expiry: a PAT is valid until revoked, so this store only reads, writes,
+ * and deletes a small JSON document.
  *
- * WHAT IS PER-ACCOUNT AND WHAT IS NOT
+ * Only the *credential* is per-account. Every setting the cards expose lives in
+ * the plugin's own settings file and is shared by every saved PAT, so switching
+ * accounts only changes which token signs the next request.
  *
- * Only the *credential* is per-account. Every setting the cards expose —
- * disabled models, the maximum-context preference, per-model window
- * overrides, probe consent, sidebar quota, check-in toggles — lives in the
- * plugin's own settings file and is shared by every saved PAT. Switching
- * accounts therefore never changes configuration; it only changes which
- * token signs the next request.
- *
- * FILE
- *
- * One file per variant inside the plugin's data directory
- * (`<.dsh-qoder-connect>/`). The on-disk schema is
- *
- *   {version: 3, activeId, credentials: [{id, pat, region, savedAt, label?}]}
- *
- * `id` is a one-way hash prefix of the token, so re-pasting the same token
- * updates its own entry instead of piling up duplicates, and the id can be
- * shown (in a select, a log line, or a test) without leaking the secret.
- * `label` is optional display copy stored at save time; it never reaches the
- * upstream.
- *
- * A version-2 document (`{version: 2, pat, region, savedAt}`) is read as a
- * one-entry list and rewritten as v3 on the next mutation. A WorkBuddy-era
- * document (it carries `accessToken` and no `pat`) is not a credential this
- * plugin can use in any form — it is reported, never migrated.
+ * One file per variant inside the plugin's data directory, with schema
+ * `{version: 3, activeId, credentials: [{id, pat, region, savedAt, label?}]}`.
+ * `id` is a one-way hash prefix of the token, so re-pasting a token updates its own
+ * entry and the id can be shown without leaking the secret. A version-2 document
+ * is read as a one-entry list and rewritten as v3 on the next mutation; a
+ * WorkBuddy-era document (`accessToken`, no `pat`) is reported, never migrated.
  *
  * @module dsh-qoder-connect/auth
  */
@@ -133,21 +116,18 @@ export function patTail(pat: string): string | undefined {
 /**
  * Stable local id for one token.
  *
- * A PAT is a bearer secret, so the id is a one-way hash prefix rather than
- * any suffix of it: surfaces that show the id (the select, status documents,
- * logs) leak nothing usable, while two saves of the same token still resolve
- * to the same entry.
+ * A one-way hash prefix rather than a suffix: surfaces showing the id leak nothing
+ * usable, while two saves of the same token still resolve to the same entry.
  */
 export function qoderCredentialId(pat: string): string {
   return createHash('sha256').update(pat).digest('hex').slice(0, 12)
 }
 
 /**
- * Stable identity key for a credential, used by probe records and saved
- * catalogs.
+ * Stable identity key for a credential, used by probe records and saved catalogs.
  *
- * Deliberately wider than the local id: these keys address stored data, not
- * UI, and 16 hex characters keep two tokens from ever sharing a bucket.
+ * Wider than the local id: these keys address stored data, not UI, and 16 hex
+ * characters keep two tokens from sharing a bucket.
  */
 export function qoderCredentialIdentity(credential: Pick<QoderCredential, 'pat'>): string {
   return `pat:${createHash('sha256').update(credential.pat).digest('hex').slice(0, 16)}`
@@ -210,11 +190,9 @@ export class QoderCredentialStore {
   /**
    * The credential currently in effect, or `undefined` when there is none.
    *
-   * Resolution order: the active saved entry (or the first one when the
-   * pointer is stale), then the arm's environment variable (only when no
-   * saved entry exists — a saved token always wins over a stray env), then
-   * nothing. There is no refresh and no expiry check: a PAT lives until
-   * revoked.
+   * Resolution order: the active saved entry (or the first when the pointer is
+   * stale), then the arm's environment variable (only when no saved entry
+   * exists). No refresh and no expiry check.
    */
   async current(): Promise<QoderCredential | undefined> {
     const stored = await this.readOwn()
@@ -226,10 +204,8 @@ export class QoderCredentialStore {
         region: entry.region,
         ...entry.savedAtMs === undefined ? {} : { savedAtMs: entry.savedAtMs },
         ...entry.label === undefined ? {} : { label: entry.label },
-        // A file this store wrote came from the card or the CLI; `source` is
-        // not persisted because "card vs cli" only records who typed the
-        // command, and a file left by any other tool is indistinguishable
-        // from the card's.
+        // A file this store wrote came from the card or the CLI; `source` is not
+        // persisted because "card vs cli" only records who typed the command.
         source: 'card',
       }
     }
@@ -239,9 +215,8 @@ export class QoderCredentialStore {
   /**
    * The credential, or a thrown `MISSING_CREDENTIAL` error.
    *
-   * Callers that serve requests (the shim, the catalog sweep) use this so the
-   * absence of a token surfaces as the same classified failure the transport
-   * itself raises when a saved token turns out empty.
+   * Serving callers use this so an absent token surfaces as the classified failure
+   * the transport itself raises.
    */
   async resolve(): Promise<QoderCredential> {
     const credential = await this.current()
@@ -264,11 +239,9 @@ export class QoderCredentialStore {
   /**
    * Add a token and make it active.
    *
-   * Re-saving an existing token updates that entry (its saved time, and its
-   * label when one is supplied) instead of appending a duplicate — the id is
-   * derived from the token, so "same PAT" is the same entry by construction.
-   * The caller is responsible for having validated the token against the
-   * region first (`validateApiKey` upstream).
+   * Re-saving an existing token updates that entry instead of appending a
+   * duplicate — the id is derived from the token. The caller must have validated
+   * the token against the region first.
    *
    * @param pat - the token to store.
    * @param label - optional display label for the select row.
@@ -314,9 +287,8 @@ export class QoderCredentialStore {
   /**
    * Remove one saved entry.
    *
-   * The active pointer moves to the first remaining entry; removing the last
-   * entry deletes the file, exactly like {@link clear} — a saved token is the
-   * only thing that shadows the environment fallback.
+   * The active pointer moves to the first remaining entry; removing the last entry
+   * deletes the file, exactly like {@link clear}.
    *
    * @param id - the entry id.
    * @returns the removed entry, or `undefined` when no entry has that id.
@@ -333,10 +305,8 @@ export class QoderCredentialStore {
   }
 
   /**
-   * Persist a token for this variant and make it active.
-   *
-   * Kept for the CLI and older call sites: it is {@link add} behind the
-   * runtime-credential shape they expect.
+   * Persist a token for this variant and make it active; {@link add} behind the
+   * runtime-credential shape older call sites expect.
    */
   async save(pat: string, source: QoderCredentialSource = 'card'): Promise<QoderCredential> {
     const entry = await this.add(pat)
@@ -435,8 +405,7 @@ export class QoderCredentialStore {
       text = await readFile(this.ownPath, 'utf8')
     } catch {
       // An absent file means "not signed in". Any other read failure is treated
-      // the same way rather than thrown: the only recovery either way is to
-      // save the token again, and a status read must never break the card.
+      // the same way: the only recovery either way is to save the token again.
       this.pendingLegacyReason = undefined
       return undefined
     }
@@ -451,9 +420,8 @@ export class QoderCredentialStore {
       this.pendingLegacyReason = undefined
       return undefined
     }
-    // A WorkBuddy-era document (it carries `accessToken` and no `pat`) is not a
-    // credential this plugin can use in any form. Treat it as invalid — never a
-    // fake migration — and say so, so the card points at the right fix.
+    // A WorkBuddy-era document is not a credential this plugin can use in any
+    // form. Treat it as invalid — never a fake migration — and say so.
     if (typeof parsed['accessToken'] === 'string' && parsed['pat'] === undefined && parsed['credentials'] === undefined) {
       this.pendingLegacyReason = 'stale WorkBuddy credential file; save a Qoder Personal Access Token instead'
       if (!this.legacyWarned) {

@@ -5,14 +5,7 @@
  * @module dsh-qoder-connect/qoder/codes
  */
 
-/**
- * What a documented code means for routing.
- *
- * `quota` is the only family this module changes routing for: every other
- * family is already read correctly from the HTTP status (see
- * `qoderHttpError`), and guessing beyond the documented table is worse than
- * leaving the existing status-based fallback in place.
- */
+/** Which routing family a documented code belongs to. Only `quota` overrides the HTTP status. */
 export type QoderResultCodeFamily = 'auth' | 'quota' | 'request' | 'runtime'
 
 /** One documented Qoder result code. */
@@ -29,28 +22,9 @@ const table = (family: QoderResultCodeFamily, rows: readonly (readonly [string, 
   rows.map(([code, name]) => ({ code, name, family }))
 
 /**
- * The documented code table.
- *
- * Source: Qoder's *Errors and error codes* reference
- * (https://docs.qoder.com/cli/sdk/errors), "Result error codes" — the same
- * reference also states the rule this module exists to serve: "Authentication,
- * quota, policy, input, and configuration errors require a change before
- * retrying."
- *
- * Scope note on evidence. That page documents the Agent SDK / qodercli surface,
- * not the loopback HTTP endpoint this plugin talks to. Two of its codes are
- * confirmed on our own path, with matching semantics:
- *
- * - `10605` — observed verbatim: `{"code":"10605","message":"{\"isQueued\":true,
- *   ...\"retryAfterSeconds\":30}"}` (see `qoderQueueSignal`).
- * - `110` — reported in dsh-qoder-connect#10 and reproduced by injecting the
- *   reported body through this transport: `{"code":"110","message":"Billing
- *   daily count exceeded"}`.
- *
- * The rest are carried as the upstream's documented vocabulary. They are read
- * only to identify the family; an undocumented code is never guessed at, so a
- * body this table does not recognize keeps whatever routing the HTTP status
- * already gives it.
+ * The documented code table, from Qoder's "Result error codes" reference
+ * (https://docs.qoder.com/cli/sdk/errors). Codes are used only to identify a
+ * family; anything undocumented keeps the routing its HTTP status gives it.
  */
 export const QODER_RESULT_CODES: readonly QoderResultCode[] = Object.freeze([
   ...table('auth', [
@@ -87,23 +61,10 @@ export const QODER_RESULT_CODES: readonly QoderResultCode[] = Object.freeze([
 const byCode = new Map(QODER_RESULT_CODES.map(entry => [entry.code, entry]))
 
 /**
- * The documented result code a rejection body names, if it names one.
+ * The documented result code a rejection body names, or `undefined`. Only a
+ * quoted `code` key counts; mirrored HTTP statuses are not documented codes.
  *
- * Qoder nests: a queue answer arrives as `{"code":"10605","message":"{\"isQueued\":
- * true,...}"}`, so the inner payload is escaped JSON and a marker can sit at any
- * depth. Dropping the ASCII backslashes keeps every layer readable at once — the
- * same trick `qoderQueueSignal` uses, and for the same reason; no marker this
- * module looks for depends on a backslash.
- *
- * Only a *quoted* `code` key counts. Qoder also mirrors raw HTTP statuses into a
- * `code` field (`"code":"429"`, `"code":403`), and a message that merely mentions
- * a code in prose must not be read as one; both stay unrecognized because neither
- * names a documented result code.
- *
- * @param body - the upstream error body, or the formatted message when the body
- *   was only embedded in it.
- * @returns the matching table entry, or `undefined` when the body names no
- *   documented code — never a guess.
+ * @param body - the upstream error body, or the message that embeds it.
  */
 export function qoderResultCode(body: string | undefined): QoderResultCode | undefined {
   if (body === undefined || body === '') return undefined

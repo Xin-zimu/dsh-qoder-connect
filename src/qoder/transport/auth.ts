@@ -62,13 +62,7 @@ async function waitForFlight(
 export class QoderAuthService {
   private readonly cache = new Map<string, CachedEntry>()
   private readonly inFlight = new Map<string, InFlightEntry>()
-  /**
-   * Self-heal exchanges in flight, keyed like the cache. Deliberately separate
-   * from {@link inFlight}: that flight may be aborted by a departing
-   * concurrent waiter (a quota poll, a catalog sweep) whose abort has nothing
-   * to do with the heal, so healers must not share its controller. Concurrent
-   * heals instead share this flight — see {@link exchangeFresh}.
-   */
+  /** Self-heal exchanges, kept apart from `inFlight` so a departing waiter cannot abort them. */
   private readonly healFlights = new Map<string, HealFlightEntry>()
   private readonly fetchImpl: typeof fetch
   private readonly timeoutMs: number
@@ -78,8 +72,7 @@ export class QoderAuthService {
   constructor(options: QoderAuthServiceOptions = {}) {
     this.fetchImpl = options.fetch ?? globalThis.fetch
     this.timeoutMs = options.timeoutMs ?? defaultAuthTimeoutMs
-    // The same default chain every other caller gets: the official Qoder
-    // CLI's id first, this plugin's own data-directory seed as the create
+    // The Qoder CLI's id first, this plugin's data-directory seed as the create
     // point — never a file under the OS home directory.
     this.resolveMachineId = options.resolveMachineId ?? getMachineId
     this.region = options.region ?? 'global'
@@ -95,23 +88,9 @@ export class QoderAuthService {
   }
 
   /**
-   * Exchange a fresh job token OUTSIDE the single-flight, for the self-heal
-   * retry. The shared flight can be aborted by a departing concurrent waiter
-   * (the quota poll, the catalog sweep), and a retry that joins it would then
-   * be cancelled by a path that has nothing to do with the chat. The result
-   * replaces the cache entry.
-   *
-   * Two heals for the same credential that overlap share one exchange instead
-   * of racing: each racer's `clear` deleted what the previous one had just
-   * cached, and its own `cache.set` overwrote the other's — so the cache could
-   * end up naming a token the losing request was no longer using, and with an
-   * upstream that retires the previous job token on a new exchange the racers
-   * also invalidated each other's credentials (one chat recovering while a
-   * concurrent one failed, exactly the 2026-09-26 22:36 observation). The
-   * shared exchange runs on its own timeout signal, so one healer's abort —
-   * its chat request went away — cannot cancel an exchange other healers, and
-   * the future `getCredentials` callers about to read the refreshed cache, are
-   * waiting on.
+   * Exchange a fresh job token outside the single-flight, for the self-heal
+   * retry; overlapping heals for one credential share a single exchange, which
+   * runs on its own timeout signal. The result replaces the cache entry.
    */
   async exchangeFresh(pat: string, signal?: AbortSignal): Promise<CosyCredentials> {
     const cacheKey = `${this.region}:${opaqueCredentialKey(pat)}`

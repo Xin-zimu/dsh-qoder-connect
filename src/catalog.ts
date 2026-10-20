@@ -1,12 +1,7 @@
 /**
- * Qoder model catalog: a static fallback roster captured from the transport's
- * built-in defaults, replaced by the upstream's dynamic answer once it loads.
- *
- * The row types moved here from the WorkBuddy-era upstream module: they are
- * the plugin's own model vocabulary (what the catalog stores, the adapter
- * exposes, and the card renders), while `QoderCatalogModel` in
- * `src/qoder/catalog.ts` is the upstream's. `upstream.ts` translates one into
- * the other.
+ * Qoder model catalog: a static fallback roster, replaced by the upstream's
+ * dynamic answer once it loads. These row types are the plugin's own model
+ * vocabulary; `upstream.ts` translates them to and from the transport's.
  *
  * @module dsh-qoder-connect/catalog
  */
@@ -54,19 +49,12 @@ export interface QoderModelBilling {
 }
 
 /**
- * The built-in roster, transcribed from the transport's own `defaultModels`
- * (`src/qoder/catalog.ts`) — the Qoder model keys both regions start from
- * before the first successful discovery: `cmodel`, `auto`, `ultimate`,
- * `performance`, `efficient`, `lite`.
+ * The built-in roster, mirrored from the transport's own `defaultModels`: the
+ * model keys both regions start from before the first discovery.
  *
- * It exists so the provider registers with a usable catalog while the first
- * fetch is in flight or the endpoint is unreachable, and it is deliberately
- * *not* a promise about the upstream's current state: the discovery answer
- * replaces it at startup. No per-region roster is invented here — the
- * transport ships one shared default set, and this mirror keeps the same
- * discipline. Reasoning and rate metadata are absent because the defaults
- * declare none; those rows offer no thinking control until the upstream says
- * otherwise.
+ * It lets the provider register while the first fetch is in flight or the
+ * endpoint is unreachable; the discovery answer replaces it at startup. Reasoning
+ * and rate metadata are absent because the defaults declare none.
  */
 export const FALLBACK_QODER_MODELS: readonly QoderModelInfo[] = [
   { id: 'cmodel', name: 'Cantus (Qoder)', contextWindow: 1_000_000, maxTokens: 32_768, supportsImages: true, billing: { free: false, rateUnknown: true }, source: 'system' },
@@ -80,16 +68,10 @@ export const FALLBACK_QODER_MODELS: readonly QoderModelInfo[] = [
 /**
  * Mutable catalog shared by the shim's `/v1/models` and the adapter.
  *
- * Visibility is separate from content. A variant with no usable credential
- * must expose *no* models rather than a fallback roster: the DSH model picker
- * drops an empty group, so an empty catalog is exactly how a provider hides
- * without touching registration. Serving the fallback to a signed-out user
- * instead offers models that can only fail (the transport throws
- * `MISSING_CREDENTIAL` on the first message), which is worse than showing
- * nothing.
- *
- * The flag defaults to visible so a directly-constructed catalog behaves as
- * it always has; the plugin runtime applies the credential gate.
+ * Visibility is separate from content: a variant with no usable credential must
+ * expose no models rather than a fallback roster, since the model picker drops an
+ * empty group — and serving models that can only fail is worse than nothing.
+ * The flag defaults to visible; the plugin runtime applies the credential gate.
  */
 export class QoderCatalog {
   private models: readonly QoderModelInfo[]

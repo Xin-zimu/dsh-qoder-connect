@@ -145,6 +145,11 @@ export const en = {
   quotaPollLabel: 'Refresh interval',
   quotaPollHint: 'Applies to both quota cards. Longer is kinder to the billing endpoint.',
   quotaPollUnit: 'min',
+  queueWaitLabel: 'Retry inside the plugin',
+  queueWaitHint: 'On: the plugin polls the model queue itself and replays when it frees up. Off: the request result is handed to the host unchanged.',
+  queueWaitLimitLabel: 'Longest wait',
+  queueWaitLimitHint: 'How long one call may queue, in seconds. Each poll still waits the time Qoder reports.',
+  queueWaitUnit: 's',
   quotaSettingsSave: 'Save',
   quotaSettingsSaving: 'Saving…',
   quotaSettingsDiscard: 'Discard',
@@ -175,7 +180,6 @@ export const en = {
   quotaColPackage: 'Package',
   quotaColRemain: 'Remaining / Total',
   quotaColExpiry: 'Expires',
-  /** Line stating when the PAT in effect was authorized (saved). */
   patAuthorizedAt: 'PAT authorized {time}',
 } as const
 
@@ -326,6 +330,11 @@ export const zh: Record<QoderSettingsKey, string> = {
   quotaPollLabel: '刷新间隔',
   quotaPollHint: '对两张额度卡片同时生效。间隔越长对计费接口越友好。',
   quotaPollUnit: '分钟',
+  queueWaitLabel: '插件内重试',
+  queueWaitHint: '开启：插件内自动实现轮询排队，放行后自动重试。关闭：将本次请求的结果内部处理后原样交给宿主。',
+  queueWaitLimitLabel: '最长等待',
+  queueWaitLimitHint: '单次排队最多等多久，单位秒。每轮仍按 Qoder 返回的建议时间等待。',
+  queueWaitUnit: '秒',
   quotaSettingsSave: '保存',
   quotaSettingsSaving: '保存中…',
   quotaSettingsDiscard: '放弃更改',

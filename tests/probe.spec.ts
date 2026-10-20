@@ -10,10 +10,9 @@ import {
 } from '../src/probe.ts'
 
 /**
- * Offline tests for the probe protocol (`docs/reasoning-effort-probe-plan.md`
- * §4). The point of these is the *gating*, not the sweep: a model that answers
- * 200 to a value that cannot exist must never produce a per-level result, and
- * anything non-decisive must degrade to `unknown` rather than to a negative
+ * Offline tests for the probe protocol (§4). The point is the *gating*, not the
+ * sweep: a model answering 200 to a value that cannot exist yields no per-level
+ * result, and anything non-decisive degrades to `unknown`, never to a negative
  * capability claim.
  */
 

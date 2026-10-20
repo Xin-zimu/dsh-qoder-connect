@@ -76,6 +76,17 @@ export function getQoderUserStatusUrl(region: QoderRegion = 'global'): string {
   return `${openApiUrl}/api/v3/user/status`
 }
 
+/** Pending model-queue entry for one request; not published API, so callers must fall back. */
+export function getQoderQueueStatusUrl(
+  region: QoderRegion = 'global',
+  params: { requestSetId: string, modelKey: string, queueType?: string | undefined },
+): string {
+  const { baseUrl } = resolveQoderEndpoints(region)
+  const query = new URLSearchParams({ requestSetId: params.requestSetId, modelKey: params.modelKey })
+  if (params.queueType !== undefined) query.set('queueType', params.queueType)
+  return `${baseUrl}algo/api/v2/service/ask/queue/status?${query.toString()}`
+}
+
 /** Path of the center web search route. */
 export const qoderWebSearchPath = '/api/v1/webSearch/oneSearch'
 

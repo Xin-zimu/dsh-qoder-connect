@@ -20,12 +20,10 @@ import {
 } from '../src/variants.ts'
 
 /**
- * The two-variant contract. Both arms are the same upstream in different
- * regions, and they differ only by route, file identity, and display identity.
- * Everything that varies is one descriptor, so these tests cover the three
- * ways that can go wrong: a credential crossing products, one variant's files
- * answering for the other, and a route one arm serves that the other's card
- * then calls.
+ * The two-variant contract: same upstream, different regions, differing only by
+ * route, file identity and display identity — all from one descriptor. The three
+ * failure modes: a credential crossing products, one variant's files answering for
+ * the other, and a route one arm serves that the other's card then calls.
  */
 
 const CLEANUP: (() => Promise<void>)[] = []
@@ -85,10 +83,8 @@ describe('variant descriptors', () => {
   })
 
   it("answers the quota store's path test with the arm it belongs to", () => {
-    // quota-settings-store decides the variant from the status path alone.
-    // The international route contract is the `/global/` segment: it must not
-    // regress to the WorkBuddy-era `/ai/` spelling, and the China route must
-    // never acquire either marker.
+    // The international route carries `/global/`; the China route must never acquire
+    // it, nor the legacy `/ai/` spelling.
     for (const variant of QODER_VARIANTS) {
       const looksGlobal = variant.statusPath.includes('/global/')
       const looksLikeOldAi = variant.statusPath.includes('/ai/')
@@ -102,9 +98,8 @@ describe('variant descriptors', () => {
 
 describe('status-path literals', () => {
   it('mirror the variant table so both bundles agree without a shared expression', () => {
-    // The browser and host bundles are built independently; these literals are
-    // the contract they meet on. Any drift is the desk asking a route the
-    // host never mounted.
+    // The browser and host bundles are built independently, so these literals are the
+    // contract they meet on: any drift asks a route the host never mounted.
     expect(CHINA_VARIANT.statusPath).toBe(QODER_STATUS_PATH)
     expect(CHINA_VARIANT.probePath).toBe(QODER_PROBE_PATH)
     expect(CHINA_VARIANT.authPath).toBe(QODER_AUTH_PATH)

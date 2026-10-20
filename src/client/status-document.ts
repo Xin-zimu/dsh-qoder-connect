@@ -5,14 +5,8 @@ import type { QoderWebStatus } from '../status-paths.ts'
 /**
  * Whether a parsed status response really is a status document.
  *
- * A 200 is not a promise about the body: it may be empty, literal `null`, a
- * non-JSON page from a proxy, or an array. Both halves of the browser plugin
- * read the same route, so both must agree on what is valid — storing an
- * unreadable value puts something in state that the next render dereferences.
- *
- * The check is deliberately limited to the discriminator (plus `error`'s
- * `message`, which the error paragraph renders): validating optional fields
- * here would reject documents the host legitimately omits fields from.
+ * A 200 is no promise about the body: it may be empty, `null`, a non-JSON page,
+ * or an array. Only the discriminator is checked, plus `error`'s `message`.
  */
 export function isQoderWebStatus(value: unknown): value is QoderWebStatus {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false

@@ -1,26 +1,13 @@
 /**
- * Qoder upstream client — the loopback shim's OpenAI-shaped surface, carried
- * over to the Qoder transport.
+ * Qoder upstream client — the loopback shim's OpenAI-shaped surface, carried over
+ * to the Qoder transport.
  *
- * The plugin's browser card, the CLI, and DSH's pi-ai adapter all reach Qoder
- * through this one module. The wire reality changed underneath the WorkBuddy
- * edition it replaces: there is no HTTP endpoint that accepts an OpenAI JSON
- * body any more. Instead this module
- *
- * - **translates** the narrow OpenAI chat-completions request the shim forwards
- *   (model, messages, tools, `max_tokens`, `temperature`, `stop`,
- *   `reasoning_effort`) into dsh-llm's `GenerateOptions`, and
- * - **re-serializes** the transport's `StreamChunk` vocabulary back into
- *   `chat.completion.chunk` SSE frames, so the adapter side needs nothing
- *   Qoder-specific, and
- * - maps catalog discovery (`transport.discoverModels`) into the plugin's
- *   model rows, and the account read (`transport.readAccount`) into the
- *   card's credit shape.
- *
- * Failure classification follows the transport's error taxonomy
- * (`QoderLlmError.failure.code` plus the HTTP status it carried); the
- * WorkBuddy-era session/credit marker lists are gone with the upstream they
- * described.
+ * The card, the CLI, and DSH's pi-ai adapter all reach Qoder through this module:
+ * it translates the narrow OpenAI chat-completions request into dsh-llm's
+ * `GenerateOptions`, re-serializes `StreamChunk` back into `chat.completion.chunk`
+ * SSE frames so the adapter needs nothing Qoder-specific, and maps catalog
+ * discovery and the account read onto the plugin's rows. Failures follow the
+ * transport's error taxonomy (`QoderLlmError.failure.code` plus its HTTP status).
  *
  * @module dsh-qoder-connect/upstream
  */
@@ -51,9 +38,8 @@ import type { QoderModelBilling, QoderModelInfo, QoderModelReasoning } from './c
 
 /**
  * The reasoning-effort vocabulary the probe sweeps and the effort map speak.
- * Mirrors the canonical order of `src/qoder/catalog.ts` (`low` … `max`).
- * `minimal` and `off` are deliberately absent: `off` is a separate capability
- * the upstream must declare, never something probing may infer.
+ * `minimal` and `off` are deliberately absent: `off` is a separate capability the
+ * upstream must declare, never something probing may infer.
  */
 export type QoderEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
@@ -70,10 +56,8 @@ export type UpstreamErrorKind =
 /**
  * HTTP status the shim answers each failure kind with.
  *
- * `timeout` is 408 and deliberately not 504: the harness's pi-ai classifier tests
- * `/\b5\d\d\b/` *before* its `timeout` test, so a 5xx status would be read as
- * SERVER no matter what the message says. 408 is also the honest answer for a
- * request the upstream never completed.
+ * `timeout` is 408, deliberately not 504: the harness's pi-ai classifier tests
+ * `/\b5\d\d\b/` before its `timeout` test, so a 5xx would read as SERVER.
  */
 export const KIND_STATUS: Readonly<Record<UpstreamErrorKind, number>> = {
   missing_credential: 401,
@@ -97,12 +81,10 @@ export type QoderChatResult =
      * The upstream's own "try again in N ms" answer (Qoder's queue body carries
      * `retryAfterSeconds`, and a plain 429 may carry `Retry-After`).
      *
-     * It has to survive this layer to be usable: the shim turns it into the
-     * `Retry-After` header and the `[retry-after=<n>s]` message tag, and the
-     * adapter reads that tag back into `failure.providerRetryAfterMs` — the
-     * only field the harness retry policy honors. Dropped here, the host can
-     * only fall back to its own backoff (observed: 19134ms against an upstream
-     * that asked for 30s, so every retry hit the still-closed window).
+     * It must survive this layer: the shim turns it into the `Retry-After` header
+     * and the `[retry-after=<n>s]` tag, which the adapter reads back into
+     * `failure.providerRetryAfterMs` — the only field the harness retry policy
+     * honors. Dropped here, the host can only fall back to its own backoff.
      */
     retryAfterMs?: number
   }
@@ -122,18 +104,17 @@ export interface QoderCreditAccount {
   /**
    * Expiry of this package, verbatim from the upstream (ISO string).
    *
-   * Absent when the upstream reported no expiry — which now includes the
-   * year-9999 "never" sentinel the transport drops rather than forwarding.
+   * Absent when the upstream reported no expiry — including the year-9999 "never"
+   * sentinel, which the transport drops rather than forwarding.
    */
   packageEndTime?: string
   /**
-   * The package's own localized titles, when the upstream sent a real display
-   * name (a campaign grant's `SOTA 专属积分`). The renderer picks the active
-   * language; `packageName` stays the single-language best guess it falls back
-   * to, so a card that never consults this map still shows a sensible label.
+   * The package's own localized titles, when the upstream sent a real display name.
+   * The renderer picks the active language; `packageName` stays the single-language
+   * fallback.
    */
   packageNameI18n?: { zh?: string | undefined; en?: string | undefined }
-  /** Opaque upstream code for the same grant (`act-20261014-129`), when known. */
+  /** Opaque upstream code for the same grant (`act-<date>-<n>`), when known. */
   packageCode?: string
 }
 
@@ -153,9 +134,8 @@ export interface QoderCredits {
 /**
  * Normalize a billing rate label for display.
  *
- * Qoder reports a `priceFactor` number; the host spells it `x<n>` (and the
- * WorkBuddy-era saved files sometimes carried a trailing " credits"). The card
- * wants one shape: a trimmed multiplier without the suffix.
+ * Qoder reports a `priceFactor` number; the host spells it `x<n>`. The card wants
+ * one shape: a trimmed multiplier without the trailing "credits".
  */
 export function normalizeCredits(credits: string | undefined): string | undefined {
   if (credits === undefined) return undefined
@@ -166,31 +146,24 @@ export function normalizeCredits(credits: string | undefined): string | undefine
 /**
  * Classify a raw HTTP upstream failure from status and a body excerpt.
  *
- * Status first, then phrases: a throttling body often also says "quota
- * exceeded", and reading that as an exhausted balance parks a healthy account
- * until the next billing day instead of retrying shortly.
+ * A documented result code outranks the status: Qoder answers a saturated queue
+ * or a spent daily window with 401/403, and reading either as a dead credential
+ * would park a healthy account. Status comes next, then body phrases.
  */
 export function classifyUpstreamError(status: number, body: string): UpstreamErrorKind {
   const lower = body.toLowerCase()
-  // Qoder announces a saturated queue (or an unavailable region service) with
-  // a 401/403 whose body carries the queue markers. That is a throttle: the
-  // host retries soft_rate and honors retryAfterSeconds, while 'auth' would
-  // park the account until the user intervenes.
+  // Qoder announces a saturated queue (or an unavailable region service) with a
+  // 401/403 carrying the queue markers. That is a throttle: the host retries
+  // soft_rate and honors retryAfterSeconds, while 'auth' would park the account.
   if (qoderQueueSignal(body) !== undefined) return 'soft_rate'
-  // A *documented* quota code outranks the status arms below. Qoder answers a
-  // spent daily window with HTTP 403 `{"code":"110","message":"Billing daily
-  // count exceeded"}`, which the status alone reads as a dead credential (#10).
-  // The numeric code is the only signal that separates the two, and status-first
-  // cannot: the caution the arms below encode — a throttling body often also says
-  // "quota exceeded" — is about *prose*, and it still holds for every body that
-  // names no code.
+  // A documented quota code outranks the status arms: a spent daily window arrives
+  // as 403 `{"code":"110","message":"Billing daily count exceeded"}`, which status
+  // alone reads as a dead credential. The prose caution below still holds for every
+  // body that names no code.
   const documented = qoderResultCode(body)
   if (documented?.family === 'quota') return 'quota_exceeded'
-  // A documented request/policy code is the same shape of answer: Qoder can name
-  // 406/80411 while answering 401/403, and the status arm below would read that as
-  // a dead credential. pi-ai has no code for those, so the shim's request arm is
-  // the honest floor. Only a documented code counts, so the status-first caution
-  // below still holds for every body that names none.
+  // A documented request/policy code is the same shape: Qoder can name 406/80411
+  // while answering 401/403, which the status arm would read as a dead credential.
   if (documented?.family === 'request') return 'client'
   if (status === 402) return 'quota_exceeded'
   if (status === 429) return 'soft_rate'
@@ -212,54 +185,32 @@ export function classifyUpstreamError(status: number, body: string): UpstreamErr
 /**
  * Map one structured transport failure onto the shim's error kind.
  *
- * The transport's taxonomy (`src/qoder/errors.ts`) codes an HTTP 402 as
- * `INVALID_REQUEST`, so the status gets the last say for the quota and auth
- * families before the code-based defaults apply.
- *
- * `RATE_LIMIT` is tested before the auth family because the upstream's queue
- * answer keeps its 401/403 status: a saturated qfmodel queue reads
- * `code: RATE_LIMIT, status: 403` (body carries 10605/isQueued/
- * retryAfterSeconds), and letting the status arm claim it reported a dead
- * credential — which the host never retries — instead of a throttle it would.
- *
- * `QUOTA` and the request family are tested before the auth family for the same
- * reason: both keep the upstream's 401/403 (see `qoderHttpError`), and the status
- * arm would call a spent daily window or a refused request a credential
- * rejection. `status === 402` is tested before the request arm so that a 402 the
- * transport coded `INVALID_REQUEST` (its 4xx fallback) still reads as a quota.
+ * Code families are tested before the status arm because the upstream keeps its
+ * 401/403 for throttles, spent windows, and refused requests alike: letting the
+ * status claim them would report a dead credential the host never retries.
+ * `status === 402` is tested before the request arm because the transport codes a
+ * 402 as `INVALID_REQUEST`.
  */
 export function kindFromQoderFailure(failure: { code: string; status?: number | undefined }): UpstreamErrorKind {
   if (failure.code === 'MISSING_CREDENTIAL') return 'missing_credential'
   if (failure.code === 'RATE_LIMIT') return 'soft_rate'
-  // A quota code outranks the status arms, exactly as RATE_LIMIT above does. The
-  // transport codes a spent daily window QUOTA while keeping the upstream's 403,
-  // so testing the status first would claim it as an authorization rejection and
-  // the shim would answer 401 "auth" — the "API 密钥无效" report this fix exists to
-  // remove (#10). Only these two code strings count; every other failure still
-  // routes exactly as before.
-  //
-  // `QUOTA` is what this plugin's transport emits. `ACCOUNT_QUOTA` is the kernel's
-  // more specific code for an account-level balance, accepted as an alias so the
-  // two names cannot route differently. Nothing in the installed stack produces it
-  // today — this transport emits QUOTA, and dsh-llm-pi-ai only ever returns QUOTA —
-  // so it is a forward-compatible alias, not a live input.
+  // A quota code outranks the status arms: the transport codes a spent daily window
+  // QUOTA while keeping the upstream's 403, which status-first would read as an
+  // authorization rejection. `ACCOUNT_QUOTA` is the kernel's name for an
+  // account-level balance, accepted as an alias so the two cannot route differently.
   if (failure.code === 'QUOTA' || failure.code === 'ACCOUNT_QUOTA') return 'quota_exceeded'
-  // 402 comes before the request arm so that a 402 the transport coded
-  // INVALID_REQUEST (its 4xx fallback) still reads as an exhausted balance.
+  // 402 before the request arm, so a 402 coded INVALID_REQUEST still reads as quota.
   if (failure.status === 402) return 'quota_exceeded'
-  // The request/policy arm precedes auth for the same reason: the transport keeps
-  // the upstream's 401/403 when a documented request code was named (see
-  // qoderHttpError), and the status arm would otherwise call a content refusal a
-  // credential rejection.
+  // The request/policy arm precedes auth: the transport keeps the upstream's 401/403
+  // when a documented request code was named, and status-first would call a content
+  // refusal a credential rejection.
   if (failure.code.startsWith('INVALID_') || failure.code.startsWith('UNSUPPORTED_') || failure.code === 'ATTACHMENT') {
     return 'client'
   }
   if (failure.code === 'AUTH' || failure.status === 401 || failure.status === 403) return 'auth'
   if (failure.status === 429) return 'soft_rate'
-  // A timeout keeps its own kind so the shim can answer 408 with the word in the
-  // message. Folding it into `server` answered 502, and pi-ai reads a 5xx number
-  // as SERVER before it ever tests for a timeout — so a stalled request reported a
-  // server fault.
+  // A timeout keeps its own kind so the shim can answer 408: pi-ai reads a 5xx
+  // number as SERVER before it ever tests for a timeout.
   if (failure.code === 'TIMEOUT') return 'timeout'
   // SERVER, EMPTY_RESPONSE, MALFORMED_RESPONSE, TRANSPORT, PROVIDER_ERROR, and
   // anything unrecognized: a server-side condition.
@@ -335,9 +286,9 @@ function decodeDataImage(url: string): { mediaType: ImageMediaType; data: Uint8A
 /**
  * Parse one OpenAI content value (string or parts array) into text.
  *
- * With `imagesAs`, image parts are offered for commit — and a request that
- * carries them without any commit path fails as a client error, because the
- * Qoder wire can only ever transport a durable attachment reference.
+ * With `imagesAs`, image parts are committed; a request carrying images without a
+ * commit path fails as a client error, since the Qoder wire only transports a
+ * durable attachment reference.
  */
 async function openAiContentBlocks(
   content: unknown,
@@ -382,12 +333,10 @@ async function openAiContentBlocks(
 /**
  * Translate one OpenAI chat-completions body into a `GenerateOptions` request.
  *
- * The layer is deliberately narrow: it accepts exactly what pi-ai's
- * `openai-completions` API sends, and rejects anything else with an
- * attributable 400 rather than silently dropping a caller's intent. System
- * prompts ride `options.system` (the transport's own slot), not a leading
- * message; tool results become dedicated user-role messages the Qoder
- * serializer accepts.
+ * Deliberately narrow: it accepts exactly what pi-ai's `openai-completions` API
+ * sends and rejects anything else with an attributable 400 rather than silently
+ * dropping a caller's intent. System prompts ride `options.system`; tool results
+ * become dedicated user-role messages the Qoder serializer accepts.
  */
 async function toGenerateOptions(
   bodyJson: string,
@@ -519,13 +468,10 @@ async function toGenerateOptions(
 /**
  * Re-serialize one `StreamChunk` sequence into OpenAI chunk frames.
  *
- * One assistant choice, deltas keyed by a per-block tool-call index that
- * restarts at zero per block like OpenAI's own, reasoning streamed as
- * `delta.reasoning_content` (the compatible extension other gateways use),
- * usage as a choices-less frame before the terminal finish, and `data:
- * [DONE]` last. A failed or aborted finish mid-stream becomes an error JSON
- * frame and then `[DONE]`: the HTTP status is already sent and cannot carry
- * the failure.
+ * One assistant choice, deltas keyed by a per-block tool-call index, reasoning
+ * streamed as `delta.reasoning_content`, usage as a choices-less frame before the
+ * terminal finish, and `data: [DONE]` last. A failed finish mid-stream becomes an
+ * error JSON frame then `[DONE]`: the HTTP status is already sent.
  */
 class ChunkEncoder {
   private readonly id: string
@@ -598,17 +544,13 @@ class ChunkEncoder {
           + (cacheWrite ?? 0)
         const completion = chunk.usage.outputTokens
         const reasoning = chunk.usage.reasoningTokens
-        // The token counts are DISJOINT by contract (`inputTokens` excludes
-        // cached input), so the OpenAI `prompt_tokens` total is the sum.
+        // The token counts are DISJOINT by contract (`inputTokens` excludes cached
+        // input), so `prompt_tokens` is the sum.
         //
-        // `prompt_tokens_details` MUST ride back out with it: the harness
-        // reads the cache-hit share off `prompt_tokens_details.cached_tokens`,
-        // so a usage frame that carries only the three aggregate counters
-        // silently reports every cached token as a miss (cache hit pinned to
-        // 0% however warm the upstream prefix cache actually was). Emit the
-        // details object only when the transport reported at least one of the
-        // two cache counters, so requests that never saw cache fields keep the
-        // exact same frame shape as before.
+        // `prompt_tokens_details` MUST ride back out: the harness reads the cache-hit
+        // share off `prompt_tokens_details.cached_tokens`, so a frame carrying only
+        // the aggregate counters reports every cached token as a miss. Emit it only
+        // when the transport reported a cache counter.
         const details = cacheRead === undefined && cacheWrite === undefined
           ? undefined
           : {
@@ -669,9 +611,8 @@ class ChunkEncoder {
  * Normalize a provider retry hint for {@link QoderChatResult}.
  *
  * Only a positive finite number is a hint: the truncation keeps the shim's
- * `Retry-After` header an integer number of seconds, and `undefined` keeps the
- * optional field off the result entirely (no `retryAfterMs: undefined` noise in
- * the shim's error body).
+ * `Retry-After` an integer number of seconds, and `undefined` keeps the optional
+ * field off the result entirely.
  */
 export function retryHintOf(value: unknown): { retryAfterMs?: number } {
   return typeof value === 'number' && Number.isFinite(value) && value > 0
@@ -745,10 +686,8 @@ export class QoderUpstreamClient {
   }
 
   /**
-   * The catalog row for one model id: this client's own discovery answers
-   * first (it is the same data the upstream catalog call produced), and an
-   * externally supplied provider — the plugin's fallback roster, say — fills
-   * ids the discovery never listed.
+   * The catalog row for one model id: this client's own discovery answers first,
+   * and an externally supplied provider fills ids the discovery never listed.
    */
   catalogModelFor(id: string): QoderCatalogModel | undefined {
     return this.discovered.get(id) ?? this.externalCatalog?.(id)
@@ -757,11 +696,9 @@ export class QoderUpstreamClient {
   /**
    * Discover this variant's models and translate them into plugin rows.
    *
-   * The raw rows stay addressable via {@link catalogModelFor}: a chat request
-   * for a discovered model must hand the transport its row, because effort
-   * support, image capability, and the output cap are all validated against
-   * it. The last successful fetch's provenance lands in {@link lastCatalog}
-   * for the status card.
+   * The raw rows stay addressable via {@link catalogModelFor}: a chat request must
+   * hand the transport its row, because effort support, image capability, and the
+   * output cap are validated against it.
    */
   async fetchModels(signal?: AbortSignal): Promise<QoderModelInfo[]> {
     const models = await this.transport.discoverModels(signal)
@@ -774,17 +711,11 @@ export class QoderUpstreamClient {
   /**
    * The subscriber's quota answer, mapped onto the card's credit shape.
    *
-   * Qoder reports one personal quota, an optional organization resource
-   * package, bonus credits, and — on the international edition — a list of
-   * campaign grants under `dedicatedResourcePackages`. Each becomes a package
-   * row the card already knows how to draw. An unbounded personal allowance
-   * (`total === 0`, not exceeded) is the account's "unlimited" state.
-   *
-   * A campaign grant carries its OWN expiry and its OWN localized title, and
-   * neither may be borrowed from the account: `usage.expiresAt` is the
-   * year-9999 "never" sentinel for a personal account, while the grant really
-   * does end, and `name` is an opaque campaign code while the readable copy
-   * lives in `displayLabels`.
+   * One personal quota, an optional organization package, bonus credits, and — on
+   * the international edition — campaign grants, each becoming a package row. An
+   * unbounded personal allowance (`total === 0`, not exceeded) is the "unlimited"
+   * state. A campaign grant carries its own expiry and localized title, never
+   * borrowed from the account.
    */
   async fetchCredits(signal?: AbortSignal): Promise<QoderCredits> {
     const account: QoderAccountInfo = await this.transport.readAccount({ force: true, ...signal === undefined ? {} : { signal } })
@@ -808,9 +739,9 @@ export class QoderUpstreamClient {
         ...usage.expiresAt === undefined ? {} : { packageEndTime: usage.expiresAt },
       })
     }
-    // Bonus credits sit beside the plan upstream (the daily campaign's 100 land
-    // here). Dropping the bucket made the card list fewer packages than the
-    // account actually holds — the web showed two, the card showed one.
+    // Bonus credits sit beside the plan upstream (the daily campaign's grant lands
+    // here); dropping the bucket makes the card list fewer packages than the
+    // account holds.
     const addOn = usage.addOnQuota
     if (addOn !== undefined) {
       accounts.push({
@@ -820,10 +751,9 @@ export class QoderUpstreamClient {
         ...usage.expiresAt === undefined ? {} : { packageEndTime: usage.expiresAt },
       })
     }
-    // Campaign grants (`act-…` SOTA credits) are stacked in an array rather
-    // than a single named bucket, so the field had no mapping at all: a real
-    // 2,000-credit package stayed invisible on every surface while the account
-    // page listed it. Its own expiry travels with it, never the account's.
+    // Campaign grants are stacked in an array rather than a single named bucket, so
+    // each one needs its own row; its own expiry travels with it, never the
+    // account's.
     for (const pack of usage.dedicatedResourcePackages ?? []) {
       const titles = pack.title
       const fallbackName = titles?.zh ?? titles?.en ?? pack.name ?? '专属资源包'
@@ -857,12 +787,10 @@ export class QoderUpstreamClient {
    * Stream one translated chat-completions request.
    *
    * The first transport chunk is pulled before the response is constructed:
-   * everything the transport can reject without touching the network — a
-   * missing or empty credential, an effort the model does not advertise, an
-   * image on a text-only model — must still be able to answer as a real HTTP
-   * status, not as a 200 whose first frame is an error. Once streaming has
-   * begun, failures degrade to the error-frame-then-`[DONE]` form the
-   * {@link ChunkEncoder} documents.
+   * everything rejectable without the network — a missing credential, an
+   * unadvertised effort, an image on a text-only model — must still answer as a
+   * real HTTP status, not a 200 whose first frame is an error. Once streaming has
+   * begun, failures degrade to the error-frame-then-`[DONE]` form.
    */
   async chatStream(bodyJson: string, signal?: AbortSignal): Promise<QoderChatResult> {
     let options: GenerateOptions
@@ -979,14 +907,11 @@ export class QoderUpstreamClient {
   /**
    * One minimal reasoning-effort request, as the probe sweep needs it.
    *
-   * A row that declares efforts is still checked locally, so an unlisted value
-   * costs no request. A row that declares none — the only kind detection is
-   * offered for — sends the value to the upstream and waits for its answer,
-   * because the endpoint is the only authority on spellings the catalog never
-   * lists. Either refusal is reported as an attributable 400 with code
-   * `UNSUPPORTED_REASONING_EFFORT`, and an accepted value costs exactly one
-   * streamed request, which this method ends after the first chunk arrives —
-   * see the module docs in `probe.ts`.
+   * A row that declares efforts is checked locally, so an unlisted value costs no
+   * request; a row that declares none sends the value to the upstream, the only
+   * authority on spellings the catalog never lists. Either refusal is an
+   * attributable 400 with code `UNSUPPORTED_REASONING_EFFORT`, and the stream is
+   * ended after the first chunk arrives.
    */
   async probeEffort(model: string, effort: string | undefined, signal: AbortSignal): Promise<ProbeAttempt> {
     try {
@@ -1016,12 +941,10 @@ export class QoderUpstreamClient {
     } catch (error) {
       if (error instanceof LlmError) {
         const status = error.failure.status ?? defaultStatusForProbe(error.failure.code)
-        // A refusal the endpoint itself issued must reach the sweep under the
-        // same code as one refused locally, or the sweep reads it as an
-        // unattributable failure and reports `unknown` instead of a finding.
-        // Classify from the full message, before `detail` is capped: both
-        // markers sit far enough into Qoder's error body that the cap can cut
-        // them off.
+        // A refusal the endpoint issued must reach the sweep under the same code as
+        // one refused locally, or the sweep reads it as an unattributable failure.
+        // Classify from the full message, before `detail` is capped, since both
+        // markers sit past the cap.
         const code = status === 400 && blamesReasoningEffort(error.failure.message)
           ? 'UNSUPPORTED_REASONING_EFFORT'
           : error.failure.code
@@ -1035,9 +958,7 @@ export class QoderUpstreamClient {
 /**
  * Whether an upstream 400 blames the `reasoning_effort` value it was sent.
  *
- * Qoder answers an impossible effort with a `provider_error` body whose nested
- * error names `invalid_parameter_error` and quotes `reasoning_effort`. Both
- * markers are required: a 400 naming only one of them is some other parameter
+ * Both markers are required: a 400 naming only one is some other parameter
  * problem, and the sweep must not record it as a rejected level.
  */
 function blamesReasoningEffort(message: string): boolean {
@@ -1066,12 +987,10 @@ function defaultStatusForProbe(code: string): number {
 /**
  * Translate one Qoder catalog row into the plugin's model-info shape.
  *
- * The Qoder vocabulary carries less than the WorkBuddy one did — no badges,
- * no promotions, no free/credits strings — so the billing section reports the
- * price factor only, spelled `x<n>`, and says so honestly when the upstream
- * reported nothing (`rateUnknown`). Context capacity comes from the effective
- * window, with the declared options kept for the card and the maximum-window
- * preference; a row with no capacity at all takes the transport's own default.
+ * The billing section reports the price factor only, spelled `x<n>`, and says so
+ * honestly when the upstream reported nothing (`rateUnknown`). Context capacity
+ * comes from the effective window, with the declared options kept for the card; a
+ * row with no capacity takes the transport's default.
  */
 export function modelInfoOf(model: QoderCatalogModel): QoderModelInfo {
   const options = Object.values(model.contextOptions ?? {})

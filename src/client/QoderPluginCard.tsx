@@ -42,20 +42,14 @@ export interface QoderPluginCardInjected {
   scope?: QuotaSettingsScope<QuotaSection> | undefined
   /** Sign-in state per variant; a toggle is disabled when its variant is out. */
   signedIn?: () => { cn: boolean; global: boolean }
-  /**
-   * Which product variant this card instance renders.
-   */
+  /** Which product variant this card instance renders. */
   variant?: QoderCardVariant
-  /**
-   * Whether to render as the unified Qoder card (merging quota settings + CN + Global with tabs).
-   */
+  /** Render as the unified Qoder card (quota settings + CN + Global with tabs). */
   unified?: boolean
   /**
-   * Whether the card starts expanded. The shared 《插件设置》 block lists its
-   * cards collapsed; this bundle's page in the sidebar's Plugins panel has
-   * room for the whole configuration, so that registration opens the card at
-   * once. The fold state stays the viewer's afterwards — the two surfaces do
-   * not share it.
+   * Whether the card starts expanded. The shared block lists its cards collapsed;
+   * the Plugins-panel page has room for the whole configuration and opens at once.
+   * The fold state stays per surface.
    */
   defaultOpen?: boolean
 }
@@ -112,10 +106,8 @@ export type QoderPluginCardProps =
   & Partial<QoderPluginCardInjected>
 
 /*
- * Styling mirrors the Settings panel's own plugin card (`.YyYd_a_card` in the
- * client bundle) rather than inventing a look: the same tokens, the same
- * geometry, and the same hover/open treatment. The values here are that rule's
- * values, so a card from this plugin sits in the list beside a built-in one
+ * Styling mirrors the Settings panel's own plugin card rather than inventing a
+ * look: the same tokens and geometry, so this card sits beside a built-in one
  * without reading as a different kind of object.
  */
 const cardStyle: CSSProperties = {
@@ -123,14 +115,10 @@ const cardStyle: CSSProperties = {
   /*
    * Border as longhands, never the `border` shorthand.
    *
-   * The hover and open states below override the colour, and React applies an
-   * override by assigning the property and clearing it by assigning `''`. That
-   * clear is what breaks a shorthand: the shorthand was expanded by the CSSOM
-   * into longhands, React then considers `border` unchanged and never re-applies
-   * it, and clearing `border-color` leaves the whole border unset — so it falls
-   * back to `currentColor` and the card grows a near-black outline. Declaring the
-   * three longhands keeps the colour always present in the style object, so React
-   * assigns a value on every render instead of ever clearing one.
+   * The hover and open states override the colour, and React clears an override by
+   * assigning `''`. That clear breaks a shorthand: React then considers `border`
+   * unchanged, clearing `border-color` leaves the whole border unset, and it falls
+   * back to `currentColor`. Longhands keep the colour always present.
    */
   borderWidth: '0.5px',
   borderStyle: 'solid',
@@ -163,13 +151,9 @@ const headerStyle: CSSProperties = {
   appearance: 'none',
 }
 /**
- * The built-in header's keyboard focus ring.
- *
- * `:focus-visible` is what makes the ring appear for keyboard navigation but not
- * for a mouse click, and an inline style cannot express a pseudo-class — so the
- * component tracks it and applies this instead. Without it the header falls back
- * to the browser's own outline, which is the black box that used to appear on
- * focus where the built-in card shows a brand-coloured ring.
+ * The built-in header's keyboard focus ring, applied by tracking `:focus-visible`
+ * (an inline style cannot express a pseudo-class). Without it the header falls
+ * back to the browser's own black outline.
  */
 const headerFocusStyle: CSSProperties = {
   outline: '2px solid var(--dsw-alias-brand-primary)',
@@ -180,13 +164,9 @@ const nameStyle: CSSProperties = { fontSize: 15, lineHeight: 1.4, fontWeight: 60
 const descriptionStyle: CSSProperties = { fontSize: 13, lineHeight: 1.5, color: 'var(--dsw-alias-label-tertiary)' }
 
 /**
- * The disclosure chevron, drawn to match the Settings panel's own card.
- *
- * The built-in card renders `IconChevronDownOutline14` from the client's shared
- * icon catalog, which the shell seeds into the module table. This plugin does
- * not request that catalog, so the same outline is drawn here from the same path
- * data: the text `⌄` glyph this replaces had a different shape, weight, and
- * baseline from the icon the cards beside it use.
+ * The disclosure chevron, drawn to match the Settings panel's own card: this plugin
+ * does not request the shell's icon catalog, so the same outline is drawn here from
+ * the same path data.
  */
 function ChevronDownIcon(): ReactElement {
   return (
@@ -264,9 +244,8 @@ const contextPickerRowStyle: CSSProperties = {
 const progressTrackStyle: CSSProperties = { height: 8, overflow: 'hidden', borderRadius: 999, background: 'var(--dsw-alias-bg-layer-2, rgba(0, 0, 0, 0.08))' }
 
 /**
- * The PAT entry row: the password field takes the row's flexible width, the
- * Save button keeps its own, and the whole block sits inside the card body
- * without a nested box (the same rule the settings rows follow).
+ * The PAT entry row: the password field takes the flexible width, the Save button
+ * keeps its own, and the block sits inside the card body without a nested box.
  */
 const patRowStyle: CSSProperties = { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }
 const patInputStyle: CSSProperties = {
@@ -304,14 +283,9 @@ const patSelectStyle: CSSProperties = {
 }
 
 /**
- * One account toolbar: the active-account select and its actions share a
- * single row, so a signed-in card no longer stacks a status line, a select
- * line and an action line on top of each other.
- *
- * The account's identity is the select itself; a separate "Account / Signed
- * in" heading above it only repeated what the select already says, so the
- * heading is gone. The non-signed-in states keep a status row, because there
- * the status *is* the information.
+ * One account toolbar: the active-account select and its actions share a single
+ * row. The select itself carries the account's identity; the non-signed-in states
+ * keep a status row, because there the status IS the information.
  */
 const accountToolbarStyle: CSSProperties = { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', paddingTop: 6 }
 /** Provenance line under the toolbar; its refresh action sits at the far end. */
@@ -329,9 +303,8 @@ const accountFieldLabelStyle: CSSProperties = {
 }
 
 /**
- * Tab strip for the card body. Kept visually light — a full pill would compete
- * with the section headings, and the card is already the densest surface the
- * plugin owns.
+ * Tab strip for the card body, kept visually light: a full pill would compete with
+ * the section headings on the densest surface the plugin owns.
  */
 const tabBarStyle: CSSProperties = {
   display: 'flex',
@@ -359,8 +332,8 @@ const tabPanelStyle: CSSProperties = { display: 'flex', flexDirection: 'column',
 
 /**
  * Primary action of the inline confirmation and of the PAT save. Fill and text
- * colour come from the theme as a pair: `brand-primary` is a light accent here,
- * so pairing it with a hardcoded white would render white-on-white.
+ * colour come from the theme as a pair: `brand-primary` is a light accent, so a
+ * hardcoded white would render white-on-white.
  */
 const primaryButtonStyle: CSSProperties = {
   ...buttonStyle,
@@ -371,7 +344,7 @@ const primaryButtonStyle: CSSProperties = {
   color: 'var(--dsw-alias-label-primary-foreground)',
 }
 
-/* ---- Segmented Tab Switcher styles (Figure 1) ---- */
+/* ---- Segmented tab switcher styles ---- */
 const segmentedContainerStyle: CSSProperties = {
   display: 'flex',
   alignItems: 'center',
@@ -420,10 +393,9 @@ function progressFillStyle(percent: number): CSSProperties {
 }
 
 /**
- * Status dot colour. Takes `'loading'` as well as the document's own states:
- * before the first response the card knows nothing about the account, so it must
- * not borrow the signed-out grey — that would read as "nothing is wrong, nobody
- * is signed in" when the truth is "not read yet".
+ * Status dot colour. Takes `'loading'` too: before the first response the card must
+ * not borrow the signed-out grey, which would read as "nobody is signed in" rather
+ * than "not read yet".
  */
 function dotStyle(status: 'loading' | QoderWebStatus['status']): CSSProperties {
   const color = status === 'signed-in'
@@ -457,11 +429,10 @@ function patSourceText(source: QoderCredentialSource, t: QoderPluginCardInjected
 /**
  * One billing package as a labeled progress bar.
  *
- * A package whose allowance the upstream never reported (`size` not positive)
- * has no percentage to state. It must not fall back to 100%: the plugin would be
- * claiming a full quota it knows nothing about, which is the opposite of the
- * honest "remaining N" line printed below it. Unknown size therefore renders the
- * percent slot as unknown copy and an unfilled, indeterminate track.
+ * A package whose allowance the upstream never reported (`size` not positive) has
+ * no percentage to state, and must not fall back to 100%: that would claim a full
+ * quota it knows nothing about. Unknown size renders unknown copy and an unfilled
+ * track.
  */
 function CreditBar({ label, remain, size, unlimited, packageEndTime, t }: {
   label: string
@@ -487,9 +458,8 @@ function CreditBar({ label, remain, size, unlimited, packageEndTime, t }: {
           role="progressbar"
           aria-label={label}
           /*
-           * "Uncapped" is not "100% remaining", so the range attributes are
-           * omitted and no fill is drawn: an uncapped quota has no proportion
-           * to state, and a full bar would assert one.
+           * "Uncapped" is not "100% remaining": no range attributes and no fill,
+           * since an uncapped quota has no proportion to state.
            */
           aria-valuetext={quotaText}
         />
@@ -507,7 +477,7 @@ function CreditBar({ label, remain, size, unlimited, packageEndTime, t }: {
     ? t('percentUnknown')
     : t('percentRemaining', { percent: formatPercentText(percent) })
   // The label carries the same used-percentage suffix the sidebar card prints,
-  // read from the same helper, so the same package never reads two ways.
+  // read from the same helper.
   const usedPercent = usedPercentText(remain, size)
   return (
     <div style={quotaGroupStyle}>
@@ -520,9 +490,8 @@ function CreditBar({ label, remain, size, unlimited, packageEndTime, t }: {
         role="progressbar"
         aria-label={label}
         /*
-         * No numeric value when the size is unknown: the range attributes are
-         * omitted so assistive technology reports an indeterminate bar rather
-         * than a second, louder repeat of the false 100%.
+         * No numeric value when the size is unknown, so assistive technology
+         * reports an indeterminate bar instead of a false 100%.
          */
         {...percent === undefined
           ? { 'aria-valuetext': detail }
@@ -543,18 +512,11 @@ function maxDeclaredWindow(model: QoderCatalogModelSnapshot): number | undefined
 }
 
 /**
- * Context capacity, listed in full.
+ * Context capacity, listed in full, largest first — capacity is reference data you
+ * scan by model, so hiding most of it behind a hover makes the common lookup hard.
  *
- * Every model the upstream reports a capacity for, largest first. A one-line
- * summary with the exceptions on hover was tried and rejected: capacity is
- * reference data you scan by model, and hiding most of it behind a hover made
- * the common case (a model you already have in mind) the hard one to look up.
- *
- * Purely a report of the upstream's own numbers — the middle alternatives the
- * upstream lists between the default and the maximum are display-only (the
- * upstream honours the default and the maximum, nothing between), so the only
- * control is the maximum-window preference below, which flips every eligible
- * model between its default and its largest declared window.
+ * A pure report of the upstream's numbers: the middle alternatives it lists are
+ * display-only, and the only control is the maximum-window preference below.
  */
 function ContextTable({ models, t, useMaximumContextWindow, disabled, onUseMaximumContextWindow }: {
   models: readonly QoderCatalogModelSnapshot[] | undefined
@@ -565,8 +527,7 @@ function ContextTable({ models, t, useMaximumContextWindow, disabled, onUseMaxim
 }): React.ReactNode {
   const known = (models ?? [])
     .filter(model => model.contextWindow !== undefined)
-    // Largest first: the big windows are the ones a user reaches for, and the
-    // small ones are then easy to spot at the end.
+    // Largest first: the big windows are the ones a user reaches for.
     .sort((a, b) => (b.contextWindow as number) - (a.contextWindow as number))
   const canSelectMaximum = known.some(model => {
     const max = maxDeclaredWindow(model)
@@ -619,9 +580,7 @@ function formatTokens(tokens: number): string {
   return String(tokens)
 }
 
-/**
- * Model visibility table with individual toggle switches and batch enable/disable controls.
- */
+/** Model visibility table: per-model switches plus batch enable/disable and search. */
 function ModelSwitchTable({
   models,
   disabledModels = [],
@@ -911,15 +870,10 @@ function CheckInLogTable({
               </span>
               <span style={{ flex: 1, textAlign: 'right', fontWeight: 600, color: log.status === 'claimed' ? 'var(--dsw-alias-brand-primary)' : 'inherit' }}>
                 {/*
-                  The column is "credits obtained", so only a `claimed` row may
-                  fill it. Every other status obtained nothing *by this action*:
-                  `already-claimed` is either the upstream saying the day was
-                  claimed before we asked, or our own claim replaying (the
-                  upstream granted nothing), and the scheduler's no-op row
-                  carries the day's amount forward without obtaining it. Keying
-                  the cell off `amount` alone printed "+100" on those rows too,
-                  so a day with an automatic claim and a later manual click read
-                  as two grants of 100.
+                  The column is "credits obtained", so only a `claimed` row may fill
+                  it: `already-claimed` and the scheduler's no-op rows obtained
+                  nothing by this action, so keying the cell off `amount` alone
+                  printed a phantom "+100" on them.
                 */}
                 {log.status === 'claimed' ? `+${log.amount ?? 100}` : '-'}
               </span>
@@ -985,12 +939,9 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
    * The shown variant's shared read state.
    *
    * The document and the last read failure arrive through ONE revision bump,
-   * whichever surface read them: the shared poller reads each live variant
-   * once for every surface that shows it, so this card expanded here and the
-   * same card in the plugin-manager panel cost one request a minute between
-   * them, not two. Before the first document lands a failed read shows as an
-   * error document; beside a document already on screen it shows as a notice
-   * under the account row, exactly as the per-card fetch did.
+   * whichever surface read them, so this card here and in the plugin-manager panel
+   * cost one request a minute between them. Before the first document lands a
+   * failed read shows as an error document; beside an existing one, as a notice.
    */
   useSyncExternalStore(onQuotaSettingsChange, quotaSettingsRevision)
   const readFailure = quotaReadFailure(currentVariant.id)
@@ -1011,11 +962,9 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
   /**
    * Force one shared read of the shown variant.
    *
-   * The store's read always starts its own request — an explicit read must be
-   * able to postdate the write or the click that precedes it — and publishes
-   * for every surface of the variant, so a manual refresh here updates the
-   * sidebar cards and the quota panel too. A successful read also clears a
-   * write action's notice, exactly as the per-card fetch did.
+   * The store's read always starts its own request (an explicit read must postdate
+   * the write or click before it) and publishes for every surface of the variant, so
+   * a manual refresh here updates the sidebar cards and the quota panel too.
    */
   const refresh = useCallback(async (): Promise<boolean> => {
     const ok = await refreshQuotaStatus(currentVariant.id)
@@ -1024,13 +973,9 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
   }, [currentVariant.id])
 
   /**
-   * The expanded card is a poll holder of the shown variant.
-   *
-   * The shared ticker reads the variant once a minute while any card holds it
-   * and parks it on a signed-out document (nothing changes without a PAT);
-   * collapsing or unmounting releases the demand. Opening re-reads at once
-   * only when the shared document is past its minute — a second card opening
-   * beside a live one shows the numbers already on screen.
+   * The expanded card is a poll holder of the shown variant: the shared ticker reads
+   * it once a minute while any card holds it and parks it on a signed-out document.
+   * Opening re-reads at once only when the shared document is past its minute.
    */
   useEffect(() => {
     if (!open) return undefined
@@ -1038,9 +983,8 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
   }, [open, currentVariant.id])
 
   /**
-   * Opening (or switching variant) clears the transient entry state — a
-   * discarded draft must not wait for the user on the next open. The document
-   * itself is shared state now and stays on screen while the card re-opens.
+   * Opening (or switching variant) clears the transient entry state, so a discarded
+   * draft never waits for the user. The document itself is shared and stays.
    */
   useEffect(() => {
     if (!open) return
@@ -1060,15 +1004,9 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
   }
 
   /**
-   * One refresh for the signed-in account block.
-   *
-   * There used to be two buttons: "refresh" re-read the status document
-   * (quota, provenance) and "refresh model list" re-fetched the upstream
-   * catalog and then re-read the status anyway. The second is a superset of
-   * the first, so the card now offers one action: re-fetch the catalog when a
-   * probe key exists, and always re-read the status — even when the catalog
-   * call fails, because the quota answer must not be held hostage by the
-   * model-list endpoint.
+   * One refresh for the signed-in account block: re-fetch the catalog when a probe
+   * key exists, and always re-read the status — a failed catalog call must not hold
+   * the quota answer hostage.
    */
   const refreshAll = useCallback(async (): Promise<void> => {
     const key = status?.status === 'signed-in' ? status.probeKey : undefined
@@ -1174,9 +1112,8 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
   /**
    * Run one probe-route control action and refresh the card's state afterwards.
    *
-   * The key travels in a header, not the body: it authorizes the write, and
-   * the host never accepts a prompt, a sentinel, or a model outside its own
-   * catalog from here.
+   * The key travels in a header, not the body: it authorizes the write, and the host
+   * never accepts a prompt, a sentinel, or a model outside its own catalog here.
    */
   const control = useCallback(async (action: QoderProbeAction): Promise<void> => {
     const key = status?.status === 'signed-in' ? status.probeKey : undefined
@@ -1219,9 +1156,8 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
   /**
    * Validate and store the pasted PAT, then make it the active account.
    *
-   * Saving is additive: an already-saved token updates its own entry (the id
-   * is derived from the token), a new one is appended and activated, and the
-   * previous tokens remain selectable. Only a token that passed validation is
+   * Saving is additive: an already-saved token updates its own entry (the id derives
+   * from the token), a new one is appended and activated. Only a validated token is
    * written, so a mistyped paste can never strand the working credential.
    */
   const savePat = useCallback(async (): Promise<void> => {
@@ -1279,10 +1215,9 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
   /**
    * One authenticated write against this variant's PAT route.
    *
-   * `activate`, `remove`, and `clear` answer the same `{ok, status}` shape a
-   * save does; one helper keeps the guards, the stable-error handling, and the
-   * post-write re-read together, so a switch cannot update one surface and
-   * leave another showing the previous account.
+   * `activate`, `remove`, and `clear` answer the same `{ok, status}` shape a save
+   * does; one helper keeps the guards, error handling and post-write re-read
+   * together.
    */
   const patWrite = useCallback(async (
     body: Record<string, unknown>,
@@ -1311,9 +1246,8 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
         setPatError(failure(detail))
         return false
       }
-      // Removing the last token signs the variant out. Publish that fact
-      // before the re-read: a failed refresh must not leave every surface
-      // showing an account that no longer exists.
+      // Removing the last token signs the variant out. Publish that before the
+      // re-read: a failed refresh must not leave a dead account on screen.
       const status = record['status']
       if (typeof status === 'object' && status !== null
         && (status as Record<string, unknown>)['state'] === 'missing') {
@@ -1342,9 +1276,8 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
     if (!ok) return
     setPatDraft('')
     setReplacing(false)
-    // Publish the outcome as an authoritative fact: every surface shows the
-    // signed-out document at once, and a read that started before the clear
-    // can no longer roll the screens back.
+    // Publish the outcome as an authoritative fact: a read that started before the
+    // clear can no longer roll the screens back.
     if (key !== undefined) noteQuotaStatus(currentVariant.id, { status: 'signed-out', authKey: key })
   }, [authKey, currentVariant.id, patWrite, t])
 
@@ -1359,10 +1292,9 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
   }, [patWrite, t])
 
   /**
-   * Add PAT: open the entry over the signed-in document, pre-cleared and
-   * focused. The entry stays additive — saving validates the new token and
-   * appends it (and makes it active) only on success — so adding a second
-   * account never risks the working one.
+   * Add PAT: open the entry over the signed-in document, pre-cleared and focused.
+   * Saving appends the new token only on success, so adding a second account never
+   * risks the working one.
    */
   const beginAddPat = useCallback((): void => {
     setPatDraft('')
@@ -1447,11 +1379,8 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
         : t('signedOut')
 
   /**
-   * The token's provenance line.
-   *
-   * The account itself is named by the toolbar above (the select, or the env
-   * token's tail), so this line keeps only the facts the toolbar does not
-   * carry: where the token came from and when it was saved.
+   * The token's provenance line: the account itself is named by the toolbar above,
+   * so this keeps only where the token came from and when it was saved.
    */
   const patSummaryLine = (
     pat: NonNullable<Extract<QoderWebStatus, { status: 'signed-in' }>['pat']>,
@@ -1511,7 +1440,7 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
             <>
               {/* Top section: Qoder 侧栏设置 */}
               <QuotaSettingsContent t={t} scope={scope} signedIn={signedIn} />
-              {/* Segmented Tab Switcher (Figure 1) */}
+              {/* Segmented tab switcher: China / Global version selection */}
               <div style={segmentedContainerStyle} role="tablist" aria-label="Qoder Version Selection">
                 <button
                   type="button"
@@ -1675,10 +1604,9 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
                             {t('cycleResetAt', { time: formatCycleReset(status.credits.cycleResetTime) })}
                           </p>
                         )}
-                        {/* No account-wide expiry to state (Qoder answers a
-                            personal account with the year-9999 "never"
-                            sentinel, which the transport drops)? Say what the
-                            card DOES know: when this PAT was authorized. */}
+                        {/* No account-wide expiry to state (the transport drops
+                            Qoder's year-9999 "never" sentinel)? Say what the card
+                            DOES know: when this PAT was authorized. */}
                         {status.credits.cycleResetTime !== undefined || status.pat?.savedAtMs === undefined ? null : (
                           <p style={descriptionStyle}>
                             {t('patAuthorizedAt', { time: formatTime(status.pat.savedAtMs) })}

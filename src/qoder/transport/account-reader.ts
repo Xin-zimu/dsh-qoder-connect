@@ -55,10 +55,7 @@ interface RawUsageInfo {
   orgResourcePackage?: RawQuota
   /** Bonus credits granted beside the plan (the daily campaign's 100). */
   addOnQuota?: RawQuota
-  /**
-   * Campaign grants that carry their own total, expiry, and localized title
-   * (the international edition's SOTA exclusive credits arrive here).
-   */
+  /** Campaign grants that carry their own total, expiry, and localized title. */
   dedicatedResourcePackages?: RawDedicatedPackage[]
   totalUsagePercentage?: number
   isQuotaExceeded?: boolean
@@ -117,12 +114,8 @@ function normalizeExpiresAt(rawExpires?: number | string): string | undefined {
 }
 
 /**
- * The year at which Qoder stops meaning a date and starts meaning "never".
- *
- * The upstream encodes an uncapped allowance as the year-9999 sentinel
- * `253402214400000`, which is a valid timestamp and a real date to any parser.
- * Rendering it as the account's expiry told the user the quota resets in the
- * year 10000, so the sentinel must be read as the absence of an expiry.
+ * The year at which Qoder stops naming a date and means "never": the year-9999
+ * sentinel is a valid timestamp, so it must be read as no expiry at all.
  */
 const NEVER_EXPIRY_YEAR = 9999
 
@@ -146,11 +139,8 @@ function labelI18n(raw: Record<string, string> | undefined): { zh?: string; en?:
 }
 
 /**
- * One campaign grant, including the title the upstream localized for it.
- *
- * `name` is an opaque code (`act-20261014-129`) — the human copy lives in
- * `displayLabels` under `dimension: 'title'`, so that is what the row is
- * labelled with and the code is kept only as provenance.
+ * One campaign grant. `name` is an opaque code; the human copy lives in
+ * `displayLabels` under `dimension: 'title'`, which labels the row.
  */
 function normalizeDedicatedPackage(raw: RawDedicatedPackage): QoderDedicatedResourcePackage | undefined {
   if (!raw || typeof raw !== 'object') return undefined
@@ -168,8 +158,7 @@ function normalizeDedicatedPackage(raw: RawDedicatedPackage): QoderDedicatedReso
     ...name === undefined ? {} : { name },
     ...title === undefined ? {} : (() => {
       const parsed = labelI18n(title.valueI18n)
-      // A label whose i18n map is empty still has the plain `value` the
-      // upstream sent; fall back to it rather than losing the name entirely.
+      // An empty i18n map still has the plain `value` the upstream sent.
       const fallback = asString(title.value)
       if (parsed.zh === undefined && parsed.en === undefined && fallback === undefined) return {}
       return {
@@ -341,9 +330,8 @@ export class QoderUsageReader {
     try {
       return await this.loadAccountWith(pat, signal, cacheKey)
     } catch (error) {
-      // The cached job token can outlive the upstream's acceptance of it; one
-      // fresh exchange self-heals that window instead of surfacing the card's
-      // quota read as an auth failure until the next credential save.
+      // A cached job token can outlive the upstream's acceptance of it; one fresh
+      // exchange self-heals that window instead of surfacing an auth failure.
       if (!isQoderAuthRejection(error) || signal.aborted) throw error
       this.logger?.warn?.('[Qoder Account] Usage read rejected as unauthorized; exchanging a fresh job token and retrying once')
     }

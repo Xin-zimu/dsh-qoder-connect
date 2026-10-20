@@ -4,22 +4,17 @@ import type { QuotaGroup } from '../src/client/quota-merge.ts'
 import type { QoderWebCreditAccount } from '../src/status-paths.ts'
 
 /**
- * The sidebar card's merge layer over the Qoder credit answer. The upstream
- * reports one entry per purchased package (and Qoder stacks repeated purchases
- * of the same package name), so the overview row groups by NAME alone while
- * the itemised table keeps every row and only re-orders it. These cases pin the
- * rules the user ruled on: missing figures count as 0, unlimited is sticky, the
- * earliest expiry travels with the group, and first-seen package order is never
- * reshuffled by the merge.
+ * The sidebar card's merge layer over the Qoder credit answer: the upstream
+ * reports one entry per purchased package and stacks repeated purchases, so the
+ * overview row groups by NAME alone while the itemised table keeps every row and
+ * only re-orders it. Missing figures count as 0, unlimited is sticky, the earliest
+ * expiry travels with the group, and first-seen order is never reshuffled.
  *
- * Quota semantics this layer is written against (from `QoderWebCredits` in
- * `src/status-paths.ts`): `total` is the percentage of the cycle ALREADY USED
- * (`userQuota.percentage`), the card's headline — it is not a denominator, so
- * nothing here touches it; `totalSize` is the summed per-package total the
- * dashboard divides by; a single bar's share comes only from its own
- * `remain / size` through {@link clampPercent}. `cycleResetTime` is the cycle
- * deadline printed beside these rows, carried verbatim; a group's own expiry is
- * the earliest member `packageEndTime`, never a recomputed date.
+ * Quota semantics (`QoderWebCredits` in `src/status-paths.ts`): `total` is the
+ * percentage ALREADY USED — a headline, not a denominator; `totalSize` is the
+ * summed package total; a bar's share comes from its own `remain / size` through
+ * `clampPercent`; `cycleResetTime` is carried verbatim, and a group's expiry is
+ * the earliest member `packageEndTime`.
  */
 const acct = (
   packageName: string,
@@ -231,10 +226,8 @@ describe('formatPercentText', () => {
 })
 
 describe('accountDisplayName', () => {
-  // A campaign grant arrives with a localized title (`SOTA 专属积分` /
-  // `SOTA Exclusive Credits`); the two surfaces that print it — the sidebar
-  // card and the itemised table — must print the SAME one for the SAME
-  // package, which is why the choice lives here rather than in either card.
+  // A campaign grant's localized title must be identical on the two surfaces that
+  // print it, so the choice lives here rather than in either card.
   const grant = acct('SOTA 专属积分', 2000, 2000, {
     packageNameI18n: { zh: 'SOTA 专属积分', en: 'SOTA Exclusive Credits' },
     packageCode: 'act-20261014-129',
@@ -274,8 +267,7 @@ describe('accountDisplayName', () => {
 
 describe('formatExpiryText', () => {
   it('localizes an ISO instant instead of printing it verbatim', () => {
-    // The panel once put "2026-10-19T02:00:00.000Z" in a date column: not
-    // readable, and in UTC while the user's own clock said 10:00 of that day.
+    // A raw ISO instant is unreadable and in UTC; the panel localizes it instead.
     const text = formatExpiryText('2026-10-19T02:00:00.000Z')!
     expect(text).toContain('2026')
     expect(text).not.toContain('T02:00:00.000Z')

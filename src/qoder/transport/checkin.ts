@@ -70,22 +70,14 @@ export interface QoderCheckInServiceOptions {
 const defaultCheckInTimeoutMs = 15_000
 
 /**
- * The longest span still recognised as one daily benefit window.
- *
- * Qoder's daily window runs 10:00 → 09:59 the next morning (86_340 s). The
- * slack above 24h absorbs a clock or rounding difference; a genuinely longer
- * campaign is *not* a daily window, and its start day says nothing about which
- * day one claim of it belongs to, so it must fall back to the calendar day
- * rather than mislabel every day of its run.
+ * The longest span still recognised as one daily benefit window; a longer
+ * campaign is not a daily window and falls back to the calendar day.
  */
 const DAILY_WINDOW_MAX_MS = 24 * 60 * 60_000
 
 /**
- * Which day's benefit the campaign the upstream is currently serving belongs to.
- *
- * Before 10:00 UTC+8 the upstream is still serving *yesterday's* window and its
- * `CLAIMED` describes yesterday, so "the campaign says CLAIMED" is not the same
- * statement as "today is done". Separating those two cases is the whole fix.
+ * Which day's benefit the campaign currently served by the upstream belongs to.
+ * Before 10:00 UTC+8 that is yesterday's window, so `CLAIMED` is not "today is done".
  */
 type CampaignWindow =
   /** Today's window is open; `date` is the day it belongs to. */
@@ -120,7 +112,7 @@ export class QoderCheckInService {
       url,
       token,
       // The campaign family gates on the desktop identifier; the generic one
-      // answers 200 with an empty list (see `qoderDesktopClientType`).
+      // answers 200 with an empty list.
       headers: { 'cosy-clienttype': qoderDesktopClientType },
       signal,
       timeoutMs: this.timeoutMs,
@@ -148,13 +140,9 @@ export class QoderCheckInService {
   }
 
   /**
-   * Attribute the campaign the upstream is serving to a day, or say why it
-   * cannot be attributed to today.
-   *
-   * The daily benefit window is 10:00 UTC+8 → 09:59 the next morning, so a
-   * calendar date and the window's own date agree for only fourteen hours of
-   * every twenty-four. Treating them as the same thing is what recorded a
-   * pre-10:00 read of the *previous* window's `CLAIMED` against today.
+   * Attribute the served campaign to a day, or say why it cannot be today's.
+   * The daily window runs 10:00 UTC+8 to 09:59 the next morning, so a calendar
+   * date matches the window's date for only part of the day.
    */
   private classifyCampaignWindow(
     campaign: QoderCampaign,
@@ -179,8 +167,7 @@ export class QoderCheckInService {
 
   async checkIn(pat: string, signal?: AbortSignal): Promise<QoderCheckInResult> {
     const nowMs = Date.now()
-    // One instant decides both the calendar day and the window comparison, so
-    // an attempt can never straddle the 10:00 boundary and mix two days.
+    // One instant decides both the calendar day and the window comparison.
     const today = formatUtc8Date(nowMs)
 
     if (!pat || typeof pat !== 'string' || pat.trim() === '') {
@@ -195,7 +182,6 @@ export class QoderCheckInService {
 
     const executeWithToken = async (authToken: string): Promise<QoderCheckInResult> => {
       const campaigns = await this.fetchCampaigns(authToken, signal)
-      // Look for daily benefit campaign (actionType === 'CLAIM_BENEFIT')
       const benefitCampaign = campaigns.find(c => c.actionType === 'CLAIM_BENEFIT')
       if (!benefitCampaign) {
         return {
@@ -208,26 +194,9 @@ export class QoderCheckInService {
       }
 
       const campaignWindow = this.classifyCampaignWindow(benefitCampaign, nowMs, today)
-      // Only today's own window may settle today, and which window the
-      // upstream is serving is the only thing that can say so: a window that
-      // has not opened yet, or one that is still yesterday's, is not today's
-      // benefit however the upstream reports its status. This is also what
-      // refuses a pre-window attempt (#13, a manual click at 09:58 that read
-      // the previous window's `CLAIMED` and cost the day): nothing is claimed
-      // and the day stays retryable, so the run after the window opens still
-      // does the claiming.
-      //
-      // Deliberately driven by the campaign's own `startAt`/`endAt` rather than
-      // any clock constant: the opening moment is the upstream's to state, and
-      // the China and Global products need not share it. A local "nothing can
-      // be claimed before 10:00" rule would have hard-coded the one product's
-      // measured boundary onto both.
-      //
-      // `before-window` rather than `no-campaign`: the campaign exists and the
-      // day is still claimable, only the window is not open. Sharing one status
-      // with "this account has no campaign at all" (the Global shape, #6/#12)
-      // made the card say the same sentence for both, which is how a user
-      // reads "nothing to claim" while a claim is still owed to them.
+      // Only today's own window may settle today; a window not yet open, or still
+      // yesterday's, claims nothing and leaves the day retryable. Driven by the
+      // campaign's own bounds, since each product states its own opening moment.
       if (campaignWindow.kind === 'not-open' || campaignWindow.kind === 'earlier') {
         return {
           variantId: this.variantId,

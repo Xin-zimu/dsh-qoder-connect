@@ -11,10 +11,8 @@ export const QODER_STATUS_PATH = '/plugins/dsh-qoder-connect/status'
 /**
  * Plugin-owned settings endpoint consumed by its browser half.
  *
- * GET answers the whole entry configuration as three layers (value/base/user)
- * plus the write key; POST applies one patch. This is the plugin's own settings
- * surface, replacing writes through the host's settings service — see
- * {@link ./settings-store.ts} for why.
+ * GET answers the whole entry configuration as three layers (value/base/user) plus
+ * the write key; POST applies one patch.
  */
 export const QODER_SETTINGS_FACE_PATH = '/plugins/dsh-qoder-connect/settings'
 
@@ -22,30 +20,25 @@ export const QODER_SETTINGS_FACE_PATH = '/plugins/dsh-qoder-connect/settings'
  * Plugin-owned probe control endpoint.
  *
  * Separate from the status route because it accepts writes: the status route's
- * loopback Host/Origin guard protects against a DNS-rebinding *page*, which is
- * not the same as authorizing a state-changing action. This route therefore
- * also requires the in-process key the browser half receives with the status
- * document.
+ * loopback guard protects against a rebinding *page*, which is not the same as
+ * authorizing an action. This route also requires the in-process key.
  */
 export const QODER_PROBE_PATH = '/plugins/dsh-qoder-connect/probe'
 
 /**
  * Plugin-owned PAT endpoint, one per variant.
  *
- * A POST here saves (validates and persists) a Personal Access Token, or
- * clears the stored one. Unlike the read-only status GET it is a write —
- * it persists a credential — so it also requires the in-process key the
- * browser half receives with the status document.
+ * A POST here saves (validates and persists) a Personal Access Token, or clears
+ * the stored one. A write, so it also requires the in-process key.
  */
 export const QODER_AUTH_PATH = '/plugins/dsh-qoder-connect/auth'
 
 /**
  * The international (Qoder Global) variant's own triple of routes.
  *
- * Kept as separate constants rather than a computed suffix so both halves
- * reference literal strings: the browser bundle and the host bundle are built
- * independently, and a shared expression is one build-config drift away from
- * the desk asking a route the host never mounted.
+ * Separate constants rather than a computed suffix so both halves reference
+ * literal strings: the bundles are built independently, and a shared expression is
+ * one build-config drift away from asking a route the host never mounted.
  */
 export const QODER_GLOBAL_STATUS_PATH = '/plugins/dsh-qoder-connect/global/status'
 export const QODER_GLOBAL_PROBE_PATH = '/plugins/dsh-qoder-connect/global/probe'
@@ -54,15 +47,11 @@ export const QODER_GLOBAL_AUTH_PATH = '/plugins/dsh-qoder-connect/global/auth'
 /**
  * One action the PAT route accepts.
  *
- * `save-pat` validates the pasted token against the variant's region and, only
- * on success, appends it to the saved list and makes it active; `activate`
- * switches to another saved entry; `remove` deletes one saved entry; `clear`
- * removes every saved credential. There is no device flow and no credential
- * import: the token is the whole auth surface.
- *
- * All of these are writes — `activate` changes which account signs later
- * requests — so the route requires the in-process key even for the two that do
- * not touch a token's bytes.
+ * `save-pat` validates the pasted token against the variant's region and, only on
+ * success, appends it to the saved list and makes it active; `activate` switches
+ * entry; `remove` deletes one; `clear` removes every saved credential. There is no
+ * device flow. All are writes — `activate` changes which account signs later
+ * requests — so all require the in-process key.
  */
 export type QoderAuthAction = 'save-pat' | 'activate' | 'remove' | 'clear'
 
@@ -81,11 +70,8 @@ export interface QoderAuthRequest {
 export type QoderCredentialSource = 'card' | 'env' | 'cli'
 
 /**
- * One saved PAT, redacted for the switch select.
- *
- * Never the token itself: the id is a one-way hash prefix, the label is
- * display copy, and the tail is the last four characters — enough to tell two
- * saved tokens apart, not enough to misuse one.
+ * One saved PAT, redacted for the switch select: the id is a one-way hash prefix,
+ * the label is display copy, the tail the last four characters.
  */
 export interface QoderPatProfile {
   id: string
@@ -98,11 +84,8 @@ export interface QoderPatProfile {
 }
 
 /**
- * Redacted summary of one variant's active PAT.
- *
- * Never the token itself: the browser half displays where the credential came
- * from, when it was saved, and the last four characters — enough to tell two
- * tokens apart, not enough to misuse one.
+ * Redacted summary of one variant's active PAT: never the token itself — source,
+ * save time, and the last four characters only.
  */
 export interface QoderPatSummary {
   /** Local id of the saved entry in effect; absent for the environment token. */
@@ -142,12 +125,10 @@ export interface QoderWebProbeSection {
 export interface QoderProbeAction {
   /**
    * `probe` spends credit on one model; `clear` drops recorded observations;
-   * `refresh` re-reads the credential and re-fetches the model catalog;
-   * `set-maximum-context-window` persists the card's maximum-window
-   * preference (one per variant section).
+   * `refresh` re-reads the credential and re-fetches the catalog;
+   * `set-maximum-context-window` persists the card's preference.
    *
-   * All are writes, which is why they share this route's in-process key
-   * and loopback guards rather than the read-only status GET.
+   * All are writes, hence this route's in-process key and loopback guards.
    */
   action: 'probe' | 'clear' | 'refresh' | 'set-maximum-context-window' | 'clear-checkin-logs' | 'checkin' | 'set-models-enabled'
   /** Target model id; required for `probe`. */
@@ -161,10 +142,8 @@ export interface QoderProbeAction {
 /**
  * Where the models a card is currently showing came from.
  *
- * The plan requires the card to distinguish a live catalog from the built-in
- * fallback, and to say when the last attempt failed — otherwise a stale list is
- * indistinguishable from an offline one, and a user cannot tell whether the
- * models they see still match the upstream.
+ * A stale list must be distinguishable from an offline one, and the card must be
+ * able to say when the last attempt failed.
  */
 export interface QoderWebCatalog {
   /**
@@ -188,19 +167,15 @@ export interface QoderWebCreditAccount {
   size: number
   unlimited?: true
   /**
-   * When the package's credit expires, carried through in whatever form the
-   * upstream reported it (an ISO string or a numeric epoch-millisecond value
-   * normalized to an ISO string). Absent when the upstream reported no
-   * expiry — rendered as "no expiry", never guessed into a date. The
-   * year-9999 "never" sentinel the upstream uses for an uncapped allowance is
-   * dropped at the transport, so it never arrives here as a date.
+   * Package credit expiry, carried through in whatever form the upstream reported
+   * (an ISO string, or an epoch-ms value normalized to one). Absent when the
+   * upstream reported no expiry — never guessed into a date. The year-9999 "never"
+   * sentinel is dropped at the transport.
    */
   packageEndTime?: string
   /**
-   * The package's localized display titles, when the upstream named it (a
-   * campaign grant's `SOTA 专属积分` / `SOTA Exclusive Credits`). `packageName`
-   * remains the best single-language guess for renderers that do not consult
-   * this map.
+   * The package's localized display titles, when the upstream named it. `packageName`
+   * remains the single-language guess for renderers that ignore this map.
    */
   packageNameI18n?: { zh?: string | undefined; en?: string | undefined }
   /** The opaque upstream campaign code behind the same grant, when known. */
@@ -226,11 +201,9 @@ export interface QoderWebCredits {
 /**
  * One catalog model as the status document snapshots it.
  *
- * A plain-Qoder mirror of `src/qoder/catalog.ts`'s `QoderCatalogModel` (the
- * WorkBuddy-era billing/promotion/free fields are gone): the browser half
- * renders reasoning, price factor, and context capacity from these fields and
- * nothing else. Field names follow the Qoder catalog vocabulary so the two
- * halves cannot drift on spelling.
+ * A plain-Qoder mirror of the transport's `QoderCatalogModel`: the browser half
+ * renders reasoning, price factor, and context capacity from these fields alone.
+ * Field names follow the Qoder catalog vocabulary so the halves cannot drift.
  */
 export interface QoderCatalogModelSnapshot {
   id: string
@@ -266,9 +239,8 @@ export type QoderWebStatus =
     /**
      * Every saved token for this variant, newest first, redacted.
      *
-     * One entry means the card has nothing to switch; two or more render the
-     * account select. The list is variant-scoped, like the credential file
-     * itself: a token minted for one region is never offered to the other.
+     * One entry means nothing to switch; two or more render the account select.
+     * Variant-scoped: a token minted for one region is never offered to the other.
      */
     patProfiles?: readonly QoderPatProfile[]
     /** The saved entry in effect; absent when the token comes from the environment. */
@@ -286,10 +258,9 @@ export type QoderWebStatus =
     /** Disabled model IDs (blacklist) for this variant. */
     disabledModels?: readonly string[]
     /**
-     * The last automatic job-token refresh the self-heal performed, epoch ms.
-     * Absent when no refresh has happened in this process. The card renders
-     * this as a visible "token auto-refreshed" notice, so an otherwise
-     * invisible recovery is observable.
+     * The last automatic job-token refresh the self-heal performed, epoch ms; absent
+     * when none happened in this process. The card renders it as a visible notice,
+     * so an otherwise invisible recovery is observable.
      */
     jobTokenRefreshedAt?: number
     /**
@@ -310,9 +281,8 @@ export type QoderWebStatus =
       /**
        * When the scheduler's timer is next due, epoch ms.
        *
-       * A day already claimed goes deliberately quiet, so without this the
-       * card cannot tell "scheduled and waiting" from "no timer at all" —
-       * which is exactly the doubt a missing timer created.
+       * A day already claimed goes deliberately quiet, so without this the card
+       * cannot tell "scheduled and waiting" from "no timer at all".
        */
       nextRunAt?: number | undefined
       logs?: readonly {
@@ -335,16 +305,13 @@ export type QoderWebStatus =
     /**
      * No usable token, and the card may save one.
      *
-     * Its own arm rather than an optional field on the signed-in document,
-     * because the PAT key below is exactly what a signed-out card needs and a
-     * signed-in one does not: the two states ask for different actions, and a
-     * single arm would let a card offer clear and save at once.
+     * Its own arm because the PAT key below is exactly what a signed-out card
+     * needs: one shared arm would let a card offer clear and save at once.
      */
     status: 'signed-out'
     /**
      * Why no credential is usable, when that is diagnosable rather than simply
-     * "nobody signed in" — a stale WorkBuddy-era credential file being the
-     * case that matters. The card renders it in place of the generic hint.
+     * "nobody signed in". The card renders it in place of the generic hint.
      */
     reason?: string
     /**

@@ -11,10 +11,9 @@ import { CHINA_VARIANT } from '../src/variants.ts'
 
 /**
  * The loopback shim's contract on the Qoder side: four inbound guards (Host,
- * Origin, bearer secret, JSON content-type), a verbatim pass-through of the
- * chat body (the WorkBuddy-era body normalization is gone — the upstream
- * translates, the shim does not), `/v1/models` owned by the variant's
- * providerId, and the `KIND_STATUS` mapping of upstream failures onto HTTP.
+ * Origin, bearer secret, JSON content-type), a verbatim pass-through of the chat
+ * body (the upstream translates, the shim does not), `/v1/models` owned by the
+ * variant's providerId, and the `KIND_STATUS` mapping of upstream failures onto HTTP.
  */
 
 const CLEANUP: (() => Promise<void>)[] = []
@@ -450,10 +449,8 @@ describe('Qoder shim error mapping', () => {
   })
 
   it('quotes the outbound status, never the upstream queue 403', async () => {
-    // The harness's pi-ai error classifier matches 401/403 in message text
-    // ahead of 429/rate-limit. A queue answer reaching it with the upstream's
-    // 403 in the text read as "API 密钥无效" (observed 2026-09-26 23:30 and
-    // 23:40), so the shim quotes its own outbound code.
+    // pi-ai matches 401/403 in message text ahead of 429, so the shim quotes its
+    // own outbound code rather than the upstream's 403.
     const harness = await startShim(() => ({
       ok: false,
       status: 403,
@@ -474,10 +471,8 @@ describe('Qoder shim error mapping', () => {
   })
 
   it('carries the upstream retry hint as standard headers and a message tag', async () => {
-    // Qoder's queue answer asks for 30s; the shim must not flatten that away.
-    // The tag exists because the harness's pi-ai adapter drops HTTP headers, so
-    // the adapter reads it back out of the message and sets
-    // `failure.providerRetryAfterMs` — the field the retry policy honors.
+    // Qoder asks for 30s and the shim must not flatten it: pi-ai drops HTTP headers,
+    // so the tag rides in the message and the adapter rebuilds `providerRetryAfterMs`.
     const harness = await startShim(() => ({
       ok: false,
       status: 403,

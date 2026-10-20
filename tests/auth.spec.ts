@@ -24,20 +24,14 @@ import {
 import { CHINA_VARIANT, GLOBAL_VARIANT, type QoderVariant } from '../src/variants.ts'
 
 /**
- * The Qoder credential store: a list of Personal Access Tokens per variant,
- * one active, one small JSON document on disk, and an environment fallback.
- * There is no device flow, no refresh, and no expiry — so the cases below are
- * exactly those surfaces plus the stale-file refusal the WorkBuddy era leaves
- * behind and the v2 → v3 migration the list shape needs.
+ * The Qoder credential store: a list of PATs per variant, one active, one small
+ * JSON document on disk, and an environment fallback. No device flow, no refresh,
+ * no expiry — plus the stale-file refusal and the v2 → v3 migration.
  */
 
 const CLEANUP: (() => Promise<void>)[] = []
 
-/**
- * The running copy's package root: exactly what `paths.ts` compares a profile's
- * installed copy against, computed here the same way (two levels up from
- * `src/paths.ts`, which is one level up from this file).
- */
+/** The running copy's package root: what `paths.ts` compares a profile's installed copy against. */
 const REPO_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
 
 /** A directory link, in the only flavour an unprivileged Windows process can make. */
@@ -464,10 +458,8 @@ describe('plugin data directory', () => {
   })
 
   it('refuses a lone declaring profile that links its whole node_modules', async () => {
-    // The single-candidate branch deliberately skips the link test (the case
-    // above), so this is the one shape it still has to refuse on its own: a
-    // residual directory is not the running copy regardless of how many other
-    // profiles exist to compare it against.
+    // The single-candidate branch skips the link test, so it must refuse a residual
+    // directory on its own.
     const home = await tempDir()
     const residual = join(home, 'profiles', 'residual')
     await mkdir(join(home, 'profiles', 'other', 'node_modules'), { recursive: true })
@@ -500,11 +492,10 @@ describe('plugin data directory', () => {
     vi.stubEnv('DSH_HOME', home)
     const warn = vi.fn()
     configurePluginPaths({ profileDir: undefined, diagnostics: { warn } })
-    // Neither profile's installed copy resolves to this package, so writing a
-    // credential into a guess would be worse than the documented fallback.
+    // Neither profile resolves to this package, so a guess would be worse than the fallback.
     expect(qoderPluginDataDir()).toBe(join(home, QODER_DATA_DIR_NAME))
-    // The fallback is otherwise invisible: the user reads an empty status and
-    // concludes their credentials are gone. Say which profiles were considered.
+    // The fallback is otherwise invisible: the user reads an empty status and concludes
+    // their credentials are gone, so say which profiles were considered.
     expect(warn).toHaveBeenCalledOnce()
     expect(warn.mock.calls[0]![0]).toContain(join(home, 'profiles', 'web'))
     expect(warn.mock.calls[0]![0]).toContain(join(home, 'profiles', 'desktop'))
@@ -544,12 +535,8 @@ describe('plugin data directory', () => {
   })
 
   it('prefers a real install over a residual profile that links its whole node_modules', async () => {
-    // Issue #15: a discarded profile kept a COPY of another profile's manifest
-    // and pointed its entire `node_modules` at that profile. Both then "declare"
-    // the plugin and both realpath-resolve to this package, so the winner was
-    // decided by readdir order — and the plugin wrote its data into the
-    // directory nothing was running. The name here sorts FIRST, so order alone
-    // would pick the residual one.
+    // Two profiles can declare the plugin and realpath-resolve to this package, so the
+    // winner must not be readdir order: the residual name here sorts FIRST.
     const home = await tempDir()
     const residual = join(home, 'profiles', 'aaa-residual')
     const real = join(home, 'profiles', 'desktop')

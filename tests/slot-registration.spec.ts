@@ -3,20 +3,11 @@ import { SlotCore } from '@deepseek-ai/dsh-client-ui-slots'
 import { QODER_CARD_VARIANTS } from '../src/client/QoderPluginCard.tsx'
 
 /**
- * The plan's §7 gate: "同一 client bundle 注册两个 settings.plugin.item key…
- * 实施前以最小运行验证两个条目都可见；若插槽不支持，再定位限制，不直接复制
- * 整个插件." — i.e. register two cards from one plugin, and if the slot cannot
- * hold both, find the actual limit rather than duplicating the plugin.
- *
- * `settings.plugin.item` is a keyed slot, so whether two entries coexist is a
- * property of the real slot registry rather than of this plugin's code. These
- * tests drive the actual `SlotCore` to answer it, instead of trusting that the
- * registration shape works.
- *
- * Only the variant ids are needed from the card module (the component itself
- * cannot render in this Node environment), and the register calls are typed
- * loosely on purpose: the point under test is the registry's behaviour, not the
- * DSH client typings.
+ * The §7 gate: register two cards from one plugin, and if the slot cannot hold
+ * both, find the actual limit rather than duplicating the plugin.
+ * `settings.plugin.item` is a keyed slot, so coexistence is a property of the real
+ * registry — these drive the actual `SlotCore`. Register calls are typed loosely on
+ * purpose: the registry's behaviour is what is under test.
  */
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -29,9 +20,7 @@ const register = (core: SlotCore, options: Record<string, unknown>): unknown =>
 
 /**
  * Declare `settings.plugin.item` the way DSH does: a parent entry contributes a
- * `children` table. `SlotCore` has no standalone declare method — the child
- * spec is owned by the registering entry, which is also why a slot can only be
- * claimed once.
+ * `children` table, and the child spec is owned by the registering entry.
  */
 function declarePluginItem(core: SlotCore): void {
   register(core, {
@@ -74,10 +63,8 @@ describe('settings.plugin.item holds both cards', () => {
   })
 
   it('rejects a duplicate key at the same priority, which is why priorities differ', () => {
-    // The registry throws when the SAME key is registered twice at the same
-    // priority. Distinct keys would be fine at equal priority, but the plugin
-    // still staggers them so the CN card leads in the settings list; this test
-    // documents which rule is actually enforced.
+    // The registry throws only on the SAME key at the same priority; the plugin
+    // still staggers them so the CN card leads in the settings list.
     const core = new SlotCore()
     declarePluginItem(core)
     register(core, { name: 'settings.plugin.item', key: 'qoder', priority: 30 })
@@ -113,12 +100,9 @@ describe('settings.plugin.item holds both cards', () => {
 })
 
 /**
- * The plugin manager's bundle-configuration seat, declared the way its `main`
- * registration declares it: a keyed child slot with NO `keyProps` table, so
- * every string is a valid entry key — the bundle's npm package name is what a
- * registration passes. This is the seat the sidebar's Plugins panel renders a
- * bundle's own configuration in (between the description and the component
- * rows), and the registration this plugin adds beside its Settings block card.
+ * The plugin manager's bundle-configuration seat: a keyed child slot with NO
+ * `keyProps` table, so any string is a valid entry key and the bundle's npm
+ * package name is what a registration passes.
  */
 function declareBundleConfig(core: SlotCore): void {
   register(core, {
@@ -153,11 +137,8 @@ describe('plugins.bundle.config holds the bundle configuration', () => {
   })
 
   it('rejects a second registration for the same key, which is why the inject disposer owns re-registration', () => {
-    // HMR re-applies the same instance: the SlotRegistry.inject effect disposes
-    // the first registration before a later declaration runs the factory
-    // again, so the live ledger never holds the key twice. A second register
-    // WITHOUT the disposer throws naming the occupant — the rule that makes
-    // the deferral mandatory rather than cosmetic.
+    // HMR re-applies the same instance and the inject effect disposes the first
+    // registration; a second register without the disposer throws naming the occupant.
     const core = new SlotCore()
     declareBundleConfig(core)
     register(core, { name: 'plugins.bundle.config', key: 'dsh-qoder-connect' })

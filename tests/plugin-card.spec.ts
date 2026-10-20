@@ -12,13 +12,10 @@ import type { QoderWebStatus } from '../src/status-paths.ts'
 import { resetQuotaStatusForTesting } from '../src/client/quota-settings-store.ts'
 
 /**
- * Card tests for the PAT flow and the three-tab body.
- *
- * The card's job changed with the upstream: there is no browser sign-in flow
- * anymore, so the sensitive surface is the PAT entry — what it sends, which
- * header authorizes it, and what each host answer renders. The probe section
- * keeps its old regression (only the pressed row may claim to be running)
- * because the fix lives in this component, not the route.
+ * Card tests for the PAT flow and the three-tab body. The sensitive surface is the
+ * PAT entry — what it sends, which header authorizes it, and what each host answer
+ * renders — and the probe section keeps its regression: only the pressed row may
+ * claim to be running.
  */
 
 const t = (key: keyof typeof en, params: Record<string, unknown> = {}): string =>
@@ -33,11 +30,9 @@ interface Posted {
 }
 
 /**
- * The shared status store is module state that outlives a test, and an
- * expanding card no longer re-reads a document that is still fresh — so each
- * test starts the clock well past the card's minute. A publish inside the
- * test then lands at the current time and stays fresh, which is what the
- * dedup assertions read.
+ * The shared status store outlives a test and a fresh document is not re-read,
+ * so each test starts the clock well past the card's minute; a publish then
+ * lands at the current time, which is what the dedup assertions read.
  */
 let clock = Date.parse('2024-05-01T00:00:00.000Z')
 
@@ -441,9 +436,8 @@ describe('Qoder plugin card', () => {
   })
 
   it('prints the used percentage beside a package label in the quota detail tab', async () => {
-    // Issue #14, second surface: the settings card's credit bar labels carry the
-    // same "(used N%)" suffix the sidebar card prints, read from the same
-    // helper. 2,340 / 2,400 is Qoder desktop's own "60 / 2,400 (已使用 3%)".
+    // The settings card's credit bar carries the same "(used N%)" suffix the sidebar
+    // prints, read from the same helper: 2,340 / 2,400 is "(已使用 3%)".
     statusBody = {
       status: 'signed-in',
       probeKey: 'test-probe-key',
@@ -471,11 +465,8 @@ describe('Qoder plugin card', () => {
   })
 
   it('states the PAT authorization when the account has no cycle expiry', async () => {
-    // Qoder answers a personal account's cycle deadline with the year-9999
-    // "never" sentinel, which the transport drops rather than forwarding. The
-    // status tab used to print nothing at all there (and, before the drop,
-    // claimed the quota reset in the year 10000); it now names the one date the
-    // card actually knows — when this PAT was authorized.
+    // The year-9999 "never" sentinel is dropped by the transport, so the status tab
+    // names the one date the card knows — when this PAT was authorized.
     statusBody = {
       status: 'signed-in',
       pat: { source: 'card', savedAtMs: Date.parse('2026-10-16T02:05:36.888Z'), patTail: 'd092' },
@@ -511,8 +502,7 @@ describe('Qoder plugin card', () => {
   })
 
   it('still states the real cycle deadline when the upstream reports one', async () => {
-    // The PAT line is a stand-in for an absent expiry, never a replacement for
-    // a reported one: a subscription whose quota really does reset must say so.
+    // The PAT line stands in for an absent expiry, never replaces a reported one.
     statusBody = {
       status: 'signed-in',
       pat: { source: 'card', savedAtMs: Date.parse('2026-10-16T02:05:36.888Z'), patTail: 'd092' },

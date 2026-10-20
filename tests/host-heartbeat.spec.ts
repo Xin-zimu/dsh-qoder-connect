@@ -16,11 +16,10 @@ import { QODER_DATA_DIR_ENV } from '../src/paths.ts'
 import { QODER_CONNECT_VERSION } from '../src/version.ts'
 
 /**
- * The host heartbeat lives inside the plugin's *state* subdirectory
+ * The host heartbeat lives in the state subdirectory
  * (`<DSH_QODER_DATA_DIR>/state/.qoder-host-heartbeat.json`): `writeHostHeartbeat`
- * is documented best-effort and creates nothing itself — the state stores
- * (probe/catalog) own the directory. The cases below stub `DSH_QODER_DATA_DIR`
- * so nothing ever touches a real profile.
+ * is best-effort and creates nothing itself. The data dir is stubbed, so nothing
+ * ever touches a real profile.
  */
 
 let root: string | undefined
@@ -90,10 +89,8 @@ describe('host heartbeat', () => {
   })
 
   it('a write with the state directory missing creates it and lands the file', async () => {
-    // `writeHostHeartbeat` is non-fatal by contract (it never throws), and it
-    // owns creating the state/ directory: a host that registers before the
-    // catalog/probe stores first touch the dir must still leave a readable
-    // heartbeat rather than silently dropping the file.
+    // `writeHostHeartbeat` never throws and owns creating state/, so a host that
+    // registers before the stores touch the dir still leaves a readable file.
     root = await mkdtemp(join(tmpdir(), 'qoder-heartbeat-nodir-'))
     vi.stubEnv(QODER_DATA_DIR_ENV, root)
     await expect(writeHostHeartbeat()).resolves.toBeUndefined()
@@ -103,10 +100,8 @@ describe('host heartbeat', () => {
   })
 
   it('detects a recycled PID as dead when the process start time is readable', async () => {
-    // If a stale heartbeat claims a `registeredAt` *older* than this process's
-    // own start time, the PID cannot be the original host — it has been
-    // recycled by an unrelated process. Even though `kill(pid, 0)` says the
-    // PID is alive, the age check must report dead.
+    // A `registeredAt` older than this process's start means the PID was recycled:
+    // alive per `kill(pid, 0)`, dead by age.
     const startAtMs = processStartTimeMs(process.pid)
     const recycled: QoderHostHeartbeat = {
       version: 1,

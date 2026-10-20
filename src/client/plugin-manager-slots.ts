@@ -1,22 +1,11 @@
 /**
- * SlotMap merge for the plugin manager's bundle-configuration seat — a
- * structural re-statement of the contract
- * `@deepseek-ai/dsh-client-ui-plugin-manager` declares for its Plugins page
- * (its `slot-contract.ts`): the sidebar's Plugins panel renders one bundle's
- * own configuration ON THE BUNDLE'S DETAIL PAGE — the page a plugin card opens
- * into — through the `plugins.bundle.config` keyed slot, keyed by the bundle's
- * npm package name, between the page's description and its component rows
- * (`view: 'page'` only).
+ * SlotMap merge for the plugin manager's bundle-configuration seat, re-declared
+ * here because the plugin-manager package is a Host built-in this bundle does
+ * not depend on. The owner shapes below mirror upstream's `PluginConfigViewProps`
+ * / `ConfigPageForm` verbatim.
  *
- * The package is a Host built-in this bundle does not depend on (client bundle
- * purity: cross-plugin collaboration goes through services and slots, never
- * imports), so the seat is re-declared here to make the registration
- * type-check. The declarations must stay STRUCTURALLY IDENTICAL to upstream's:
- * when a peer package ships its own merge, a duplicate conflicting member
- * would fail compilation — the guard against drift. The owner shapes below are
- * upstream's `PluginConfigViewProps` / `ConfigPageForm` verbatim, with the
- * `ConfigForm` types taken from the settings client package this bundle already
- * types against (the same source upstream imports them from).
+ * Must stay structurally identical to upstream's: a conflicting duplicate member
+ * from a peer package would fail compilation.
  */
 
 import type { ConfigForm, ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client'
@@ -40,12 +29,8 @@ export interface PluginConfigViewProps {
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface SlotMap {
     /**
-     * A bundle's own configuration, keyed by the bundle's package name and
-     * rendered on the bundle's page between its description and its rows
-     * (`view: 'page'` only). Declared by the Host's plugin manager as a child
-     * of its `main` registration; a bundle's key is its package name, the same
-     * key the page's configuration ledger reads to decide whether the
-     * configuration section shows.
+     * A bundle's own configuration, keyed by its package name and rendered
+     * between the page's description and its rows (`view: 'page'` only).
      */
     'plugins.bundle.config': {
       kind: 'keyed'

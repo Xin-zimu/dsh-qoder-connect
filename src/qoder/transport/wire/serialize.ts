@@ -39,11 +39,8 @@ function stableChatRecordId(
 }
 
 /**
- * Reject an unusable request before any credential resolution or provider I/O.
- *
- * Image publication needs credentials, so message translation now runs after
- * authentication. This static pass preserves the guarantee that a request the
- * provider cannot serve never reaches the network.
+ * Reject an unusable request before any credential resolution or provider I/O,
+ * so a request the provider cannot serve never reaches the network.
  */
 export function validateQoderRequestShape(
   options: GenerateOptions,
@@ -51,14 +48,8 @@ export function validateQoderRequestShape(
 ): void {
   if (options.reasoningEffort !== undefined) {
     const effort = String(options.reasoningEffort)
-    // Only a declaration can justify a local refusal. A row that declares no
-    // efforts at all is not evidence that the model supports none: the upstream
-    // accepts spellings its discovery catalog never lists, so refusing them here
-    // misreports a supported value as unsupported. It also made detection
-    // impossible — every probe candidate, sentinel included, was rejected before
-    // the wire, which is why an undeclared model could only ever come back as
-    // "validating with no levels". An undeclared row therefore goes to the
-    // upstream for the answer; a declared set stays enforced exactly as before.
+    // Only a declared level set may justify a local refusal: an undeclared row is
+    // not evidence the model supports none, so it goes upstream for the answer.
     const declared = model?.reasoningEfforts
     if (declared !== undefined && declared.length > 0 && !declared.some(candidate => candidate.id === effort)) {
       throw new QoderLlmError(
@@ -150,12 +141,16 @@ export async function buildQoderRequestBody(
   const sessionId = options.sessionId === undefined
     ? `${stablePart}-${crypto.randomUUID()}`
     : `${stablePart}-${String(options.sessionId)}`
-  const recordId = stableChatRecordId(modelKey, messages, tools, maxTokens)
+  // One attempt id and one queue key per call. The queue entry is keyed by
+  // request_set_id and must survive a replay, so it cannot derive from content:
+  // two identical asks would otherwise share (and overwrite) one entry.
+  const requestId = crypto.randomUUID()
+  const requestSetId = crypto.randomUUID()
 
   return {
-    request_id: crypto.randomUUID(),
-    request_set_id: recordId,
-    chat_record_id: recordId,
+    request_id: requestId,
+    request_set_id: requestSetId,
+    chat_record_id: requestId,
     session_id: sessionId,
     stream: true,
     chat_task: 'FREE_INPUT',
@@ -202,7 +197,8 @@ export async function buildQoderRequestBody(
       version: '1.0.0',
       type: 'agent',
       stage: 'start',
-      id: crypto.randomUUID(),
+      // The upstream ties a queue entry's business id to its request_set_id.
+      id: requestSetId,
       name: lastUserText.substring(0, 30),
       begin_at: Date.now(),
     },

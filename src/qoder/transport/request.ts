@@ -95,11 +95,9 @@ export async function readLimitedText(
     reader.releaseLock()
   }
 
-  // Decode at the byte level: a host fetch whose stack does not decompress
-  // (the Electron desktop host) yields the compressed stream verbatim, and a
-  // TextDecoder pass would destroy those bytes irreversibly. The encoding is
-  // taken from the response header; when that is missing too, the gzip magic
-  // number is the fallback signal.
+  // Decode at the byte level: a host whose fetch stack does not decompress
+  // yields the compressed stream verbatim, and TextDecoder would destroy it.
+  // Without a content-encoding header, the gzip magic number is the fallback.
   let payload = Buffer.concat(chunks.map(chunk => Buffer.from(chunk)))
   const encoding = (response.headers.get('content-encoding') ?? '').toLowerCase()
   const looksGzipped = payload.length >= 2 && payload[0] === 0x1f && payload[1] === 0x8b
@@ -211,10 +209,8 @@ export async function openApiJsonRequest<T>(
   try {
     const headers: Record<string, string> = {
       accept: 'application/json',
-      // Keep the upstream from compressing: the Electron desktop host's fetch
-      // does not decompress the body, and a compressed stream would reach the
-      // JSON parser as binary noise. `identity` states the preference
-      // explicitly; readLimitedText decompresses as a fallback.
+      // Some hosts do not decompress, and a compressed stream would reach the
+      // JSON parser as binary noise; readLimitedText decompresses as a fallback.
       'accept-encoding': 'identity',
       'user-agent': options.userAgent ?? defaultUserAgent,
       'cosy-version': '1.0.1',
@@ -237,8 +233,7 @@ export async function openApiJsonRequest<T>(
     const response = await fetchImpl(options.url, {
       method,
       headers,
-      // Under exactOptionalPropertyTypes RequestInit forbids an explicit
-      // `body: undefined`; omit the property when there is no payload.
+      // exactOptionalPropertyTypes forbids an explicit `body: undefined`.
       ...bodyText === undefined ? {} : { body: bodyText },
       signal: requestSignal,
     })
@@ -258,9 +253,8 @@ export async function openApiJsonRequest<T>(
 
     if (!response.ok) {
       options.logger?.error?.(`[Qoder ${options.operation}] Request failed`, redactLogPayload(text))
-      // The body rides along so a 401/403 that is really the upstream's
-      // queue answer (code 10605 / isQueued) classifies as a rate limit
-      // instead of an authorization failure — see qoderQueueSignal.
+      // The body rides along so a 401/403 that is really the queue answer
+      // classifies as a rate limit rather than an authorization failure.
       throw qoderHttpError(
         `Failed to execute Qoder ${options.operation} with status ${response.status}.`,
         response,

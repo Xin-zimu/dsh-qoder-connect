@@ -20,15 +20,8 @@ XcW+ML9FoCI6AOvOzwIDAQAB
 export const qoderIdeVersion = '1.1.47'
 export const qoderClientType = '5'
 /**
- * The desktop client identifier the campaign endpoints require.
- *
- * Measured against the live upstream: `/sash/api/v1/me/campaigns` answers
- * HTTP 200 with an EMPTY `campaigns` array when the caller presents the
- * generic {@link qoderClientType} (`5`), and returns the real list only when
- * it presents the desktop identifier `10`. A check-in built on the wrong
- * identifier looks healthy at the transport layer — status 200, no error —
- * while silently reporting "no campaign today" forever, so the campaign
- * paths must send this one explicitly.
+ * The desktop client identifier the campaign endpoints require; the generic
+ * {@link qoderClientType} yields 200 with an empty campaign list.
  */
 export const qoderDesktopClientType = '10'
 export const defaultUserAgent = `qoder/${qoderIdeVersion}`
@@ -96,6 +89,7 @@ export function buildAuthHeaders(
   body: Buffer | string | null,
   requestURL: string,
   creds: CosyCredentials,
+  correlation?: { requestId?: string, sessionId?: string },
 ): Record<string, string> {
   if (!creds.userID) {
     throw new Error('cosy: user id is empty')
@@ -140,9 +134,7 @@ export function buildAuthHeaders(
     .digest('hex')
   const bodyLen = body ? (Buffer.isBuffer(body) ? body.length : Buffer.from(body).length).toString() : '0'
 
-  // Only reached when a caller assembled credentials without an id: the
-  // default chain reads Qoder's own file and otherwise creates the plugin's
-  // seed inside its data directory — it no longer writes near $HOME.
+  // Reached only when a caller assembled credentials without an id.
   const machineID = creds.machineID || getMachineId()
 
   return {
@@ -164,6 +156,9 @@ export function buildAuthHeaders(
     'Cosy-Organization-Id': '',
     'Cosy-Organization-Tags': '',
     'Login-Version': qoderLoginVersion,
-    'X-Request-Id': crypto.randomUUID(),
+    // The upstream correlates a queue-status poll with its inference through
+    // these two headers; a poll passes the inference's ids, not fresh ones.
+    'X-Request-Id': correlation?.requestId ?? crypto.randomUUID(),
+    ...correlation?.sessionId === undefined ? {} : { 'X-Session-Id': correlation.sessionId },
   }
 }

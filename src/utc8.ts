@@ -1,14 +1,7 @@
 /**
  * The one UTC+8 day calculation the check-in logic is allowed to use.
- *
- * Qoder opens the daily benefit at 10:00 Beijing time and closes it at 09:59
- * the next morning, so the unit that matters is a *window*, not a calendar
- * date — for the last ten hours of every window the two disagree. The
- * transport (which must say which window a campaign belongs to) and the
- * scheduler (which must decide whether today is settled) therefore have to name
- * that day identically, or one of them settles a day the other has not claimed.
- * That disagreement is exactly what silently cost a day's credits, so the
- * conversion lives here instead of being re-derived in each of them.
+ * The benefit window (10:00–09:59 next morning) is not a calendar date, so
+ * transport and scheduler must name the day through this module only.
  *
  * @module dsh-qoder-connect/utc8
  */
@@ -18,10 +11,7 @@ export const UTC8_OFFSET_MINUTES = 480
 
 /**
  * The UTC+8 wall clock of an instant, as a Date whose *local* fields hold it.
- *
- * Shifting by the host's own offset cancels the host timezone out, so the
- * result reads the same on a UTC+8 machine and on a UTC-5 one. Callers must
- * therefore use the local getters (`getHours`, `getFullYear`, …) on it.
+ * Read it with the local getters (`getHours`, `getFullYear`, …), not the UTC ones.
  */
 export function utc8WallClock(atMs: number): Date {
   const d = new Date(atMs)

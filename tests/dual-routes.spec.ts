@@ -12,14 +12,10 @@ import { CHINA_VARIANT, GLOBAL_VARIANT, type QoderVariant } from '../src/variant
 import type { QoderUpstreamClient } from '../src/upstream.ts'
 
 /**
- * Both variants' routes, mounted side by side on one server the way the plugin
- * mounts them. These are integration tests: they exercise the real handlers, the
- * real path constants, and the real loopback guards, so a route parameterized
- * onto the wrong variant — or a guard lost while parameterizing — fails here
- * rather than only on a live install.
- *
- * No network: `fetchCredits` is a stub, so the test never spends credit or
- * reads the developer's real Personal Access Tokens.
+ * Both variants' routes mounted side by side on one server, the way the plugin
+ * mounts them: real handlers, real path constants, real loopback guards, so a
+ * route parameterized onto the wrong variant fails here. No network —
+ * `fetchCredits` is a stub, so no credit is spent and no real PAT is read.
  */
 
 const CLEANUP: (() => Promise<void>)[] = []
@@ -117,13 +113,9 @@ async function mount(variant: QoderVariant, options: {
 }
 
 /**
- * A temporary plugin data directory, stubbed as `DSH_QODER_DATA_DIR`.
- *
- * Every credential these cases rely on lives inside it: a variant's store
- * reads exactly one file, `<dataDir>/<ownFilename>`, and nothing outside —
- * so a case that never writes one is signed out (with both PAT env vars
- * blanked), and none of them can read a real token from the machine running
- * the tests.
+ * A temporary plugin data directory, stubbed as `DSH_QODER_DATA_DIR`: each
+ * variant's store reads exactly one file, `<dataDir>/<ownFilename>`, so a case
+ * that writes none is signed out and no real token can be read.
  */
 async function tempDataRoot(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'qoder-routes-'))

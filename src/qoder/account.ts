@@ -15,14 +15,8 @@ export interface QoderQuota {
 }
 
 /**
- * A named grant of credits that expires on its own schedule.
- *
- * The international upstream reports these in `dedicatedResourcePackages`: one
- * entry per campaign package (the SOTA exclusive credits, for one). Every
- * bucket the reader already knows (`userQuota`, `orgResourcePackage`,
- * `addOnQuota`) shares the single cycle-level `expiresAt`, whereas a dedicated
- * package carries its OWN `expiresAt` and its own localized title — so it is
- * its own shape, not just another `QoderQuota`.
+ * A named grant of credits that expires on its own schedule, reported in the
+ * international upstream's `dedicatedResourcePackages`.
  */
 export interface QoderDedicatedResourcePackage extends QoderQuota {
   /** Upstream package id (`01a1426f-…`), when reported. */
@@ -31,12 +25,7 @@ export interface QoderDedicatedResourcePackage extends QoderQuota {
   name?: string | undefined
   /** Localized display title from `displayLabels`, when the upstream sends one. */
   title?: { zh?: string | undefined; en?: string | undefined } | undefined
-  /**
-   * This package's own expiry, ISO. Deliberately NOT the account's cycle-level
-   * `expiresAt`: a campaign grant ends when the grant ends, and reporting the
-   * account's (sentinel `9999`) date against it is what made the card's dates
-   * wrong.
-   */
+  /** This package's own expiry, ISO; not the account's cycle-level date. */
   expiresAt?: string | undefined
   /** Whether the upstream says the package is currently usable. */
   available?: boolean | undefined
@@ -47,22 +36,9 @@ export interface QoderDedicatedResourcePackage extends QoderQuota {
 export interface QoderQuotaUsage {
   userQuota?: QoderQuota | undefined
   orgResourcePackage?: QoderQuota | undefined
-  /**
-   * Credits granted on top of the plan — the daily campaign's 100, for one.
-   *
-   * A separate bucket upstream reports beside `userQuota`; it carries its own
-   * total and remaining, so leaving it out made the card show fewer packages
-   * than the account actually holds (two on the web, one here).
-   */
+  /** Credits granted on top of the plan, with their own total and remaining. */
   addOnQuota?: QoderQuota | undefined
-  /**
-   * Campaign grants with their own expiry and display title (the international
-   * edition's SOTA exclusive credits land here).
-   *
-   * Dropping this array hid a whole 2,000-credit package from the card: the
-   * reader mapped only the three named buckets above, so the credit was real
-   * and simply never rendered.
-   */
+  /** Campaign grants carrying their own expiry and display title. */
   dedicatedResourcePackages?: readonly QoderDedicatedResourcePackage[] | undefined
   totalUsagePercentage?: number | undefined
   isQuotaExceeded?: boolean | undefined

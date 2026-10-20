@@ -1,11 +1,7 @@
 /**
- * Center-hosted image upload pipeline for Qoder multimodal input.
- *
- * Qoder does not carry raster bytes inside a model request. It publishes each
- * request image to the center service once, then references the returned
- * durable URL. This module owns that exchange: deduplication, single-flight
- * sharing, bounded caching, and the degradation contract that keeps a model
- * request alive when publication fails.
+ * Center-hosted image upload pipeline for Qoder multimodal input: Qoder
+ * publishes each request image once and references the returned URL, and any
+ * publication failure degrades to an inline data URL.
  *
  * @module dsh-provider-qoder/qoder/transport/image-upload
  */
@@ -22,14 +18,7 @@ import { buildAuthHeaders, type CosyCredentials } from './wire/cosy.ts'
 export const defaultImageUploadTimeoutMs = 30_000
 /** Bounded number of remembered image URLs, matching the Qoder client. */
 export const defaultImageUrlCacheCapacity = 512
-/**
- * Conservative lifetime for a remembered image URL.
- *
- * Whether the center service returns a permanently addressable object or a
- * pre-signed URL is not established. Remembering a pre-signed URL forever
- * would replay expiry failures for the rest of a long session with no way to
- * recover, so entries expire and are republished instead.
- */
+/** Conservative lifetime for a remembered URL; expired entries are republished. */
 export const defaultImageUrlCacheTtlMs = 30 * 60 * 1000
 /** Concurrent publications allowed while preparing one model request. */
 export const defaultImageUploadConcurrency = 4
@@ -86,12 +75,7 @@ export function buildQoderImageMultipart(
   return { body: Buffer.concat([header, Buffer.from(data), footer]), boundary }
 }
 
-/**
- * Extract the durable object URL from a center upload response.
- *
- * @param payload - parsed response body.
- * @returns the first usable absolute URL, or undefined when none is present.
- */
+/** Extract the first absolute object URL from a center upload response, or `undefined`. */
 export function readQoderImageUrl(payload: unknown): string | undefined {
   if (payload === null || typeof payload !== 'object') return undefined
   const root = payload as Record<string, unknown>
@@ -119,11 +103,8 @@ function dataUrl(image: Pick<RequestImageAttachment, 'data' | 'mediaType'>): str
 }
 
 /**
- * Publishes request images to the Qoder center service and remembers the result.
- *
- * Publication never fails a model request: any upstream problem degrades to an
- * inline data URL so the turn proceeds with the same content it would have
- * carried before the pipeline existed.
+ * Publishes request images to the Qoder center service. Publication never fails
+ * a model request: problems degrade to an inline data URL.
  */
 export class QoderImageUploader {
   private readonly cache = new Map<string, CacheEntry>()
@@ -153,12 +134,9 @@ export class QoderImageUploader {
   }
 
   /**
-   * Resolve the wire URL for one request image.
+   * Resolve the wire URL for one request image: a center object URL, or an inline
+   * data URL when publication fails.
    *
-   * @param image - request-encoded image produced by the DSH attachment store.
-   * @param credentials - credentials authorizing the center exchange.
-   * @param signal - optional caller cancellation.
-   * @returns a center object URL, or an inline data URL when publication fails.
    * @throws QoderLlmError with code `ABORTED` only when the caller cancels.
    */
   async resolveImageUrl(
@@ -202,12 +180,8 @@ export class QoderImageUploader {
   }
 
   /**
-   * Derive the deduplication identity for one request image.
-   *
-   * `variantId` is the attachment store's deterministic cache and upload index
-   * over the attachment, the request policy, and the encoder parameters, so it
-   * identifies these exact bytes without rehashing them. Region and subscriber
-   * are included because a center object is never shared across either.
+   * Deduplication identity for one image: `variantId` covers the exact bytes, and
+   * region plus subscriber are included because objects are never shared across them.
    */
   private cacheKey(image: RequestImageAttachment, credentials: CosyCredentials): string {
     const hash = crypto.createHash('sha256')
@@ -319,9 +293,8 @@ export class QoderImageUploader {
     const requestId = crypto.randomUUID()
     const url = getQoderImageUploadUrl(this.region, requestId)
     const multipart = buildQoderImageMultipart(image.data, image.mediaType)
-    // The Qoder client signs the body *length*, not the body: prepareRequest
-    // receives String(body.length). Signing raw multipart bytes would corrupt
-    // them, because the signature input is assembled as text.
+    // The Qoder client signs the body *length*, not the body: the signature input
+    // is assembled as text, so signing raw multipart bytes would corrupt them.
     const signedBody = Buffer.from(String(multipart.body.length), 'utf8')
     const timeout = AbortSignal.timeout(this.timeoutMs)
     const requestSignal = AbortSignal.any([signal, timeout])

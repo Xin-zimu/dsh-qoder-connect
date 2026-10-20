@@ -4,12 +4,9 @@ import type { QoderAccountInfo } from '../src/qoder/account.ts'
 import type { QoderTransport } from '../src/qoder/transport/index.ts'
 
 /**
- * The credit parse in all its shapes: how `fetchCredits` maps one
- * `readAccount` answer onto the card's `QoderCredits`, and what the expiry
- * fields do. The passthrough rule changed with the upstream: Qoder reports one
- * cycle-level `expiresAt` (not a per-package `PackageEndTime`), and it rides
- * to the card verbatim — this plugin never parses or recomputes it, leaving
- * "remaining days" to whatever locale formatting the renderer applies.
+ * How `fetchCredits` maps one `readAccount` answer onto the card's
+ * `QoderCredits`. `expiresAt` rides to the card verbatim: this plugin never
+ * parses or recomputes it, leaving "remaining days" to the renderer's formatting.
  */
 
 function clientFor(account: QoderAccountInfo | undefined, readAccount?: QoderTransport['readAccount']) {
@@ -83,9 +80,7 @@ describe('fetchCredits shapes', () => {
   })
 
   it('passes every string through, even an empty one — verbatim is verbatim', async () => {
-    // The WorkBuddy parser dropped empty PackageEndTime strings; the Qoder
-    // answer has one expiresAt field checked for presence only. Locking the
-    // difference so a "cleanup" here is a visible decision, not a silent one.
+    // One cycle-level expiresAt, checked for presence only: an empty string is not dropped.
     const credits = await clientFor(account({
       userQuota: { total: 10, used: 1, remaining: 9, percentage: 10, unit: 'credits' },
       expiresAt: '',
@@ -95,9 +90,8 @@ describe('fetchCredits shapes', () => {
   })
 
   it('lists bonus credits as their own package beside the plan', async () => {
-    // Observed live: the account holds userQuota (300) and addOnQuota (100, the
-    // daily campaign's credits). Mapping only the first made the card list one
-    // package where the web listed two.
+    // Both buckets count: `userQuota` (300) and `addOnQuota` (100) — mapping one
+    // lists one package where the web lists two.
     const credits = await clientFor(account({
       userQuota: { total: 300, used: 0, remaining: 300, percentage: 0.01, unit: 'credits' },
       addOnQuota: { total: 100, used: 0, remaining: 100, percentage: 0, unit: 'credits' },
@@ -116,12 +110,9 @@ describe('fetchCredits shapes', () => {
   })
 
   it('lists a dedicated campaign package with its OWN title and expiry', async () => {
-    // Observed live on Qoder Global: a 2,000-credit SOTA grant arrives in
-    // `dedicatedResourcePackages`, unmapped by the first version of this
-    // reader — the credit was real and invisible on every surface. Its own
-    // expiry and localized title are the only honest ones: the account's
-    // `expiresAt` is the year-9999 "never" sentinel and the package `name` is
-    // an opaque campaign code.
+    // A grant in `dedicatedResourcePackages` keeps its OWN expiry and localized title:
+    // the account `expiresAt` is the year-9999 sentinel and the package `name` an
+    // opaque campaign code.
     const credits = await clientFor(account({
       userQuota: { total: 0, used: 0, remaining: 0, percentage: 0, unit: 'credits' },
       addOnQuota: { total: 100, used: 5, remaining: 95, percentage: 0.06, unit: 'credits' },

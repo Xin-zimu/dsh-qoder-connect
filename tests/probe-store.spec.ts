@@ -231,8 +231,7 @@ describe('QoderProbeService precedence', () => {
 
 describe('newestFirst', () => {
   it('puts the most recent observation first', () => {
-    // The store appends, so a just-run detection would otherwise land below
-    // every earlier one — the exact complaint this helper exists to fix.
+    // The store appends, so a just-run detection would land below every earlier one.
     const ordered = newestFirst([
       { probedAt: 100, id: 'oldest' },
       { probedAt: 300, id: 'newest' },
@@ -249,11 +248,7 @@ describe('newestFirst', () => {
 })
 
 describe('recordFor: the single judgement the card and adapter share', () => {
-  /**
-   * The card used to read raw records while the adapter read fingerprint- and
-   * TTL-checked ones, so the card could show levels the model picker no longer
-   * offered. Both now go through `recordFor`, and these pin what it refuses.
-   */
+  /** Both the card and the adapter now go through `recordFor`; these pin what it refuses. */
   function serviceFor(store: QoderProbeStore): QoderProbeService {
     return new QoderProbeService({
       store,

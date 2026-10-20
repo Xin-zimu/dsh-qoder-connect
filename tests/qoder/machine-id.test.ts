@@ -7,21 +7,17 @@ import { join } from 'node:path'
 import { getMachineId } from '../../src/qoder/transport/machine-id.ts'
 
 /**
- * The regression this file pins: the transport's machine id used to create
- * `~/.dsh/qoder/machine_id` when no caller nominated a save location — a
- * device credential scattered next to the OS user profile, derived from
- * `os.homedir()` instead of the resolved harness home. Every assertion below
- * runs against throwaway `$HOME`/`$DSH_HOME` directories, so an accidental
- * home write resurfaces as a stray file under the fake home.
+ * The machine id belongs in the resolved harness home, never in
+ * `~/.dsh/qoder/machine_id`. Every assertion runs against throwaway
+ * `$HOME`/`$DSH_HOME` directories, so a stray home write shows up as a file there.
  */
 
 let fakeHome: string
 let fakeDshHome: string
 let savedEnv: NodeJS.ProcessEnv
 
-// The fake DSH home has no profiles/ directory, so the plugin's profile
-// discovery falls back to the harness home itself — the documented fallback,
-// and where the seed belongs when the host loads the plugin outside a profile.
+// No profiles/ directory, so discovery falls back to the harness home itself —
+// which is where the seed belongs outside a profile.
 function seedPath(): string {
   return join(fakeDshHome, '.dsh-qoder-connect', 'state', '.qoder-machine-id')
 }

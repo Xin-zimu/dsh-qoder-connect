@@ -16,8 +16,8 @@ export function hostnameOfHost(host: string): string {
     const end = hostname.indexOf(']')
     return end === -1 ? hostname : hostname.slice(0, end + 1)
   }
-  // Only `name:port` with a single colon is a port; anything with more colons
-  // is an (unbracketed) IPv6 literal and must not be truncated.
+  // Only `name:port` with a single colon is a port; more colons means an
+  // unbracketed IPv6 literal, which must not be truncated.
   const colon = hostname.lastIndexOf(':')
   if (colon !== -1 && !hostname.slice(0, colon).includes(':') && /^\d+$/.test(hostname.slice(colon + 1))) {
     hostname = hostname.slice(0, colon)
@@ -26,9 +26,8 @@ export function hostnameOfHost(host: string): string {
 }
 
 /**
- * The request's Host header must name the loopback interface. A DNS-rebinding
- * page (attacker domain re-resolved to 127.0.0.1) sends its own domain in
- * Host, so this check drops those before any routing happens.
+ * The request's Host header must name the loopback interface; this rejects
+ * DNS-rebinding pages (attacker domain re-resolved to 127.0.0.1).
  */
 export function hostIsLoopback(host: string | undefined): boolean {
   if (host === undefined || host.trim() === '') return false

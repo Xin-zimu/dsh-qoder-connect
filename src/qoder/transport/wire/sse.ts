@@ -58,16 +58,9 @@ function parseEnvelope(rawData: string): QoderSseEnvelope {
   }
   if (envelope.statusCodeValue !== undefined && envelope.statusCodeValue !== 200) {
     const status = envelope.statusCodeValue
-    // Forward the envelope body into the reported message. Qoder answers a
-    // rejected chat with a 200 SSE whose first envelope carries the failure,
-    // and that body is where the real reason lives (quota exhausted, region
-    // permission, risk control, ...). Dropping it left every such rejection
-    // reading as a bare "invalid API key" with nothing to act on.
-    //
-    // The body is also handed to the classifier itself: a 401/403 envelope
-    // whose body carries the queue markers (code 10605, isQueued,
-    // queueCount, retryAfterSeconds) is a throttle, not an authorization
-    // failure, and must not send the transport into a job-token exchange.
+    // Forward the envelope body into the message: a rejected chat arrives as a 200
+    // SSE whose first envelope carries the reason. The body is also handed to the
+    // classifier, so a 401/403 carrying queue markers reads as a throttle.
     throw qoderHttpError(
       envelope.body
         ? `Qoder service returned upstream error status ${status}: ${envelope.body}`

@@ -25,11 +25,8 @@ test('qoderEncodeBody handles UTF-8 characters correctly', () => {
 })
 
 /**
- * The shipped byte-table form must stay byte-for-byte identical to the
- * character-loop reference it replaced: the encoding is part of the wire
- * contract, and a mismatch would be rejected upstream rather than reported
- * anywhere useful. The reference is the algorithm as first ported from
- * qodercli.
+ * The byte-table form must stay byte-for-byte identical to the character-loop
+ * reference: the encoding is wire contract, and a mismatch is rejected upstream.
  */
 function referenceEncode(plaintext: string | Buffer): string {
   const stdAlphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
@@ -52,9 +49,8 @@ function referenceEncode(plaintext: string | Buffer): string {
 }
 
 test('qoderEncodeBody matches the character-loop reference on every length class', () => {
-  // Lengths around the 3-way split boundaries, plus 0..40 for good measure: the
-  // algorithm's `Math.floor(n/3)` re-arrangement behaves differently at each
-  // residue, so a single sample would not prove equivalence.
+  // Lengths around the 3-way split boundaries: the `Math.floor(n/3)`
+  // re-arrangement behaves differently per residue, so one sample proves nothing.
   const cases: string[] = []
   for (let length = 0; length <= 40; length++) cases.push('x'.repeat(length))
   cases.push(
@@ -82,8 +78,8 @@ test('qoderEncodeBody matches the character-loop reference on every length class
 })
 
 test('qoderEncodeBody stays cheap on a large body (main-thread budget)', () => {
-  // A 1 MB body is an ordinary large-context request; the character loop took
-  // ~800 ms of blocked event loop on it, the table form is a few milliseconds.
+  // A 1 MB body is an ordinary large-context request: the table form stays in the
+  // millisecond range where the character loop blocked the event loop for ~800 ms.
   const body = JSON.stringify({ filler: '中'.repeat(500_000) })
   const started = performance.now()
   const encoded = qoderEncodeBody(body)

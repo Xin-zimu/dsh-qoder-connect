@@ -318,12 +318,9 @@ test('QoderUsageReader reads subscriber plan and user status with machine finger
 })
 
 test('QoderUsageReader reads dedicated campaign packages and drops the year-9999 "never" expiry', async () => {
-  // The two facts the international account actually answers with, as seen
-  // live: `expiresAt` is 253402214400000 — a valid timestamp meaning "no
-  // expiry" — and the SOTA grant sits in `dedicatedResourcePackages` with its
-  // own epoch and its own localized labels. Reading the sentinel as a date
-  // told the user the quota resets in the year 10000; ignoring the array hid
-  // 2,000 real credits.
+  // The upstream's real shape: `expiresAt` 253402214400000 is the year-9999
+  // "no expiry" sentinel, and the SOTA grant sits in `dedicatedResourcePackages`
+  // with its own epoch and its own labels.
   let usageBody: Record<string, unknown> | undefined
   const fetchMock = async (input: URL | Request): Promise<Response> => {
     const url = String(input)
@@ -364,8 +361,7 @@ test('QoderUsageReader reads dedicated campaign packages and drops the year-9999
               { dimension: 'title', value: 'sota model series', valueI18n: { 'en-US': 'SOTA Exclusive Credits', 'zh-CN': 'SOTA 专属积分' } },
             ],
           },
-          // A malformed entry the reader must survive rather than fail the
-          // whole quota answer over.
+          // A malformed entry the reader must survive rather than fail the answer over.
           null,
         ],
       }
@@ -398,9 +394,7 @@ test('QoderUsageReader reads dedicated campaign packages and drops the year-9999
 })
 
 test('QoderUsageReader keeps a real plan expiry that merely looks far out', async () => {
-  // Guard against a sentinel test that over-fits: a subscription ending in
-  // 2031 is a date the card must print, so the drop keys on the year-9999
-  // sentinel alone, not on "a date the user will not live to see".
+  // The drop keys on the year-9999 sentinel alone: a subscription ending in 2031 is a real date to print.
   const fetchMock = async (input: URL | Request): Promise<Response> => {
     const url = String(input)
     if (url.includes('/jobToken/exchange')) return new Response(JSON.stringify({ token: 'jt-far', expires_in: 3_600_000 }))

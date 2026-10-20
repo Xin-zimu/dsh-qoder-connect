@@ -40,9 +40,9 @@ export interface QoderStatusRouteOptions {
   /** In-process key authorizing probe control writes. */
   probeKey?: string
   /**
-   * In-process key authorizing PAT writes, including clearing. Minted
-   * separately from {@link QoderStatusRouteOptions.probeKey} because the two
-   * authorize different powers; a signed-out card needs only this one.
+   * In-process key authorizing PAT writes, including clearing. Minted separately
+   * from {@link QoderStatusRouteOptions.probeKey}: the two authorize different
+   * powers, and a signed-out card needs only this one.
    */
   authKey?: string
   /** Card preference selecting larger declared context windows. */
@@ -50,9 +50,8 @@ export interface QoderStatusRouteOptions {
   /** Disabled models query for this variant. */
   disabledModels?: () => readonly string[]
   /**
-   * When the self-heal last auto-refreshed the job token, epoch ms; absent
-   * when it has not happened in this process. Rides the signed-in document
-   * so the card can show the notice without a second request.
+   * When the self-heal last auto-refreshed the job token, epoch ms; absent when it
+   * has not happened in this process.
    */
   jobTokenRefreshedAt?: () => number | undefined
   /** Check-in record query for this variant. */
@@ -74,8 +73,8 @@ export interface QoderStatusRouteOptions {
     }[] | undefined
   } | undefined
   /**
-   * Route path to mount. Defaults to the China variant's path so callers that
-   * only serve it keep their behaviour; the global variant passes its own.
+   * Route path to mount. Defaults to the China variant's path; the global variant
+   * passes its own.
    */
   path?: string
 }
@@ -95,10 +94,9 @@ function json(res: ServerResponse, status: number, body: unknown): void {
 }
 
 /**
- * The request must be addressed to the loopback interface, and a
- * browser-attached Origin must be loopback too. The Host check drops
- * DNS-rebinding pages (their Host is the attacker's domain, not loopback);
- * the card's same-origin fetches carry no Origin and pass on Host alone.
+ * The request must be addressed to the loopback interface, and a browser-attached
+ * Origin must be loopback too. The Host check drops DNS-rebinding pages; the card's
+ * same-origin fetches carry no Origin and pass on Host alone.
  */
 function loopbackRequest(req: IncomingMessage): boolean {
   return hostIsLoopback(req.headers.host) && originIsLoopback(req.headers.origin)
@@ -141,17 +139,15 @@ function modelSnapshot(model: QoderModelInfo): QoderCatalogModelSnapshot {
 }
 
 /**
- * Assemble the card's status document. Credential state is read-only; credit
- * is a live billing answer whose failure degrades to `creditsError` rather
- * than failing the whole document.
+ * Assemble the card's status document. Credit is a live billing answer whose
+ * failure degrades to `creditsError` rather than failing the whole document.
  */
 export async function qoderWebStatus(deps: QoderStatusRouteOptions): Promise<QoderWebStatus> {
   const authStatus = await deps.store.status()
   if (authStatus.state !== 'configured') {
-    // A diagnosable sign-out (a stale WorkBuddy-era file, say) keeps its
-    // explanation: falling back to the generic hint would tell the user to
-    // sign in when the real fix is to replace a file. The PAT key rides along
-    // so this card can offer the action that resolves the state.
+    // A diagnosable sign-out keeps its explanation: the generic hint would tell the
+    // user to sign in when the real fix is to replace a file. The PAT key rides
+    // along so this card can offer the action that resolves the state.
     return {
       status: 'signed-out',
       ...authStatus.reason === undefined ? {} : { reason: authStatus.reason },
@@ -162,36 +158,30 @@ export async function qoderWebStatus(deps: QoderStatusRouteOptions): Promise<Qod
     status: 'signed-in',
     ...authStatus.region === undefined ? {} : { region: authStatus.region },
     ...authStatus.pat === undefined ? {} : { pat: authStatus.pat },
-    // The saved-token list rides the same document: the card's account select
-    // is built from it, and it is redacted at the store (ids are hash
-    // prefixes, never tokens). An environment-only sign-in has no list.
+    // The saved-token list rides the same document: the card's account select is
+    // built from it, and it is redacted at the store. An environment-only sign-in
+    // has no list.
     ...authStatus.profiles === undefined ? {} : { patProfiles: authStatus.profiles },
     ...authStatus.activeId === undefined ? {} : { activePatId: authStatus.activeId },
-    // Both arms carry the key: a signed-in card needs it to clear the token,
-    // and omitting it here made that action unreachable.
+    // Both arms carry the key: a signed-in card needs it to clear the token.
     ...deps.authKey === undefined ? {} : { authKey: deps.authKey },
   }
-  // Model facts ride the signed-in document so the card can show rates,
-  // efforts, and context capacity without touching the Models picker. They are
-  // normalized here (not in the card) so both halves agree on one display
-  // form; the card additionally localizes it.
-  //
-  // The card receives *every* model, not just the interesting ones: context
-  // capacity is exactly the fact a user wants before picking a model.
+  // Model facts ride the signed-in document so the card can show rates, efforts,
+  // and context capacity without touching the Models picker. They are normalized
+  // here so both halves agree on one display form. Every model is sent, since
+  // context capacity matters before picking one.
   const models = deps.models()
   const modelsField: readonly QoderCatalogModelSnapshot[] = models.map(modelSnapshot)
-  // Catalog provenance rides the document even when the model list is empty:
-  // "no models" is precisely the case a user needs explained, and it is the
-  // only way to tell a hidden group from a failed fetch.
+  // Catalog provenance rides the document even when the model list is empty: "no
+  // models" is precisely the case a user needs explained.
   const catalog = deps.catalog?.()
   const withCatalog: QoderWebStatus = catalog === undefined ? status : { ...status, catalog }
   const statusWithModels: QoderWebStatus = modelsField.length > 0
     ? { ...withCatalog, models: modelsField }
     : withCatalog
-  // Probe state rides the signed-in document so the card can render the
-  // consent switches and results without a second request. The control key
-  // travels with it: this response already passed the loopback guard, and the
-  // key authorizes only probe control, never credentials or completions.
+  // Probe state rides the signed-in document so the card renders consent and results
+  // without a second request. The control key authorizes probe control only, never
+  // credentials or completions.
   const probed: QoderWebStatus = deps.probe === undefined
     ? statusWithModels
     : {
@@ -211,9 +201,8 @@ export async function qoderWebStatus(deps: QoderStatusRouteOptions): Promise<Qod
     : { ...withRefreshNotice, checkIn: checkInRecord }
   try {
     const credits = await deps.client.fetchCredits()
-    // `unlimited` and `cycleResetTime` ride along as-is: the card must see
-    // "no cap" as its own state, and the fetch only sets them when the
-    // upstream actually reported them.
+    // `unlimited` and `cycleResetTime` ride along as-is: "no cap" is its own state,
+    // and the fetch only sets them when the upstream reported them.
     return { ...withCheckIn, credits }
   } catch (error: unknown) {
     return { ...withCheckIn, creditsError: safeMessage(error) }

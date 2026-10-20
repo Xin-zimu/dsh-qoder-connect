@@ -226,9 +226,8 @@ test('validateAndTranslateMessages inlines user images as ordered OpenAI data UR
 })
 
 test('image requests pass the DSH >= 0.1.6-alpha.1 width/height/maxBytes target', async () => {
-  // Regression: the retired {maxPixels, maxBytes} policy fails validateTarget's
-  // checkedInteger(width) on the new host and surfaces as "could not prepare
-  // an image attachment" for every image.
+  // The host's target is width/height/maxBytes: the retired {maxPixels, maxBytes}
+  // policy fails validateTarget's checkedInteger(width) on every image.
   let seen: unknown
   const message = createUserMessage({
     content: [{ type: 'image', attachment: imageRef }],
@@ -400,11 +399,8 @@ test('buildQoderRequestBody accepts only advertised reasoning efforts', async ()
 })
 
 test('buildQoderRequestBody sends an effort the catalog does not declare', async () => {
-  // An undeclared row is not evidence that the value is unsupported: the
-  // upstream accepts spellings its catalog never lists. Refusing these locally
-  // misreported a working value, and it made every probe candidate — sentinel
-  // included — fail before the wire, so detection could only ever answer
-  // "validating" with no levels.
+  // An undeclared row is not evidence the value is unsupported: refusing these
+  // locally failed every probe candidate before the wire, so detection saw no levels.
   const options = {
     provider: 'qoder',
     model: 'qmodel',

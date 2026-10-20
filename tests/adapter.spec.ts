@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
-import { QODER_PROVIDER, createQoderAdapter, reasoningFields } from '../src/adapter.ts'
+import { QODER_PROVIDER, QODER_RETRY_MAX_DELAY_MS, createQoderAdapter, reasoningFields } from '../src/adapter.ts'
 import { QoderCredentialStore } from '../src/auth.ts'
 import { QoderCatalog, type QoderModelInfo } from '../src/catalog.ts'
 import type { QoderProbeRecord } from '../src/probe-store.ts'
@@ -291,9 +291,8 @@ describe('Qoder adapter retry-hint recovery', () => {
   })
 
   it('stamps the hint on the prepareCall stream, which is the path the harness uses', async () => {
-    // `PiAiAdapter.prepareCall()` returns `stream: () => this.streamWithSnapshot(...)`
-    // — it never calls `this.stream`, so overriding `stream` alone is dead code
-    // on every harness request. This exercises the wrapped `prepareCall`.
+    // `prepareCall()` returns `stream: () => this.streamWithSnapshot(...)`, so overriding
+    // `stream` alone is dead code — this exercises the wrapped `prepareCall`.
     const { adapter } = createQoderAdapter({
       catalog: new QoderCatalog([modelInfo()]),
       store: unusedStore(),
@@ -318,5 +317,30 @@ describe('Qoder adapter retry-hint recovery', () => {
     } finally {
       stub.mockRestore()
     }
+  })
+})
+
+/** A hint above `maxDelayMs` makes the host drop the retry, not wait. */
+describe('Qoder adapter retry policy', () => {
+  const QODER_MAX_OBSERVED_HINT_MS = 30_000
+
+  it('keeps maxDelayMs above every hint Qoder has been observed to send', () => {
+    const { adapter } = createQoderAdapter({
+      catalog: new QoderCatalog([modelInfo()]),
+      store: unusedStore(),
+      shim: fakeShim(),
+    })
+    const policy = adapter.providerRetryPolicy(QODER_PROVIDER)
+    expect(policy?.mode).toBe('normal')
+    if (policy?.mode !== 'normal') return
+    expect(policy.maxDelayMs).toBe(QODER_RETRY_MAX_DELAY_MS)
+    expect(QODER_RETRY_MAX_DELAY_MS).toBeGreaterThan(QODER_MAX_OBSERVED_HINT_MS)
+    // The host drops a hint larger than maxDelayMs; this is the predicate
+    // `dsh-llm-retry` applies before it waits.
+    expect(QODER_MAX_OBSERVED_HINT_MS <= policy.maxDelayMs).toBe(true)
+    // Local backoff is unchanged: the default five retries climb 500 → 8000ms.
+    expect(policy.initialDelayMs).toBe(500)
+    expect(policy.jitterRatio).toBe(0.1)
+    expect(policy.maxRetries).toBe(5)
   })
 })

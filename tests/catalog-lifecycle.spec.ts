@@ -13,17 +13,9 @@ import { normalizeQoderModels } from '../src/qoder/catalog.ts'
 import { modelInfoOf } from '../src/upstream.ts'
 
 /**
- * The plugin module, re-imported per case.
- *
- * `src/index.ts` keeps module-level per-identity records (`lastIdentities`,
- * `lastLiveFetchAt`) that exist so a restart of the SAME account — a 0.1.7
- * settings-write fiber reload — neither re-fetches what was just fetched nor
- * clears the records that account owns. Every case here boots a FRESH temp
- * root, so a previous case's recorded identity would otherwise read as an
- * account switch on the next boot: the saved catalog is deleted, probe
- * observations are cleared, and the roster falls back. Re-importing the module
- * gives each case a clean set of records while `auth`/`catalog`/`probe-store`
- * (stateless) stay on their static imports.
+ * The plugin module, re-imported per case: `src/index.ts` keeps module-level
+ * per-identity records, and every case boots a fresh temp root — which would
+ * otherwise read as an account switch. The stateless modules stay static.
  */
 let Qoder: typeof import('../src/index.ts')
 let QoderAuth: typeof import('../src/auth.ts')
@@ -31,20 +23,14 @@ let QoderAuth: typeof import('../src/auth.ts')
 /**
  * Catalog lifecycle: what happens across a credential change and a failed fetch.
  *
- * These use the real plugin `apply()` with a stubbed global fetch, because the
- * behaviour under test lives in the wiring rather than in any one module — the
- * credential sweep, the catalog gate, and the retry backoff all have to agree.
- *
- * The Qoder transport speaks its own three-step discovery dance — PAT exchange,
- * userinfo, model list — so the stub is a small router over those endpoints
- * rather than one canned envelope per call. Accounts are keyed by the PAT in
- * the exchanged body, then followed through the job token and the `Cosy-User`
- * header, which is what lets one roster answer for one account.
+ * These drive the real `apply()` with a stubbed fetch, because the behaviour
+ * lives in the wiring — credential sweep, catalog gate, retry backoff — rather
+ * than in any one module. The stub routes Qoder's three discovery hops (PAT
+ * exchange, userinfo, model list), keying accounts by the exchanged job token.
  */
 
 class MemorySettings extends SettingsProvider {
-  // 0.1.7 declares `writable` as an accessor on SettingsForms; overriding it
-  // with a plain field is a type error, so the stub keeps the same shape.
+  // `writable` is an accessor on SettingsForms; a plain field is a type error.
   override get writable(): boolean {
     return true
   }
@@ -130,11 +116,7 @@ function catalogEnvelopeMany(rows: readonly { id: string; name: string }[]): str
   })
 }
 
-/**
- * The row the live catalog actually serves for one envelope, computed through
- * the same translation the runtime uses — which is what makes a seeded probe
- * fingerprint match instead of merely resemble.
- */
+/** The row the live catalog serves for an envelope, via the runtime's own translation. */
 function liveRowOf(envelope: string) {
   return modelInfoOf(normalizeQoderModels(JSON.parse(envelope))[0]!)
 }
@@ -161,9 +143,9 @@ interface UpstreamState {
 }
 
 /**
- * A fetch stand-in for the Qoder endpoints: exchange → userinfo → model list,
- * account carried across the hops by the exchanged job token and the `Cosy-User`
- * signing header. Loopback URLs (the plugin's own routes) go to the real fetch.
+ * Fetch stand-in for Qoder's hops (exchange → userinfo → model list), the
+ * account carried by the job token and the `Cosy-User` header. Loopback URLs —
+ * the plugin's own routes — go to the real fetch.
  */
 function qoderFetch(state: UpstreamState): (url: string | URL, init?: RequestInit) => Promise<Response> {
   const realFetch = globalThis.fetch
@@ -215,12 +197,9 @@ function qoderFetch(state: UpstreamState): (url: string | URL, init?: RequestIni
 }
 
 /**
- * Stands in for the Host's webServer service so the plugin's REAL routes (as
- * wired by `apply()`, not re-mounted by hand) become callable from a test.
- *
- * The manual-refresh path the reviewer flagged lives inside `apply()`'s route
- * closures, so exercising it needs the actual handlers `apply()` registers —
- * which means the `webServer` inject has to fire. This service collects them.
+ * Stands in for the Host's webServer so the REAL routes wired by `apply()` (not
+ * re-mounted by hand) become callable: the refresh path lives inside those
+ * closures, so the `webServer` inject has to fire.
  */
 class FakeWebServer extends Service {
   /** Latest instance; the class is plugged per test. */
@@ -252,9 +231,8 @@ async function serve(routes: Map<string, (req: IncomingMessage, res: ServerRespo
 }
 
 async function boot(): Promise<Context> {
-  // Shorten the credential sweep so the lifecycle transitions are observable
-  // without waiting the production interval. The retry backoff is expressed in
-  // sweeps, so it scales down with it.
+  // Shorten the credential sweep so lifecycle transitions are observable; the
+  // retry backoff is expressed in sweeps and scales with it.
   vi.stubEnv('DSH_QODER_POLL_MS', '100')
   // Isolate the filesystem roots: the data dir is the plugin's own, and HOME /
   // USERPROFILE keep the transport's machine-id seed inside the temp root.
@@ -331,8 +309,7 @@ describe('catalog lifecycle', () => {
       expect((await ctx.llm.listModels('qoder')).map(model => model.id)).toContain('auto')
     }, { timeout: 10_000 })
 
-    // Without the retry this stayed on the fallback list until a manual
-    // refresh — a startup network blip should not require user action.
+    // Without the retry, a startup network blip needed a manual refresh to recover.
     await vi.waitFor(async () => {
       expect((await ctx.llm.listModels('qoder')).map(model => model.id)).toEqual(['recovered-model'])
     }, { timeout: 15_000 })
@@ -354,9 +331,7 @@ describe('catalog lifecycle', () => {
       expect((await ctx.llm.listModels('qoder')).map(model => model.id)).toEqual(['live-model'])
     }, { timeout: 10_000 })
     const afterFirst = lists
-    // Several sweeps' worth of time at the overridden 100ms interval passes
-    // while the reads below land; the invariant that matters is that a
-    // successful fetch is not repeated for the same identity.
+    // The invariant: a successful fetch is not repeated for the same identity.
     for (let index = 0; index < 5; index += 1) await ctx.llm.listModels('qoder')
     await new Promise(resolve => setTimeout(resolve, 600))
     expect(lists).toBe(afterFirst)
@@ -447,24 +422,16 @@ describe('catalog lifecycle', () => {
   }, 45_000)
 
   /**
-   * The reviewer's second finding: after switching to account B, a MANUAL
-   * refresh that fails left account A's catalog serving — under a "live" label,
-   * too, since a failed fetch never marks the source fallback, so even the
-   * sweep's retry would not have recovered it.
-   *
-   * This drives the real refresh route (mounted by apply() into the fake
-   * webServer) end to end: A's roster live, A's probe observation recorded,
-   * switch to B, refresh fails → A's models and A's observation must both be
-   * gone, fallback serving, source honestly 'fallback' with the error. Then the
-   * next refresh succeeds and B's roster lands.
+   * A failed manual refresh after switching accounts must not leave the previous
+   * account's catalog serving under a "live" label: its models and probe
+   * observation go, the source says 'fallback' with the error, and the next
+   * successful refresh serves the new account.
    */
   it('manual refresh after an account switch drops the old account data even when it fails', async () => {
     const { root, cnPath } = await useRoot()
     await writeFile(cnPath, credentialDocument(PAT_A))
 
-    // Seed a probe observation belonging to account A. The fingerprint must
-    // match the row the LIVE catalog serves (the fetch succeeds first here), so
-    // it is computed through the same normalize+translate the runtime uses.
+    // Seed account A's observation: the fingerprint must match the LIVE row, hence normalize+translate.
     const liveRowA = liveRowOf(catalogEnvelope('acct-a-model', 'acct-a-model'))
     await mkdir(join(root, 'state'), { recursive: true })
     await writeFile(join(root, 'state', Qoder.QODER_PROBE_FILENAME), JSON.stringify({
@@ -476,9 +443,7 @@ describe('catalog lifecycle', () => {
           efforts: ['low'],
           probedAtMs: Date.now(),
           pluginVersion: 'test',
-          // Observations are bound to the account that produced them; a record
-          // without this is refused by design, so this names account A's PAT
-          // identity (`pat:` + hashed hex).
+          // Observations are account-bound: `pat:` + hashed hex, or the record is refused.
           account: IDENTITY_A,
         },
       },
@@ -543,11 +508,9 @@ describe('catalog lifecycle', () => {
   }, 45_000)
 
   /**
-   * Saving a PAT is the first-run path: until the catalog lands, the card can
-   * only render the built-in roster. The save answer must therefore not arrive
-   * before the fetch it triggers — the card re-reads the status the moment that
-   * answer lands, and returning early left the user looking at the fallback
-   * list until a manual refresh or a later poll.
+   * The save answer must not arrive before the fetch it triggers: the card
+   * re-reads the status the moment it lands, so returning early shows the
+   * fallback list until a manual refresh or a later poll.
    */
   it('answers a PAT save only after the live catalog the card will read is in place', async () => {
     await useRoot()
@@ -558,11 +521,7 @@ describe('catalog lifecycle', () => {
       rosterFor: () => ({ id: 'fresh-model', name: 'Fresh Model' }),
       noteList: () => {},
     })
-    // A deliberately slow discovery call: without it the stub answers so fast
-    // that a save returning before its fetch still looks correct, because the
-    // fire-and-forget fetch lands during the HTTP round trip. The delay is what
-    // makes "the answer waited for the catalog" observable rather than timing
-    // luck.
+    // A deliberately slow discovery call, so "the answer waited for the catalog" is not timing luck.
     vi.stubGlobal('fetch', async (url: string | URL, init?: RequestInit) => {
       if (String(url).includes('/algo/api/v2/model/list')) {
         await new Promise(resolve => setTimeout(resolve, 400))
@@ -600,12 +559,7 @@ describe('catalog lifecycle', () => {
   }, 45_000)
 })
 
-/**
- * The saved catalog sits between a live fetch and the built-in roster in the
- * plan's degradation order (§4). Without it a restart always dropped the user
- * to the compiled-in snapshot, even when a good catalog had been fetched
- * moments earlier — which the plan and the README both promise not to happen.
- */
+/** The saved catalog: the middle rung between a live fetch and the built-in roster (§4). */
 describe('saved catalog', () => {
   it('restores the last successful catalog for the account on a restart with no network', async () => {
     const { root, cnPath } = await useRoot()
@@ -711,10 +665,7 @@ describe('identity changes during catalog loading', () => {
       noteList: () => {},
     }))
 
-    // Spy on the freshly imported module's class: `vi.resetModules()` (above)
-    // re-evaluates the plugin's module tree per case, so the prototype the
-    // running plugin uses is the one this import hands back, not the static
-    // reference the file header carries for its stateless helpers.
+    // Spy on the re-imported module's class: `resetModules()` re-evaluates the tree per case.
     const resolve = QoderAuth.QoderCredentialStore.prototype.resolve
     let switched = false
     vi.spyOn(QoderAuth.QoderCredentialStore.prototype, 'resolve').mockImplementation(async function (this: InstanceType<typeof QoderAuth.QoderCredentialStore>) {

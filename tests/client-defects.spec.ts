@@ -9,15 +9,10 @@ import { resetQuotaStatusForTesting } from '../src/client/quota-settings-store.t
 import { QODER_CN_CARD, QODER_GLOBAL_CARD } from '../src/client/QoderPluginCard.tsx'
 
 /**
- * Regression tests for the browser-half defect list, carried over from the
- * WorkBuddy era and re-pinned against the Qoder components. Each case names a
- * behaviour that was once broken and must never break again: unreadable bodies
- * never enter state, a failed read annotates the document instead of erasing
- * it, the poll parks only on a real sign-out, and the composer control reports
- * what the host knows rather than what the last click happened to see.
- *
- * Driven through react-test-renderer with an in-process fetch; no request
- * leaves the process.
+ * Regression tests for the browser-half defect list, re-pinned against the Qoder
+ * components: unreadable bodies never enter state, a failed read annotates the
+ * document instead of erasing it, the poll parks only on a real sign-out, and the
+ * composer control reports what the host knows. No request leaves the process.
  */
 
 const t = (key: keyof typeof en, params: Record<string, unknown> = {}): string =>
@@ -120,11 +115,9 @@ function doc(overrides: Record<string, unknown> = {}): Record<string, unknown> {
 let view: ReactTestRenderer | undefined
 
 /**
- * The shared status store is module state that outlives a test, and an
- * expanding card no longer re-reads a document that is still fresh — so each
- * test starts the clock well past the card's minute. A publish inside the
- * test then lands at the current time and stays fresh, which is what the
- * dedup assertions read.
+ * The shared status store outlives a test and a fresh document is not re-read,
+ * so each test starts the clock well past the card's minute; a publish then
+ * lands at the current time, which is what the dedup assertions read.
  */
 let clock = Date.parse('2024-05-01T00:00:00.000Z')
 
@@ -292,10 +285,9 @@ describe('QoderPluginCard', () => {
 
   describe('#6 no sequence guard on reads', () => {
     it('keeps the document whose read started last, even when it settles first', async () => {
-      // Read #1 (mount) settles; the manual refresh now sends its catalog POST
-      // first (index 1) and then read #2 (index 2), which is held; read #3
-      // (poll) settles first with a newer answer. Releasing #2 must not roll
-      // the card back to its older document.
+      // Read #1 (mount) settles; the manual refresh now sends its catalog POST first
+      // (index 1) and then read #2 (index 2), which is held; read #3 (poll) settles
+      // first with a newer answer, which must not be rolled back when #2 is released.
       plan = (_url, _init, index) => index === 2 ? { hang: true } : { ok: true, body: doc({
         credits: { total: index === 3 ? 7 : 77, accounts: [] },
       }) }
@@ -321,11 +313,7 @@ describe('QoderPluginCard', () => {
   })
 
   describe('#11 a failed write reports beside the document', () => {
-    /**
-     * Mount with the Global variant so the context-window preference write
-     * exists, and with a model that declares a larger alternative so the
-     * preference checkbox renders.
-     */
+    /** Global variant plus a model declaring a larger alternative: the preference checkbox renders. */
     async function mountGlobal(): Promise<void> {
       statusReply = { ok: true, body: doc({
         models: [{ id: 'm1', name: 'M1', contextWindow: 200_000, supportedContextWindows: [200_000, 1_000_000] }],

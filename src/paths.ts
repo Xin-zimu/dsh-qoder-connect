@@ -1,23 +1,11 @@
 /**
- * The plugin's data directory — the ONE place every file the plugin owns
- * lives.
+ * The plugin's data directory — the one place every file the plugin owns lives:
+ * `<profile>/.dsh-qoder-connect/state/` (PATs, catalogs, probe records,
+ * heartbeat, machine-id seed), so a profile never collects loose files.
  *
- * Layout: `<profile>/.dsh-qoder-connect/state/` (the profile discovered
- * the same way the credential store always did). Everything — PAT files,
- * saved catalogs, probe records, the host heartbeat, and the machine-id
- * seed — writes there, so a profile directory never collects loose
- * `.qoder-*` files and the whole plugin's footprint is one folder.
- *
- * Fallbacks, in order: `DSH_QODER_DATA_DIR` env override → the profile the host
- * reports as running → the discovered profile → the Harness home (a checkout
- * running its own tests, or a host loading the plugin from outside any profile).
- *
- * The host-reported profile outranks discovery because it is the running
- * profile rather than an inference about it; see {@link configurePluginPaths}.
- *
- * Split out of `auth.ts` so catalog/probe/heartbeat stores can import the
- * directory without pulling in the credential code (and its upstream
- * dependency) — these modules stay leaf-light on purpose.
+ * Resolution order: `DSH_QODER_DATA_DIR` → host-reported profile → discovered
+ * profile → Harness home. The host's report outranks discovery because it is the
+ * running profile, not an inference.
  *
  * @module dsh-qoder-connect/paths
  */
@@ -52,15 +40,8 @@ let diagnostics: PathsDiagnostics | undefined
 
 /**
  * Adopt the host's answer for which profile is running, before any path is
- * resolved.
- *
- * `dsh` provides a `profileContext` service (`{ name, dir, … }`) on the host
- * context of every profile it boots — the CLI launcher and the desktop
- * application both, from the same shared boot code — so `dir` is the directory
- * this process booted in, not a guess about it.
- *
- * Called on every `apply()`, which overwrites both fields: a reload arriving
- * without a profile context clears the previous answer instead of keeping it.
+ * resolved. Overwrites both fields, so a reload without a profile context clears
+ * the previous answer.
  *
  * @param host - the host's report.
  * @param host.profileDir - `profileContext.dir`, when the host has one.
@@ -90,12 +71,9 @@ function pluginPackageRoot(): string | undefined {
 /**
  * Whether a profile directory declares this plugin.
  *
- * Read from the profile's manifest rather than inferred from this module's own
- * location, because DSH installs a plugin into a profile by *link*: the manifest
- * carries `"dsh-qoder-connect": "link:/path/to/checkout"`, while Node
- * resolves the module to that real path, which lies outside `$DSH_HOME` entirely.
- * Walking up from the module would therefore miss the profile for exactly the
- * install shape a developer uses.
+ * Read from the profile's manifest rather than inferred from this module's path:
+ * DSH installs a plugin into a profile by *link*, and the real path lies outside
+ * `$DSH_HOME`, so walking up from the module would miss the profile.
  */
 function profileDeclaresPlugin(profileDir: string): boolean {
   try {
@@ -114,14 +92,9 @@ function profileDeclaresPlugin(profileDir: string): boolean {
 /**
  * Whether a profile's OWN `node_modules` is a link rather than a directory.
  *
- * This is the shape a residual directory takes when it was left behind by
- * copying another profile's manifest and pointing the whole tree at that
- * profile. A real install links the package (`node_modules/<name>`), not the
- * directory holding it, so this shape never identifies the running copy.
- *
- * An ABSENT `node_modules` is deliberately not this shape: a profile whose
- * packages resolve from the shared `profiles/node_modules` has none of its own,
- * and that profile may still be the one running.
+ * A whole-tree link is the shape of a residual profile, never a real install, so
+ * it must not claim the running package. An absent `node_modules` is not this
+ * shape: a profile resolving from the shared `profiles/node_modules` has none.
  */
 function profileNodeModulesIsLinked(profileDir: string): boolean {
   try {
@@ -134,16 +107,11 @@ function profileNodeModulesIsLinked(profileDir: string): boolean {
 }
 
 /**
- * Whether a profile's installed copy of this plugin resolves to this package.
- *
- * This is what separates two profiles that both declare the plugin — a `web` and
- * a `desktop` profile can each list it — so the data directory follows the
- * profile whose copy is actually running rather than the first one found.
+ * Whether a profile's installed copy of this plugin resolves to this package,
+ * so the data directory follows the profile actually running.
  *
  * A whole-tree link is rejected first (see {@link profileNodeModulesIsLinked}):
- * the realpath comparison cannot tell that shape apart from a real installation,
- * so a residual directory would claim this package just as convincingly as the
- * live copy.
+ * the realpath comparison cannot tell that shape apart from a real install.
  */
 function profileLinksToThisPackage(profileDir: string): boolean {
   const own = pluginPackageRoot()
@@ -161,17 +129,11 @@ function profileLinksToThisPackage(profileDir: string): boolean {
  * The profile directory this plugin belongs to, or undefined when none can be
  * determined.
  *
- * A single declaring profile is accepted without the link test, so a profile
- * whose packages resolve from the shared `profiles/node_modules` — which has no
- * copy of its own to compare — still resolves. A whole-tree link is refused even
- * then: that shape is a residual directory whatever else is true, and there is
- * nothing else it could be.
- *
- * With several declaring profiles only those whose copy resolves here are
- * eligible. Exactly one eligible candidate is an answer; two or more is a tie
- * broken by `readdirSync` order, which Node leaves undefined — so both that and
- * "nothing eligible" are reported, because either way the data directory is
- * about to leave the profile the user expects and nothing else would say so.
+ * A single declaring profile is accepted without the link test (it may resolve
+ * from the shared `profiles/node_modules`), but a whole-tree link is refused
+ * either way. With several declaring profiles, only those resolving here are
+ * eligible; a tie is broken by `readdirSync` order, which is undefined — so ties
+ * and "nothing eligible" both warn.
  */
 function discoverProfileDir(): string | undefined {
   const profilesRoot = join(resolveDshHome(), PROFILES_DIR_NAME)
@@ -223,10 +185,8 @@ function discoverProfileDir(): string | undefined {
 /**
  * The plugin's data directory: `<profile>/.dsh-qoder-connect`.
  *
- * Falls back to profile discovery, then to the Harness home when no profile can
- * be determined — a checkout running its own tests, or a host that loads the
- * plugin from outside a profile — so the plugin always has somewhere to write,
- * and `DSH_QODER_DATA_DIR` overrides either way.
+ * Falls back to profile discovery, then to the Harness home, so the plugin
+ * always has somewhere to write; `DSH_QODER_DATA_DIR` overrides either way.
  */
 export function qoderPluginDataDir(): string {
   const override = process.env[QODER_DATA_DIR_ENV]
@@ -246,10 +206,8 @@ export function qoderStateDir(): string {
 /**
  * The plugin-owned seed for the Qoder transport's machine id.
  *
- * The transport's `getMachineId(paths)` helper reads a list of trusted
- * locations and writes its created UUID into the last one; this is the
- * DSH-side location the host wires into that chain, so the identifier stays
- * inside the plugin's own folder instead of scattering files near `$HOME`.
+ * The transport reads trusted locations and writes its UUID into the last one;
+ * this keeps the identifier inside the plugin's own folder.
  */
 export function qoderMachineIdPath(): string {
   return join(qoderStateDir(), '.qoder-machine-id')
