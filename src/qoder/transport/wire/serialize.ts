@@ -23,7 +23,7 @@ function stableChatRecordId(
   model: string,
   messages: readonly QoderWireMessage[],
   tools: readonly QoderWireTool[],
-  maxTokens: number,
+  maxTokens: number | undefined,
 ): string {
   const hash = crypto.createHash('sha256')
   hash.update('qoder-record')
@@ -34,7 +34,7 @@ function stableChatRecordId(
   hash.update('\0')
   hash.update(JSON.stringify(tools))
   hash.update('\0')
-  hash.update(`mt=${maxTokens}`)
+  hash.update(`mt=${maxTokens ?? 'none'}`)
   return hash.digest('hex').slice(0, 16)
 }
 
@@ -107,8 +107,11 @@ export async function buildQoderRequestBody(
   }
   const modelKey = options.model || 'cmodel'
   const messages = translatedMessages ?? await validateQoderRequest(options, model, attachments)
-  const modelMaxTokens = model?.maxTokens ?? 32_768
-  const maxTokens = Math.min(options.maxTokens ?? modelMaxTokens, modelMaxTokens)
+  // Only a declared cap or an explicit caller request becomes a wire limit.
+  const declaredMaxTokens = model?.maxTokensDeclared === true ? model.maxTokens : undefined
+  const maxTokens = declaredMaxTokens === undefined
+    ? options.maxTokens
+    : Math.min(options.maxTokens ?? declaredMaxTokens, declaredMaxTokens)
   const isReasoning = options.reasoningEffort !== undefined || (model?.isReasoning ?? false)
   const tools = translateTools(options.tools)
   // Ambiguous defaults stay in discovery metadata, but must not select a request tier.
@@ -169,7 +172,7 @@ export async function buildQoderRequestBody(
     messages,
     tools,
     parameters: {
-      max_tokens: maxTokens,
+      ...maxTokens === undefined ? {} : { max_tokens: maxTokens },
       ...options.reasoningEffort === undefined
         ? {}
         : { reasoning_effort: String(options.reasoningEffort) },
@@ -188,7 +191,7 @@ export async function buildQoderRequestBody(
     model_config: {
       key: modelKey,
       is_reasoning: isReasoning,
-      max_output_tokens: maxTokens,
+      ...maxTokens === undefined ? {} : { max_output_tokens: maxTokens },
       source: model?.source || 'system',
       ...contextConfig === undefined ? {} : { context_config: contextConfig },
     },

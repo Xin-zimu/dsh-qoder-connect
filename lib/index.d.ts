@@ -542,8 +542,10 @@ interface QoderModelInfo {
   defaultContextWindow?: number;
   /** Selectable window sizes the upstream declares, ascending. */
   supportedContextWindows?: readonly number[];
-  /** Per-request output cap. */
-  maxTokens: number;
+  /** Output cap the provider declared; absent when it declares none. */
+  maxTokens?: number;
+  /** True only when the provider declared that cap, rather than this plugin's reserve. */
+  maxTokensDeclared?: boolean;
   /** Whether the model accepts image input. */
   supportsImages: boolean;
   /** Reasoning metadata; absent means the upstream declared none. */
@@ -699,7 +701,10 @@ interface QoderCatalogModel {
   contextWindow?: number;
   /** Largest known capacity, independent of the effective input budget. */
   maxContextWindow?: number;
+  /** Output budget hint for the harness; may be the built-in reserve, not a provider limit. */
   maxTokens?: number;
+  /** True only when the provider declared `max_output_tokens`. */
+  maxTokensDeclared?: boolean;
   source?: string;
   isReasoning?: boolean;
   supportsEffort?: boolean;

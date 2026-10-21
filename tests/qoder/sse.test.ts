@@ -151,10 +151,11 @@ test('parseQoderSse accepts a reasoning-only response', async () => {
   assert.equal((chunks.at(-1) as { reason: { kind: string } }).reason.kind, 'stop')
 })
 
-test('parseQoderSse rejects malformed tool calls and unknown finish reasons', async () => {
+test('parseQoderSse rejects unidentifiable tool calls and unknown finish reasons', async () => {
   const invalidStreams = [
     [
-      data({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-bad', function: { name: 'bad', arguments: '{' } }] } }] }),
+      // No id and no name: nothing could execute this call.
+      data({ choices: [{ delta: { tool_calls: [{ index: 0, function: { name: 'bad', arguments: '{}' } }] } }] }),
       done,
     ],
     [data({ choices: [{ delta: { content: 'blocked' }, finish_reason: 'new_reason' }] }), done],
@@ -164,6 +165,160 @@ test('parseQoderSse rejects malformed tool calls and unknown finish reasons', as
       for await (const _chunk of parseQoderSse(streamOf(lines))) continue
     }, (error: Error) => error instanceof QoderLlmError && error.code === 'MALFORMED_RESPONSE')
   }
+})
+
+test('parseQoderSse hands unparsable arguments to the harness instead of ending the turn', async () => {
+  // A length-capped call whose arguments never closed is truncation, not corruption: the
+  // harness keeps the raw text and answers the model, so the turn lives.
+  const chunks: { type: string; [key: string]: unknown }[] = []
+  for await (const chunk of parseQoderSse(streamOf([
+    data({ choices: [{ delta: { tool_calls: [
+      { index: 0, id: 'call-bad', function: { name: 'bad', arguments: '{' } },
+    ] } }] }),
+    data({ choices: [{ delta: {}, finish_reason: 'length' }] }),
+    done,
+  ]))) chunks.push(chunk as { type: string })
+
+  assert.deepEqual(chunks.map(chunk => chunk.type), [
+    'block-start', 'tool-call-delta', 'block-end', 'finish',
+  ])
+  assert.equal((chunks.at(-1) as { reason: { kind: string } }).reason.kind, 'tool-calls')
+  const blockEnd = chunks.find(chunk => chunk.type === 'block-end') as {
+    block: { name: string; arguments: string }
+  }
+  assert.equal(blockEnd.block.name, 'bad')
+  assert.equal(blockEnd.block.arguments, '{')
+})
+
+test('parseQoderSse survives a torn tail after a complete argument object, and reports it', async () => {
+  // Captured from the live upstream for #21 (raw-before.txt): the call's arguments close as a
+  // valid object, then the provider appends one more fragment under the same index - and a
+  // frame carries it as a second entry rather than a new index - while the terminal reason is
+  // `tool_calls`, not `length`.
+  const diagnostics: string[] = []
+  const chunks: { type: string; [key: string]: unknown }[] = []
+  for await (const chunk of parseQoderSse(streamOf([
+    data({ choices: [{ delta: {
+      content: '', role: 'assistant',
+      tool_calls: [{ function: { arguments: '', name: 'emit_report' }, id: 'call_1a3624ed1c5e4f3aad8cb48b', index: 0, type: 'function' }],
+    } }] }),
+    data({ choices: [{ delta: { tool_calls: [{ function: { arguments: '{"summary":"report' }, id: '', index: 0, type: 'function' }] } }] }),
+    data({ choices: [{ delta: { tool_calls: [
+      { function: { arguments: '"}' }, id: '', index: 0, type: 'function' },
+      { function: { arguments: '在' }, id: '', index: 0, type: 'function' },
+    ] } }] }),
+    data({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] }),
+    done,
+  ]), { onDiag: message => diagnostics.push(message) })) chunks.push(chunk as { type: string })
+
+  const blockEnd = chunks.find(chunk => chunk.type === 'block-end') as {
+    block: { type: string; name: string; arguments: string }
+  }
+  assert.equal(blockEnd.block.name, 'emit_report')
+  // The block carries what upstream sent. The shim forwards deltas only, so the
+  // adapter layer (not this one) rebuilds the call from the delta stream.
+  assert.equal(blockEnd.block.arguments, '{"summary":"report"}在')
+  assert.equal((chunks.at(-1) as { reason: { kind: string } }).reason.kind, 'tool-calls')
+  assert.equal(diagnostics.length, 1)
+  assert.match(diagnostics[0]!, /damaged arguments \(closed at 20 chars, 1-char tail\)/u)
+})
+
+test('parseQoderSse answers a never-closed argument object as a tool error, not a dead turn', async () => {
+  // Third live shape for #21: the arguments stop mid-string and the provider still claims
+  // `tool_calls`. The bytes began as JSON, so the harness gets the call and reports it.
+  const diagnostics: string[] = []
+  const chunks: { type: string; [key: string]: unknown }[] = []
+  for await (const chunk of parseQoderSse(streamOf([
+    data({ choices: [{ delta: { tool_calls: [
+      { index: 0, id: 'call-open', function: { name: 'emit_report', arguments: '{"summary":"a long' } },
+    ] } }] }),
+    data({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] }),
+    done,
+  ]), { onDiag: message => diagnostics.push(message) })) chunks.push(chunk as { type: string })
+
+  assert.equal((chunks.at(-1) as { reason: { kind: string } }).reason.kind, 'tool-calls')
+  const blockEnd = chunks.find(chunk => chunk.type === 'block-end') as { block: { arguments: string } }
+  assert.equal(blockEnd.block.arguments, '{"summary":"a long')
+  assert.match(diagnostics[0]!, /never closed/u)
+})
+
+test('parseQoderSse keeps a payload that never claimed to be JSON fatal', async () => {
+  // Not a damaged attempt: a tool call whose arguments are prose means the stream itself is
+  // wrong, and that stays loud.
+  for (const args of ['not json at all', '}', '```json\n{}\n```']) {
+    await assert.rejects(async () => {
+      for await (const _chunk of parseQoderSse(streamOf([
+        data({ choices: [{ delta: { tool_calls: [
+          { index: 0, id: 'call-foreign', function: { name: 'emit_report', arguments: args } },
+        ] } }] }),
+        done,
+      ]))) continue
+    }, (error: Error) => error instanceof QoderLlmError && error.code === 'MALFORMED_RESPONSE')
+  }
+})
+
+test('parseQoderSse hands a truncated tool call to the harness instead of ending the turn', async () => {
+  // pi-ai turns unfinishable arguments into `{}` plus a tool error, so the call must be
+  // emitted rather than thrown.
+  const chunks: { type: string; [key: string]: unknown }[] = []
+  for await (const chunk of parseQoderSse(streamOf([
+    data({ choices: [{ delta: { tool_calls: [
+      { index: 0, id: 'call-cmp', function: { name: 'compress', arguments: '{"summary":"' } },
+    ] } }] }),
+    data({ choices: [{ delta: { tool_calls: [
+      { index: 0, function: { arguments: 'long summary that never closes' } },
+    ] }, finish_reason: 'length' }] }),
+    done,
+  ]))) chunks.push(chunk as { type: string })
+
+  // The call survives so the harness can report the tool error back to the model.
+  assert.deepEqual(chunks.map(chunk => chunk.type), [
+    'block-start', 'tool-call-delta', 'tool-call-delta', 'block-end', 'finish',
+  ])
+  assert.equal((chunks.at(-1) as { reason: { kind: string } }).reason.kind, 'tool-calls')
+  const blockEnd = chunks.find(chunk => chunk.type === 'block-end') as {
+    block: { type: string; name: string; arguments: string }
+  }
+  assert.equal(blockEnd.block.name, 'compress')
+  assert.throws(() => JSON.parse(blockEnd.block.arguments))
+})
+
+test('parseQoderSse ends a truncated call with no identifying fields without an error', async () => {
+  // A nameless call cannot be executed: it is dropped and the turn ends as `max-tokens`.
+  const chunks: { type: string; [key: string]: unknown }[] = []
+  for await (const chunk of parseQoderSse(streamOf([
+    data({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '{"sum' } }] } }] }),
+    data({ choices: [{ delta: {}, finish_reason: 'length' }] }),
+    done,
+  ]))) chunks.push(chunk as { type: string })
+
+  assert.equal((chunks.at(-1) as { reason: { kind: string } }).reason.kind, 'max-tokens')
+  assert.equal(chunks.some(chunk => chunk.type === 'block-end'), false)
+
+  // Without the cap, an unnamed tool call is still provider corruption.
+  await assert.rejects(async () => {
+    for await (const _chunk of parseQoderSse(streamOf([
+      data({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '{}' } }] } }] }),
+      done,
+    ]))) continue
+  }, (error: Error) => (
+    error instanceof QoderLlmError && error.code === 'MALFORMED_RESPONSE'
+  ))
+})
+
+test('parseQoderSse keeps rejecting a truncated-stream EOF as a transport failure', async () => {
+  // A stream that never reached [DONE] stays a retryable transport fault.
+  await assert.rejects(async () => {
+    for await (const _chunk of parseQoderSse(streamOf([
+      data({ choices: [{ delta: { content: 'partial' }, finish_reason: 'stop' }] }),
+    ]))) continue
+  }, (error: Error) => {
+    assert.ok(error instanceof QoderLlmError)
+    assert.equal(error.code, 'TRANSPORT')
+    assert.match(error.message, /stream ended without/u)
+    assert.doesNotMatch(error.message, /\d/u)
+    return true
+  })
 })
 
 test('parseQoderSse accepts a final frame without a trailing newline', async () => {

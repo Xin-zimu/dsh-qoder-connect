@@ -482,7 +482,6 @@ describe('#8 fallback catalog identity', () => {
     for (const model of FALLBACK_QODER_MODELS) {
       expect(model.name.length).toBeGreaterThan(0)
       expect(model.contextWindow).toBeGreaterThan(0)
-      expect(model.maxTokens).toBeGreaterThan(0)
     }
     // The routes both cards call match the compiled-in roster's ids exactly —
     // a model id in the card but not the roster would 400 on the first chat.

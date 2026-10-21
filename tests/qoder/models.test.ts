@@ -68,7 +68,7 @@ test('context defaults and fallback capacities stay separate from maximum capaci
   }
   const [fallback] = normalizeQoderModels({ assistant: [{ key: 'model', enable: true }] })
   assert.equal(fallback!.contextWindow, 180_000)
-  assert.equal(fallback!.maxTokens, 32_768)
+  assert.equal(fallback!.maxTokens, undefined)
 })
 
 test('thinking state follows a unique explicit default and otherwise the reasoning flag', () => {
@@ -143,6 +143,7 @@ test('normalizeQoderModels keeps enabled unique models and their transport metad
     contextWindow: 100_000,
     maxContextWindow: 400_000,
     maxTokens: 16_384,
+    maxTokensDeclared: true,
     source: 'premium',
     isReasoning: true,
     supportsEffort: true,
@@ -180,7 +181,8 @@ test('mergeQoderDiscoveryMetadata restores effort and rate data stripped by gene
     name: 'Chosen name',
     contextWindow: 100_000,
     maxContextWindow: 400_000,
-    maxTokens: 8_192,
+    maxTokens: 16_384,
+    maxTokensDeclared: true,
     source: 'premium',
     isReasoning: true,
     supportsEffort: true,

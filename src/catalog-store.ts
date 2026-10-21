@@ -44,7 +44,7 @@ function isModel(value: unknown): value is QoderModelInfo {
   return typeof row['id'] === 'string' && row['id'] !== ''
     && typeof row['name'] === 'string'
     && typeof row['contextWindow'] === 'number' && Number.isFinite(row['contextWindow'])
-    && typeof row['maxTokens'] === 'number' && Number.isFinite(row['maxTokens'])
+    && (row['maxTokens'] === undefined || (typeof row['maxTokens'] === 'number' && Number.isFinite(row['maxTokens'])))
     && typeof row['supportsImages'] === 'boolean'
 }
 

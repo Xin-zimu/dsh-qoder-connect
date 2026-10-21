@@ -197,7 +197,9 @@ function toPiModel(info: QoderModelInfo, baseUrl: string, observed?: QoderProbeR
     ...reasoningFields(info, observed),
     cost: NO_COST,
     contextWindow: info.contextWindow,
-    maxTokens: info.maxTokens,
+    // Reporting a reserve makes the harness inject it as every request's maxTokens, so
+    // only a provider-declared cap may be advertised.
+    ...info.maxTokensDeclared === true && info.maxTokens !== undefined ? { maxTokens: info.maxTokens } : {},
     // pi-ai cannot infer the shim's field spelling from a random loopback
     // URL, so name the upstream-required field explicitly.
     compat: { maxTokensField: 'max_tokens' },
@@ -291,6 +293,47 @@ export function createQoderAdapter(options: QoderAdapterOptions): QoderAdapter {
 }
 
 /**
+ * Keep a damaged tool call from executing with truncated arguments.
+ *
+ * pi-ai parses unparsable arguments as `{}` (the real text survives only in
+ * `argumentsError`, which this layer never receives), so a tool with optional fields
+ * would happily execute an empty or truncated payload. The raw bytes survive on the
+ * `tool-call-delta` stream, and `dsh-llm`'s `BlockAssembler` prefers the `block-end`
+ * block, so re-emitting the damaged text here makes the harness reject the call as
+ * invalid arguments and the model re-emits it. Complete calls are untouched.
+ *
+ * @internal Exported for tests; the adapter wrappers are the only callers.
+ */
+export async function* rejectDamagedToolArguments(inner: AsyncIterable<StreamChunk>): AsyncGenerator<StreamChunk> {
+  const accumulated = new Map<number, string>()
+  for await (const chunk of inner) {
+    if (chunk.type === 'tool-call-delta') {
+      accumulated.set(chunk.index, (accumulated.get(chunk.index) ?? '') + chunk.argumentsDelta)
+      yield chunk
+      continue
+    }
+    if (chunk.type === 'block-end' && chunk.block.type === 'tool-call') {
+      const raw = accumulated.get(chunk.index)
+      if (raw !== undefined && !isJsonObjectText(raw)) {
+        yield { ...chunk, block: { ...chunk.block, arguments: raw } }
+        continue
+      }
+    }
+    yield chunk
+  }
+}
+
+/** Whether the text parses as a JSON object, the only shape a tool call may carry. */
+function isJsonObjectText(text: string): boolean {
+  try {
+    const value: unknown = JSON.parse(text)
+    return typeof value === 'object' && value !== null && !Array.isArray(value)
+  } catch {
+    return false
+  }
+}
+
+/**
  * The Qoder variant route's adapter: `PiAiAdapter` with the billing rate folded
  * into the catalog answers it returns to the DSH model pickers.
  *
@@ -338,7 +381,7 @@ class QoderPiAiAdapter extends PiAiAdapter {
    */
   override async *stream(options: GenerateOptions): AsyncGenerator<StreamChunk> {
     this.reportSession(options)
-    yield* this.withRetryHint(super.stream(options))
+    yield* rejectDamagedToolArguments(this.withRetryHint(super.stream(options)))
   }
 
   override async prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<PreparedAdapterCall> {
@@ -349,7 +392,7 @@ class QoderPiAiAdapter extends PiAiAdapter {
       // be reported here too.
       stream: (options: GenerateOptions) => {
         this.reportSession(options)
-        return this.withRetryHint(prepared.stream(options))
+        return rejectDamagedToolArguments(this.withRetryHint(prepared.stream(options)))
       },
     }
   }

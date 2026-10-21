@@ -16,6 +16,8 @@ export const defaultMaxSseBufferChars = 2 * 1024 * 1024
 export interface QoderSseOptions {
   onActivity?: () => void
   maxBufferChars?: number
+  /** One-line diagnostic sink; reports a tolerated damaged tool-call argument block. */
+  onDiag?: (message: string) => void
 }
 
 interface TextualBlockState {
@@ -36,6 +38,78 @@ type SuccessfulFinishKind = 'stop' | 'tool-calls' | 'max-tokens'
 
 function malformed(message: string): QoderLlmError {
   return new QoderLlmError(message, 'MALFORMED_RESPONSE')
+}
+
+/** What a completed tool call's argument text amounts to. */
+type QoderArgumentShape =
+  | { kind: 'complete' }
+  /** Began as JSON and did not survive: a closed object plus a tail, or no close at all. */
+  | { kind: 'damaged'; detail: string }
+  /** Never looked like JSON: nothing to answer, so the stream is corrupt. */
+  | { kind: 'foreign' }
+
+function isJsonObject(text: string): boolean {
+  let value: unknown
+  try {
+    value = JSON.parse(text)
+  } catch {
+    return false
+  }
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Index just past the first complete JSON value, or undefined when none closed. */
+function closedValueEnd(text: string): number | undefined {
+  let depth = 0
+  let inString = false
+  let escaped = false
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]
+    if (escaped) {
+      escaped = false
+      continue
+    }
+    if (char === '\\') {
+      escaped = true
+      continue
+    }
+    if (inString) {
+      if (char === '"') inString = false
+      continue
+    }
+    if (char === '"') {
+      inString = true
+      continue
+    }
+    if (char === '{' || char === '[') depth += 1
+    else if (char === '}' || char === ']') {
+      depth -= 1
+      if (depth < 0) return undefined
+      if (depth === 0) return index + 1
+    }
+  }
+  return undefined
+}
+
+/**
+ * Classify one call's arguments.
+ *
+ * The upstream has shipped three damaged shapes for #21 across live runs - a closed
+ * object plus a 1-char tail, the same plus a 5-char tail, and one that never closed -
+ * all with `finish_reason: tool_calls`, so the shape cannot decide whether a turn
+ * dies. What can: whether the bytes ever claimed to be JSON. A damaged JSON attempt
+ * is answered as a tool-input error (with a diagnostic); a payload that is not JSON
+ * at all is still provider corruption.
+ */
+function classifyArguments(text: string): QoderArgumentShape {
+  if (isJsonObject(text)) return { kind: 'complete' }
+  const first = text.trimStart()[0]
+  if (first !== '{' && first !== '[') return { kind: 'foreign' }
+  const end = closedValueEnd(text)
+  if (end === undefined) return { kind: 'damaged', detail: `${text.length} chars, never closed` }
+  const head = text.slice(0, end)
+  if (!isJsonObject(head)) return { kind: 'foreign' }
+  return { kind: 'damaged', detail: `closed at ${end} chars, ${text.length - end}-char tail` }
 }
 
 function parseEnvelope(rawData: string): QoderSseEnvelope {
@@ -314,19 +388,34 @@ export async function* parseQoderSse(
     reader.releaseLock()
   }
 
-  if (!sawDone) throw new QoderLlmError('SSE stream ended prematurely without [DONE].', 'TRANSPORT')
+  // Load-bearing wording: pi-ai reclassifies failures from this text, and TRANSPORT
+  // requires the exact "stream ended without" phrase with no status digits.
+  if (!sawDone) throw new QoderLlmError('Qoder SSE stream ended without [DONE].', 'TRANSPORT')
 
   for (const segment of thinkingParser.finish()) {
     for (const chunk of appendSegment(segment)) yield chunk
   }
   for (const chunk of closeTextual()) yield chunk
 
+  // An unidentifiable call cannot be executed at all, so it stays provider corruption unless
+  // the provider already admitted it ran out of output. Arguments are judged by whether they
+  // ever claimed to be JSON: a damaged attempt (#21) reaches the harness as a tool-input error
+  // and is reported here, while a payload that is not JSON at all stays fatal.
+  const truncated = terminalKind === 'max-tokens'
+  let emittedCalls = 0
   for (const [, state] of [...toolCalls.entries()].sort(([left], [right]) => left - right)) {
-    if (!state.id || !state.name) throw malformed('Qoder completed an unidentifiable tool call.')
     const normalizedArguments = state.arguments.trim() ? state.arguments : '{}'
-    try {
-      JSON.parse(normalizedArguments)
-    } catch {
+    if (!state.id || !state.name) {
+      if (truncated) continue
+      throw malformed('Qoder completed an unidentifiable tool call.')
+    }
+    const shape = classifyArguments(normalizedArguments)
+    if (shape.kind === 'damaged') {
+      // The block carries the bytes upstream sent; only deltas cross the shim, so pi-ai still
+      // answers this as a tool-input error. The point is that the turn survives - and that the
+      // shape is visible instead of silent.
+      options.onDiag?.(`tool call "${state.name}" carried damaged arguments (${shape.detail})`)
+    } else if (shape.kind === 'foreign' && !truncated) {
       throw malformed(`Qoder completed tool call "${state.name}" with malformed JSON arguments.`)
     }
     for (const chunk of openToolCall(state)) yield chunk
@@ -340,6 +429,7 @@ export async function* parseQoderSse(
         argumentsDelta: '{}',
       }
     }
+    emittedCalls += 1
     yield {
       type: 'block-end',
       index: state.blockIndex,
@@ -353,7 +443,7 @@ export async function* parseQoderSse(
   }
 
   if (pendingUsage) yield { type: 'usage', usage: pendingUsage }
-  if (!sawContent) {
+  if (!sawContent && !truncated) {
     yield {
       type: 'finish',
       reason: {
@@ -363,5 +453,5 @@ export async function* parseQoderSse(
     }
     return
   }
-  yield { type: 'finish', reason: { kind: toolCalls.size > 0 ? 'tool-calls' : terminalKind } }
+  yield { type: 'finish', reason: { kind: emittedCalls > 0 ? 'tool-calls' : terminalKind } }
 }

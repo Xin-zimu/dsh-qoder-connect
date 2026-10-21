@@ -1024,16 +1024,14 @@ export function modelInfoOf(model: QoderCatalogModel): QoderModelInfo {
       ? { defaultContextWindow: defaultOptions[0].tokenCount }
       : {},
     ...supportedContextWindows.length > 1 ? { supportedContextWindows } : {},
-    maxTokens: model.maxTokens ?? DEFAULT_MAX_TOKENS,
+    ...model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens },
+    ...model.maxTokensDeclared === true ? { maxTokensDeclared: true } : {},
     supportsImages: model.supportsImages === true,
     ...reasoning === undefined ? {} : { reasoning },
     billing,
     ...model.source === undefined ? {} : { source: model.source },
   }
 }
-
-/** The transport's own output cap for rows that declare none. */
-const DEFAULT_MAX_TOKENS = 32_768
 
 /** A conservative input budget for rows that declare none. */
 const DEFAULT_CONTEXT_WINDOW = 180_000

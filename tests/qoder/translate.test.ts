@@ -315,6 +315,7 @@ test('buildQoderRequestBody applies discovered Qoder transport metadata', async 
     id: 'reasoner',
     name: 'Reasoner',
     maxTokens: 16_000,
+    maxTokensDeclared: true,
     source: 'premium',
     isReasoning: true,
     contextOptions: { long: { tokenCount: 400_000, isDefault: true } },
@@ -326,6 +327,37 @@ test('buildQoderRequestBody applies discovered Qoder transport metadata', async 
     long: { token_count: 400_000, is_default: true },
   })
   assert.equal(body.chat_context.extra.modelConfig.is_reasoning, true)
+})
+
+test('buildQoderRequestBody omits the output cap when neither side asks for one', async () => {
+  const options = {
+    provider: 'qoder-official',
+    model: 'dfmodel',
+    messages: [createUserMessage({ content: [{ type: 'text', text: 'Ping' }], source: { kind: 'user' } })],
+  } as GenerateOptions
+  const body = await buildQoderRequestBody(options, 'user-42', undefined, {
+    id: 'dfmodel',
+    name: 'dfmodel',
+    maxTokens: 32_768,
+  })
+  assert.equal('max_tokens' in body.parameters, false)
+  assert.equal('max_output_tokens' in body.model_config, false)
+})
+
+test('buildQoderRequestBody forwards an undeclared model\'s caller cap without clamping', async () => {
+  const options = {
+    provider: 'qoder-official',
+    model: 'dfmodel',
+    messages: [createUserMessage({ content: [{ type: 'text', text: 'Ping' }], source: { kind: 'user' } })],
+    maxTokens: 65_536,
+  } as GenerateOptions
+  const body = await buildQoderRequestBody(options, 'user-42', undefined, {
+    id: 'dfmodel',
+    name: 'dfmodel',
+    maxTokens: 32_768,
+  })
+  assert.equal(body.parameters.max_tokens, 65_536)
+  assert.equal(body.model_config.max_output_tokens, 65_536)
 })
 
 test('buildQoderRequestBody sends DSH tool declarations', async () => {

@@ -691,9 +691,10 @@ describe('fetchModels: QoderCatalogModel -> QoderModelInfo', () => {
     expect(models[0]).toMatchObject({ billing: { credits: 'x1.6', free: false }, supportsImages: true })
     expect(models[1]).toMatchObject({ billing: { credits: 'x0', free: true }, supportsImages: false })
     expect(models[2]).toMatchObject({ billing: { free: false, rateUnknown: true } })
-    // Defaults: no declared capacity falls to the conservative window; no
-    // declared output cap falls to the transport's own; an empty name is the id.
-    expect(models[2]).toMatchObject({ contextWindow: 180_000, maxTokens: 32_768, name: 'Newcomer' })
+    // Defaults: no declared capacity falls to the conservative window; an undeclared
+    // output cap stays absent; an empty name is the id.
+    expect(models[2]).toMatchObject({ contextWindow: 180_000, name: 'Newcomer' })
+    expect(models[2]!.maxTokens).toBeUndefined()
     expect(models[0]!.source).toBe('system')
     expect(client.lastCatalog).toMatchObject({ source: 'qoder:discovery' })
   })

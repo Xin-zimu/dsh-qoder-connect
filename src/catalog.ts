@@ -16,8 +16,10 @@ export interface QoderModelInfo {
   defaultContextWindow?: number
   /** Selectable window sizes the upstream declares, ascending. */
   supportedContextWindows?: readonly number[]
-  /** Per-request output cap. */
-  maxTokens: number
+  /** Output cap the provider declared; absent when it declares none. */
+  maxTokens?: number
+  /** True only when the provider declared that cap, rather than this plugin's reserve. */
+  maxTokensDeclared?: boolean
   /** Whether the model accepts image input. */
   supportsImages: boolean
   /** Reasoning metadata; absent means the upstream declared none. */
@@ -57,12 +59,12 @@ export interface QoderModelBilling {
  * and rate metadata are absent because the defaults declare none.
  */
 export const FALLBACK_QODER_MODELS: readonly QoderModelInfo[] = [
-  { id: 'cmodel', name: 'Cantus (Qoder)', contextWindow: 1_000_000, maxTokens: 32_768, supportsImages: true, billing: { free: false, rateUnknown: true }, source: 'system' },
-  { id: 'auto', name: 'Qoder Auto', contextWindow: 180_000, maxTokens: 32_768, supportsImages: true, billing: { free: false, rateUnknown: true }, source: 'system' },
-  { id: 'ultimate', name: 'Qoder Ultimate', contextWindow: 1_000_000, maxTokens: 32_768, supportsImages: true, billing: { free: false, rateUnknown: true }, source: 'system' },
-  { id: 'performance', name: 'Qoder Performance', contextWindow: 1_000_000, maxTokens: 32_768, supportsImages: true, billing: { free: false, rateUnknown: true }, source: 'system' },
-  { id: 'efficient', name: 'Qoder Efficient', contextWindow: 180_000, maxTokens: 32_768, supportsImages: true, billing: { free: false, rateUnknown: true }, source: 'system' },
-  { id: 'lite', name: 'Qoder Lite', contextWindow: 180_000, maxTokens: 32_768, supportsImages: false, billing: { free: false, rateUnknown: true }, source: 'system' },
+  { id: 'cmodel', name: 'Cantus (Qoder)', contextWindow: 1_000_000, supportsImages: true, billing: { free: false, rateUnknown: true }, source: 'system' },
+  { id: 'auto', name: 'Qoder Auto', contextWindow: 180_000, supportsImages: true, billing: { free: false, rateUnknown: true }, source: 'system' },
+  { id: 'ultimate', name: 'Qoder Ultimate', contextWindow: 1_000_000, supportsImages: true, billing: { free: false, rateUnknown: true }, source: 'system' },
+  { id: 'performance', name: 'Qoder Performance', contextWindow: 1_000_000, supportsImages: true, billing: { free: false, rateUnknown: true }, source: 'system' },
+  { id: 'efficient', name: 'Qoder Efficient', contextWindow: 180_000, supportsImages: true, billing: { free: false, rateUnknown: true }, source: 'system' },
+  { id: 'lite', name: 'Qoder Lite', contextWindow: 180_000, supportsImages: false, billing: { free: false, rateUnknown: true }, source: 'system' },
 ]
 
 /**

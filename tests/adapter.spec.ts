@@ -83,7 +83,20 @@ describe('Qoder adapter model descriptors', () => {
     expect(descriptor?.baseUrl).toBe('http://127.0.0.1:40001/v1')
     expect(descriptor?.provider).toBe('qoder')
     expect(descriptor?.contextWindow).toBe(1_000)
-    expect(descriptor?.maxTokens).toBe(128_000)
+    // An undeclared reserve must not be advertised: the harness would inject it as every
+    // request's maxTokens.
+    expect(descriptor?.maxTokens).toBeUndefined()
+  })
+
+  it('advertises the output cap the provider declared', () => {
+    const catalog = new QoderCatalog([modelInfo({ maxTokens: 131_072, maxTokensDeclared: true })])
+    const { adapter } = createQoderAdapter({
+      catalog,
+      store: unusedStore(),
+      shim: fakeShim(),
+    })
+    const snapshot = (adapter as unknown as { current(): AdapterSnapshot }).current()
+    expect(snapshot.models.getModel(QODER_PROVIDER, 'model')?.maxTokens).toBe(131_072)
   })
 
   it('carries the variant providerId into the descriptors', () => {
@@ -317,6 +330,79 @@ describe('Qoder adapter retry-hint recovery', () => {
     } finally {
       stub.mockRestore()
     }
+  })
+})
+
+/**
+ * pi-ai answers unparsable tool arguments with `{}`; the adapter rebuilds a call
+ * whose bytes merely carried a tail after a complete object (#21).
+ */
+describe('Qoder adapter damaged tool-argument handling', () => {
+  function callChunks(fragments: readonly string[], blockEndArguments: string): StreamChunk[] {
+    return [
+      { type: 'block-start', index: 0, blockType: 'tool-call' },
+      ...fragments.map(argumentsDelta => ({
+        type: 'tool-call-delta',
+        index: 0,
+        id: 'call-1',
+        name: 'emit_report',
+        argumentsDelta,
+      })),
+      { type: 'block-end', index: 0, block: { type: 'tool-call', id: 'call-1', name: 'emit_report', arguments: blockEndArguments } },
+      { type: 'finish', reason: { kind: 'tool-calls' } },
+    ] as StreamChunk[]
+  }
+
+  async function drained(chunks: StreamChunk[]): Promise<StreamChunk[]> {
+    const { adapter } = createQoderAdapter({
+      catalog: new QoderCatalog([modelInfo()]),
+      store: unusedStore(),
+      shim: fakeShim(),
+    })
+    const stub = vi.spyOn(PiAiAdapter.prototype, 'stream').mockImplementation(async function* () {
+      for (const chunk of chunks) yield chunk
+    })
+    try {
+      const out: StreamChunk[] = []
+      for await (const chunk of adapter.stream({} as never)) out.push(chunk)
+      return out
+    } finally {
+      stub.mockRestore()
+    }
+  }
+
+  function toolArguments(out: StreamChunk[]): string {
+    const blockEnd = out.find(chunk => chunk.type === 'block-end')
+    if (blockEnd?.type !== 'block-end' || blockEnd.block.type !== 'tool-call') {
+      throw new Error('no tool-call block-end in the stream')
+    }
+    return blockEnd.block.arguments
+  }
+
+  it('keeps a tail-damaged call invalid so the harness rejects it', async () => {
+    // The shape captured for #21: a complete object plus a 1-char tail. Running the
+    // closed prefix would execute the tool on truncated data.
+    const out = await drained(callChunks(['{"summary":"report"}', '在'], '{}'))
+    const args = toolArguments(out)
+    expect(args).toBe('{"summary":"report"}在')
+    expect(() => JSON.parse(args)).toThrow()
+  })
+
+  it('keeps a multi-character tail damaged the same way', async () => {
+    const out = await drained(callChunks(['{"summary":"report"}', '一致的数据'], '{}'))
+    expect(toolArguments(out)).toBe('{"summary":"report"}一致的数据')
+  })
+
+  it('keeps a call that never closed invalid instead of inventing a terminator', async () => {
+    const out = await drained(callChunks(['{"summary":"a long report that never'], '{}'))
+    expect(toolArguments(out)).toBe('{"summary":"a long report that never')
+  })
+
+  it('does not rewrite a healthy call', async () => {
+    // pi-ai normalizes the parsed object, so the delta text and the block differ
+    // only in whitespace; a repair would regress the normalized form.
+    const out = await drained(callChunks(['{ "summary": "report" }'], '{"summary":"report"}'))
+    expect(toolArguments(out)).toBe('{"summary":"report"}')
   })
 })
 

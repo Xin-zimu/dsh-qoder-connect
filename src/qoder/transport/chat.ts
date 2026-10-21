@@ -399,7 +399,10 @@ export async function* streamQoderChat(
       // before any chunk was forwarded, or the replay would duplicate output.
       let replay = false
       try {
-        for await (const chunk of parseQoderSse(response.body, { onActivity: resetIdleTimer })) {
+        for await (const chunk of parseQoderSse(response.body, {
+          onActivity: resetIdleTimer,
+          ...dependencies.onDiag === undefined ? {} : { onDiag: dependencies.onDiag },
+        })) {
           chunkCount++
           if (firstChunkDurationMs === undefined) {
             firstChunkDurationMs = Math.round(performance.now() - startedAt)

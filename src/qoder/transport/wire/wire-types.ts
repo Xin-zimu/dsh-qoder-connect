@@ -45,7 +45,7 @@ export interface QoderWireMessage {
 export interface QoderModelConfig {
   key: string
   is_reasoning: boolean
-  max_output_tokens: number
+  max_output_tokens?: number
   source: string
   context_config?: Record<string, { token_count?: number; is_default?: boolean }>
 }
@@ -97,7 +97,7 @@ export interface QoderWireRequest {
   messages: QoderWireMessage[]
   tools: QoderWireTool[]
   parameters: {
-    max_tokens: number
+    max_tokens?: number
     reasoning_effort?: string
   }
   chat_context: QoderChatContext
