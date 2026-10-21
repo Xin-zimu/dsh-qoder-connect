@@ -200,12 +200,19 @@ async function waitForQueue(
     const remaining = deadline - Date.now()
     if (cleared) {
       // This round is the grant, not a wait: it must not consume a round number,
-      // or the row would count 1 → 3.
+      // or the row would count 1 → 3. It still reports, so the caller can close
+      // the row it opened; without that a later wait updates a stale row.
       const settle = Math.min(
         Math.max(retryAfterMs, queuePollMinIntervalMs),
         queuePollMaxIntervalMs,
         Math.max(remaining, 0),
       )
+      dependencies.onQueueWait?.({
+        attempt: attempt - 1,
+        waitMs: settle,
+        cleared: true,
+        ...sessionId === undefined ? {} : { sessionId },
+      })
       diag(`poll ${attempt}: clear; settling ${settle}ms before replay`)
       if (settle > 0) await sleep(settle, signal)
       return { ready: true, attempts: attempt - 1 }

@@ -122,6 +122,49 @@ function appendHintRow(agent: HintAgent, kind: 'success' | 'error', text: string
   }
 }
 
+/**
+ * Open a queue-wait row and return its id.
+ *
+ * The row title is the ASCII name; the display name belongs in `text`, since the
+ * card renders `{name} · {text}` and would otherwise repeat it.
+ */
+export function openQueueHint(session: { append(type: string, data: unknown): unknown }, text: string): string | undefined {
+  const commandId = `cmd-qoder-queue-${Date.now().toString(36)}-${++hintSeq}`
+  try {
+    session.append('command/run', {
+      commandId,
+      name: JOB_TOKEN_HINT_NAME,
+      source: { kind: 'user' },
+    })
+    session.append('command/done', {
+      commandId,
+      kind: 'success',
+      text,
+    })
+    return commandId
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Rewrite an open queue-wait row.
+ *
+ * The chat view folds a `command/done` into the row its `commandId` opened and
+ * keeps the original seq, so the row stays in place and only its text changes.
+ */
+export function updateQueueHint(session: { append(type: string, data: unknown): unknown }, commandId: string, text: string): void {
+  try {
+    session.append('command/done', {
+      commandId,
+      kind: 'success',
+      text,
+    })
+  } catch {
+    // Diagnostics-grade, like every other row here.
+  }
+}
+
 /** The refresh time recorded for one agent, if this process rotated its token. */
 export function jobTokenRefreshAt(agentId: unknown): number | undefined {
   return lastRefreshAt.get(String(agentId))

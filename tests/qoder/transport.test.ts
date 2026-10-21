@@ -527,7 +527,7 @@ test('QoderTransport polls the pending queue entry and replays the same chat bod
   let chatCalls = 0
   const bodies: string[] = []
   let polls = 0
-  const waits: { attempt: number, waitMs: number, queueCount?: number }[] = []
+  const waits: { attempt: number, waitMs: number, cleared?: boolean, queueCount?: number }[] = []
   const transport = createQoderTransport({
     region: 'global',
     resolvePat: () => Promise.resolve('pt-queue-poll'),
@@ -536,7 +536,12 @@ test('QoderTransport polls the pending queue entry and replays the same chat bod
     // rather than sit on a real 30-second poll interval.
     queueWaitBudgetMs: () => 60,
     onQueueWait: info => {
-      waits.push({ attempt: info.attempt, waitMs: info.waitMs, ...info.queueCount === undefined ? {} : { queueCount: info.queueCount } })
+      waits.push({
+        attempt: info.attempt,
+        waitMs: info.waitMs,
+        ...info.cleared === true ? { cleared: true } : {},
+        ...info.queueCount === undefined ? {} : { queueCount: info.queueCount },
+      })
     },
     fetch: (async (input: URL | Request, init?: RequestInit): Promise<Response> => {
       const url = String(input)
@@ -586,9 +591,11 @@ test('QoderTransport polls the pending queue entry and replays the same chat bod
   // The replay rotates request_id/chat_record_id (the queue key, request_set_id,
   // stays), so the encoded body differs.
   assert.notEqual(bodies[0], bodies[1])
-  // The clearing round is the grant, not a wait: it reports no round at all,
-  // so the row's numbering never skips one.
-  assert.equal(waits.length, 0)
+  // The clearing round is the grant, not a wait: it carries no round number, so
+  // the row's numbering never skips one, and it is flagged so the caller can
+  // close the row instead of leaving it open for the next wait.
+  assert.equal(waits[0]?.cleared, true)
+  assert.equal(waits[0]?.attempt, 0)
 })
 
 test('QoderTransport completes the turn when the queue clears before the replay', async () => {

@@ -34,7 +34,7 @@ import type { QoderModelInfo } from './catalog.ts'
 import type { QoderWebCatalog, QoderWebProbeSection } from './status-paths.ts'
 import { QODER_SETTINGS_FACE_PATH } from './status-paths.ts'
 import { clearHostHeartbeat, writeHostHeartbeat } from './host-heartbeat.ts'
-import { emitJobTokenHint, emitJobTokenRefreshFailedHint, emitQueueHint, emitQueueHintTo, installJobTokenHint } from './job-token-hint.ts'
+import { emitJobTokenHint, emitJobTokenRefreshFailedHint, emitQueueHint, installJobTokenHint, openQueueHint, updateQueueHint } from './job-token-hint.ts'
 import { SettingsStore } from './settings-store.ts'
 import { QODER_CONNECT_VERSION } from './version.ts'
 import { CHINA_VARIANT, GLOBAL_VARIANT, QODER_VARIANTS, type QoderVariant } from './variants.ts'
@@ -564,9 +564,9 @@ function createVariantRuntime(
   }
   // The adapter sees the host session; the shim-based transport does not.
   const sessionRef: { id: string | undefined } = { id: undefined }
-  // Last row written, and the next round that may print one (doubling).
+  // Last row written, and the row this wait opened (undefined until it opens one).
   let lastQueueHint = { attempt: 0, at: 0 }
-  let nextQueueHintAt = 1
+  let queueHintId: string | undefined
   const transport = createQoderTransport({
     region: variant.region,
     resolvePat: () => store.patPromise(),
@@ -602,15 +602,15 @@ function createVariantRuntime(
       // `llm/retry` is the host's own retry state machine: writing it from here
       // corrupted sessions whenever a wait was interrupted or its round numbers
       // skipped. This row is a plain log line that touches no state machine.
-      if (info.cleared === true) return
+      if (info.cleared === true) {
+        // The wait ended; the next one opens a fresh row.
+        queueHintId = undefined
+        return
+      }
       const now = Date.now()
       // The session-title request shares this provider, so two calls can open a
       // wait at the same moment; one row per burst is the point.
       if (now - lastQueueHint.at < 5_000) return
-      // Rounds 1, 2, 4, 8, 16…: a long budget prints in log2(rounds) rows
-      // instead of one every fixed interval.
-      if (info.attempt < nextQueueHintAt) return
-      nextQueueHintAt = Math.max(info.attempt + 1, info.attempt * 2)
       lastQueueHint = { attempt: info.attempt, at: now }
       const copy = queueCopy()
       const text = copy.hint({
@@ -628,8 +628,15 @@ function createVariantRuntime(
         emitQueueHint(text)
         return
       }
-      writeQueueDiag(`hint row attempt=${info.attempt}`)
-      emitQueueHintTo(session, text)
+      // Rounds update the one row this wait opened, so a long wait never adds
+      // rows: `command/done` folds into the row its `commandId` created.
+      if (queueHintId === undefined) {
+        queueHintId = openQueueHint(session, text)
+        writeQueueDiag(`hint open attempt=${info.attempt} id=${queueHintId ?? 'none'}`)
+        return
+      }
+      updateQueueHint(session, queueHintId, text)
+      writeQueueDiag(`hint update attempt=${info.attempt}`)
     },
   })
   const client = new QoderUpstreamClient({
