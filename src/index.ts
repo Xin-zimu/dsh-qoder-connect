@@ -23,7 +23,7 @@ import { createQoderShim } from './shim.ts'
 import { QoderProbeService } from './probe-service.ts'
 import { newestFirst, QoderProbeStore, qoderProbePath } from './probe-store.ts'
 import { QoderUpstreamClient, validateApiKey } from './upstream.ts'
-import { createQoderTransport, type QoderCheckInResult, type QoderTransport } from './qoder/transport/index.ts'
+import { createQoderTransport, defaultStreamIdleTimeoutMs, type QoderCheckInResult, type QoderTransport } from './qoder/transport/index.ts'
 import { getMachineId } from './qoder/transport/machine-id.ts'
 import { configurePluginPaths, qoderMachineIdPath, qoderPluginDataDir, qoderStateDir } from './paths.ts'
 import { createQueueHint, type QueueHintSession } from './queue-hint.ts'
@@ -471,6 +471,12 @@ interface VariantRuntime {
   invalidate: () => void
   /** Configured queue-wait budget in ms, read per call. */
   queueBudgetMs: () => number
+  /**
+   * One-line diagnostic sink for the hand-back log. The loopback hop records its
+   * lifecycle here too, so a wait that died early can be told apart from one that
+   * never started.
+   */
+  diag: (message: string) => void
   /** Whether the provider registered successfully. */
   registered: boolean
   /**
@@ -560,6 +566,10 @@ function createVariantRuntime(
       // Diagnostics only; never affect the chat.
     }
   }
+  const configuredQueueWaitMs = (): number => Math.max(
+    QUEUE_WAIT_SECONDS_MIN * 1_000,
+    (current().queueWaitSeconds ?? QUEUE_WAIT_SECONDS_DEFAULT) * 1_000,
+  )
   const transport = createQoderTransport({
     region: variant.region,
     resolvePat: () => store.patPromise(),
@@ -567,9 +577,14 @@ function createVariantRuntime(
     queueWait: () => current().queueWait !== false,
     // The configured wait is the only cap: each poll still waits the upstream's
     // own retryAfterSeconds, and a shorter budget simply ends the wait sooner.
-    queueWaitBudgetMs: () => Math.max(
-      QUEUE_WAIT_SECONDS_MIN * 1_000,
-      (current().queueWaitSeconds ?? QUEUE_WAIT_SECONDS_DEFAULT) * 1_000,
+    queueWaitBudgetMs: configuredQueueWaitMs,
+    // The idle window must not become a second, shorter cap on that wait: a
+    // stream-idle window is about a stalled socket, and the configured budget is
+    // what bounds a deliberate wait. Every poll round also restarts this clock,
+    // so raising it here only removes a cliff a long setting would hit.
+    streamIdleTimeoutMs: Math.max(
+      defaultStreamIdleTimeoutMs,
+      configuredQueueWaitMs() + 60_000,
     ),
     // Keep the machine-id seed inside the plugin's own data directory
     // (state/) instead of letting the transport write it near $HOME.
@@ -661,7 +676,8 @@ function createVariantRuntime(
     invalidate: () => {},
     registered: false,
     jobTokenRefreshedAt: () => jobTokenRefreshedAt,
-    queueBudgetMs: () => Math.max(1, current().queueWaitSeconds ?? QUEUE_WAIT_SECONDS_DEFAULT) * 1_000,
+    queueBudgetMs: configuredQueueWaitMs,
+    diag: writeQueueDiag,
     checkIn: (signal?: AbortSignal) => transport.checkIn(signal),
   }
 }
@@ -782,6 +798,9 @@ async function startVariant(ctx: Context, runtime: VariantRuntime, seedCatalog: 
     catalog,
     providerId: variant.id,
     logger: ctx.logger,
+    // Same hand-back log as the queue decisions: the loopback hop's lifecycle is
+    // what tells a client-side clock apart from an upstream stall.
+    onDiag: runtime.diag,
   })
   try {
     await shim.ready

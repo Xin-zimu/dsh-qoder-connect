@@ -23,18 +23,22 @@ export interface QueueCopyInput {
   waitSeconds?: number
 }
 
-/** The wait wording: a zero estimate means "no capacity", not "instant". */
+/**
+ * The wait wording: the estimate is the upstream's own answer, not this client's
+ * promise, so the row must never read as "about to be granted". A zero estimate
+ * means "no capacity", not "instant".
+ */
 function zhWait(waitSeconds: number | undefined): string {
   if (waitSeconds === undefined) return ''
   if (waitSeconds <= 0) return '，等待上游释放容量'
-  return `，预计还需 ${waitSeconds} 秒`
+  return `，上游返回预计等待 ${waitSeconds} 秒`
 }
 
 /** The wait wording: a zero estimate means "no capacity", not "instant". */
 function enWait(waitSeconds: number | undefined): string {
   if (waitSeconds === undefined) return ''
   if (waitSeconds <= 0) return ', waiting for capacity'
-  return `, ~${waitSeconds}s left`
+  return `, upstream estimate ~${waitSeconds}s`
 }
 
 const zhQueue = {

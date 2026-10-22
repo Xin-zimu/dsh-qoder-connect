@@ -1177,6 +1177,23 @@ interface QoderShimOptions {
   /** Provider id reported as each model's `owned_by`; one per variant. */
   providerId: string;
   logger?: ShimLogger;
+  /**
+   * Override of the pending-answer keep-alive interval. Only tests shorten it;
+   * production always keeps the default, which is what the client's body clock
+   * leaves room for.
+   */
+  keepAliveMs?: number;
+  /**
+   * How long a failure may still arrive as its real HTTP status before the stream
+   * head is committed. Only tests shorten it; see {@link STREAM_GRACE_MS}.
+   */
+  graceMs?: number;
+  /**
+   * One-line diagnostic sink. The queue log the user can hand back is the only
+   * place that records when a head was committed or an answer abandoned, which is
+   * what separates a client-side clock from an upstream stall.
+   */
+  onDiag?: (message: string) => void;
 }
 /**
  * Start the loopback endpoint. The upstream credential comes from the store alone;

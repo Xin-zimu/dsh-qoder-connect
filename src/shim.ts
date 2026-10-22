@@ -18,7 +18,7 @@ import { Readable } from 'node:stream'
 import type { QoderCredentialStore } from './auth.ts'
 import type { QoderCatalog } from './catalog.ts'
 import { hostIsLoopback, originIsLoopback } from './loopback.ts'
-import { KIND_STATUS, type QoderUpstreamClient } from './upstream.ts'
+import { KIND_STATUS, type QoderChatResult, type QoderUpstreamClient } from './upstream.ts'
 import { QODER_PURPOSE_HEADER, QODER_SESSION_HEADER, readQoderPurposeHeader, readQoderSessionHeader } from './request-session.ts'
 
 /** Minimal logger surface the plugin context already provides. */
@@ -51,6 +51,23 @@ export interface QoderShimOptions {
   /** Provider id reported as each model's `owned_by`; one per variant. */
   providerId: string
   logger?: ShimLogger
+  /**
+   * Override of the pending-answer keep-alive interval. Only tests shorten it;
+   * production always keeps the default, which is what the client's body clock
+   * leaves room for.
+   */
+  keepAliveMs?: number
+  /**
+   * How long a failure may still arrive as its real HTTP status before the stream
+   * head is committed. Only tests shorten it; see {@link STREAM_GRACE_MS}.
+   */
+  graceMs?: number
+  /**
+   * One-line diagnostic sink. The queue log the user can hand back is the only
+   * place that records when a head was committed or an answer abandoned, which is
+   * what separates a client-side clock from an upstream stall.
+   */
+  onDiag?: (message: string) => void
 }
 
 const REQUEST_BODY_LIMIT = 64 * 1024 * 1024
@@ -130,6 +147,119 @@ function writeOpenAIError(res: ServerResponse, status: number, kind: string, mes
   )
 }
 
+/**
+ * Interval of the SSE comment written while an upstream answer is pending.
+ *
+ * The client reads the body through undici, whose `bodyTimeout` defaults to 300 s
+ * of silence; the interval must stay far below it so a multi-minute queue wait is
+ * never mistaken for a dead connection.
+ */
+const STREAM_KEEPALIVE_MS = 15_000
+
+/**
+ * How long an answer may stay silent before the stream head is committed anyway.
+ *
+ * Committing the head early is what makes a multi-minute queue wait survivable —
+ * the client's header clock stops applying once the head is in. But it also
+ * erases the status line: every failure after that point can only travel in-band,
+ * and the harness then classifies it from the message text alone. A fast failure
+ * (a rejected credential, an exhausted quota, a malformed request) should keep its
+ * real status, so the head waits out this window first. The window stays far
+ * below the 300 s a client allows for a response head, so a wait that really is
+ * long still enters the streamed envelope with minutes to spare.
+ */
+const STREAM_GRACE_MS = 5_000
+
+/**
+ * How long a closing shim waits for an in-flight answer before dropping it.
+ *
+ * A queue wait can last minutes; disposal must not. This only has to cover an
+ * answer that is nearly finished, which is the only one worth saving.
+ */
+const CLOSE_GRACE_MS = 1_500
+
+/**
+ * Head of a streamed answer; sent once the answer turns slow.
+ *
+ * `Connection: close` is deliberate: this hop carries one answer per turn over
+ * loopback, and a socket the server half-closed is exactly what a client reports
+ * as a terminated connection. Closing after each answer costs one TCP connect and
+ * removes that class outright.
+ */
+const STREAM_HEADERS = {
+  'Content-Type': 'text/event-stream',
+  'Cache-Control': 'no-cache',
+  'Connection': 'close',
+  'X-Accel-Buffering': 'no',
+} as const
+
+/**
+ * Send the streaming head, exactly once.
+ *
+ * @param res - the response to commit.
+ */
+function writeStreamHead(res: ServerResponse): void {
+  if (res.headersSent || res.writableEnded || res.destroyed) return
+  res.writeHead(200, STREAM_HEADERS)
+  // Without an explicit flush the head waits for the first body write, which is
+  // exactly the silence this exists to remove.
+  res.flushHeaders()
+}
+
+/**
+ * Keep the response body from ever going silent while the answer is pending.
+ *
+ * The client reads through undici, whose `bodyTimeout` defaults to 300 s between
+ * body bytes; the interval must stay far below it. A queue wait can last minutes
+ * and so can the wait for a model's first token, so the comments run until real
+ * bytes arrive rather than until the upstream answers.
+ *
+ * @param res - a response whose head is already committed.
+ * @param keepAliveMs - the comment interval; see {@link STREAM_KEEPALIVE_MS}.
+ * @returns the interval stop, safe to call more than once.
+ */
+function beginKeepAlive(res: ServerResponse, keepAliveMs: number): () => void {
+  const timer = setInterval(() => {
+    if (res.writableEnded || res.destroyed) return
+    try {
+      res.write(': keep-alive\n\n')
+    } catch {
+      // A client that went away is reported by `close`, not here.
+    }
+  }, keepAliveMs)
+  // A pending keep-alive must never hold the process open.
+  timer.unref?.()
+  return () => clearInterval(timer)
+}
+
+/**
+ * Deliver one failure as an SSE `error` frame.
+ *
+ * The OpenAI SDK turns `data: {"error": ...}` into an `APIError` whose `message`
+ * is this payload's `message`, and the harness classifies a failure by matching
+ * that text — so the message keeps quoting the shim's OUTBOUND status exactly as
+ * the HTTP-status path did, and the retry hint keeps its tag for
+ * {@link retryAfterFromMessage}.
+ *
+ * @param res - a response whose head is already committed.
+ * @param kind - the failure kind, also carried as `type`/`code`.
+ * @param message - the client-visible message.
+ * @param retryAfterMs - the upstream's retry hint, when it reported one.
+ */
+function writeStreamError(res: ServerResponse, kind: string, message: string, retryAfterMs?: number): void {
+  if (res.writableEnded || res.destroyed) return
+  const hint = typeof retryAfterMs === 'number' && Number.isFinite(retryAfterMs) && retryAfterMs > 0
+    ? Math.floor(retryAfterMs)
+    : undefined
+  const text = hint === undefined
+    ? message
+    : `[retry-after=${retryAfterSeconds(hint)}s] ${message}`
+  res.write(`data: ${JSON.stringify({ error: { message: text, type: kind, code: kind } })}\n\n`)
+  // The SDK throws on the frame above; the sentinel covers any client that does not.
+  res.write('data: [DONE]\n\n')
+  res.end()
+}
+
 /** Read a request body with a size cap; over-limit bodies fail the request. */
 function readBody(req: IncomingMessage): Promise<Buffer> {
   return new Promise((resolve, reject) => {
@@ -157,6 +287,15 @@ export function createQoderShim(options: QoderShimOptions): QoderShim {
   const { store, client, catalog } = options
   const logger = options.logger
   const providerId = options.providerId
+  const keepAliveMs = options.keepAliveMs ?? STREAM_KEEPALIVE_MS
+  const graceMs = options.graceMs ?? STREAM_GRACE_MS
+  const diag = (message: string): void => {
+    try {
+      options.onDiag?.(message)
+    } catch {
+      // Diagnostics only; never affect the chat.
+    }
+  }
 
   // Per-process shared secret. Lives only in memory; the adapter resolves it as
   // the OpenAI apiKey, which pi-ai sends as `Authorization: Bearer ...`. It is
@@ -184,8 +323,10 @@ export function createQoderShim(options: QoderShimOptions): QoderShim {
     void handle(req, res).catch((error: unknown) => {
       logger?.warn('dsh-qoder-connect: loopback request failed', error)
       try {
+        // Last resort: `handle` already reports its own failures in-band, so only a
+        // throw from that path (or from the reporting itself) lands here.
         if (!res.headersSent) writeOpenAIError(res, 500, 'internal', 'loopback request failed')
-        else res.end()
+        else writeStreamError(res, 'internal', 'loopback request failed')
       } catch {
         // The socket is already gone; nothing left to report to.
       }
@@ -248,9 +389,14 @@ export function createQoderShim(options: QoderShimOptions): QoderShim {
     } catch (error: unknown) {
       if (!res.headersSent) {
         writeOpenAIError(res, 500, 'internal', String(error))
-      } else {
-        res.end()
+        return
       }
+      // The head is often committed before the upstream answer exists, so this is
+      // the ONLY place an escaped failure can still reach the client. Ending the
+      // body here instead would read as a truncated answer, which the harness
+      // reports as a transport error far from the cause.
+      logger?.warn('dsh-qoder-connect: loopback request failed after the stream head', error)
+      writeStreamError(res, 'internal', 'loopback request failed')
     }
   }
 
@@ -271,46 +417,107 @@ export function createQoderShim(options: QoderShimOptions): QoderShim {
     const raw = (await readBody(req)).toString('utf8')
 
     const controller = new AbortController()
+    const startedAt = performance.now()
     // The response closing before it ends is the client going away — a stopped
     // turn. Listening on the request instead would fire as soon as its body was
     // read, which is not a cancellation.
     res.on('close', () => {
-      if (!res.writableEnded) controller.abort('client closed the response')
+      if (res.writableEnded) return
+      // A stopped turn is routine, so this stays in the hand-back log rather than
+      // the host's warning stream: the elapsed time and head state are what tell a
+      // client-side stop apart from this side's clock, and they are only ever read
+      // while diagnosing a wait that ended early.
+      const elapsedMs = Math.round(performance.now() - startedAt)
+      diag(`chat: client closed the answer after ${elapsedMs}ms (headCommitted=${res.headersSent})`)
+      controller.abort('client closed the response')
     })
     const sessionId = readQoderSessionHeader(req.headers[QODER_SESSION_HEADER])
     const purpose = readQoderPurposeHeader(req.headers[QODER_PURPOSE_HEADER])
-    const result = await client.chatStream(raw, controller.signal, sessionId, purpose)
+
+    /**
+     * Commit the streaming head — once, and only if the answer turns slow.
+     *
+     * A fast failure keeps its status line (and its standard retry headers); a
+     * slow one gets a committed 200 and keep-alive comments so a queue wait never
+     * looks like a dead connection. See {@link STREAM_GRACE_MS}.
+     */
+    let stopKeepAlive: (() => void) | undefined
+    const keepAlive = (): void => {
+      if (res.writableEnded || res.destroyed) return
+      stopKeepAlive ??= beginKeepAlive(res, keepAliveMs)
+    }
+    const stopHead = (): void => {
+      stopKeepAlive?.()
+      stopKeepAlive = undefined
+    }
+    const grace = setTimeout(() => {
+      if (res.headersSent) return
+      writeStreamHead(res)
+      keepAlive()
+      diag(`chat: head committed after ${graceMs}ms without an upstream answer`)
+    }, graceMs)
+    // A pending grace must never hold the process open.
+    grace.unref?.()
+
+    let result: QoderChatResult
+    try {
+      result = await client.chatStream(raw, controller.signal, sessionId, purpose)
+    } finally {
+      clearTimeout(grace)
+    }
 
     if (!result.ok) {
+      stopHead()
       // The message quotes the shim's OUTBOUND status, never the upstream's
-      // internal one: the harness's pi-ai error classifier matches 401/403 in the
-      // message text, so quoting an upstream 403 here would report a queue answer
-      // as a credential failure. The real status travels in the structured
-      // `status` field.
-      writeOpenAIError(
-        res,
-        KIND_STATUS[result.kind],
-        result.kind,
-        `${providerId} upstream ${result.kind} (http ${KIND_STATUS[result.kind]}): ${result.message.slice(0, 400)}`,
-        result.retryAfterMs,
-      )
+      // internal one: the harness's pi-ai error classifier matches 401/403/429 in
+      // the message text, so quoting an upstream 403 here would report a queue
+      // answer as a credential failure. The real status travels in the status line
+      // (fast failures) or in the structured `code` (once the head is committed).
+      const message = `${providerId} upstream ${result.kind} (http ${KIND_STATUS[result.kind]}): ${result.message.slice(0, 400)}`
+      if (!res.headersSent) {
+        writeOpenAIError(res, KIND_STATUS[result.kind], result.kind, message, result.retryAfterMs)
+        return
+      }
+      writeStreamError(res, result.kind, message, result.retryAfterMs)
       return
     }
 
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
-      'X-Accel-Buffering': 'no',
-    })
+    // The head may already be out (the answer turned slow); otherwise this is the
+    // ordinary streaming path. Either way the comments keep running until the
+    // upstream's first byte arrives.
+    writeStreamHead(res)
+    keepAlive()
+
     let sawDone = false
+    let forwardedChunks = 0
     const body = Readable.fromWeb(result.response.body as Parameters<typeof Readable.fromWeb>[0])
     body.on('data', (chunk: Buffer) => {
+      forwardedChunks += 1
+      // Real bytes are flowing: the keep-alive comments are no longer needed, and
+      // from here on the body itself keeps the client's clock alive. Until the
+      // first one arrives they stay, so a model that thinks for minutes before its
+      // first token does not look like a dead connection.
+      if (forwardedChunks === 1) stopHead()
       if (chunk.includes('[DONE]')) sawDone = true
     })
+    body.on('end', stopHead)
+    body.on('close', stopHead)
     body.on('error', (error: unknown) => {
+      stopHead()
       logger?.warn('dsh-qoder-connect: upstream stream failed mid-flight', error)
-      if (!sawDone && res.writable) res.end('data: [DONE]\n\n')
+      if (sawDone || !res.writable) return
+      if (forwardedChunks === 0) {
+        // Nothing reached the client, so this is not a truncated answer but a
+        // failure that never started. Ending quietly would leave the harness to
+        // explain it as EMPTY_RESPONSE; the in-band frame names the cause, and its
+        // "ended without" wording keeps the classified code at TRANSPORT.
+        writeStreamError(res, 'transport', `${providerId} upstream stream ended without any data (${String((error as Error)?.message ?? error)})`)
+        return
+      }
+      // Part of the answer is already out: completing the envelope keeps that text
+      // rather than replacing it with a failure. The interruption is logged, never
+      // claimed to be a clean end.
+      res.end('data: [DONE]\n\n')
     })
     body.pipe(res)
   }
@@ -320,9 +527,17 @@ export function createQoderShim(options: QoderShimOptions): QoderShim {
     baseUrl,
     token: () => SHARED_SECRET,
     close: () => new Promise<void>((resolve, reject) => {
-      server.close(() => resolve())
-      server.closeAllConnections()
       server.once('error', reject)
+      // Graceful first: a settings write hot-reloads the plugin, and destroying an
+      // in-flight answer makes the harness report a terminated connection far from
+      // the cause. `close` stops accepting and drops idle sockets on its own; the
+      // timer is the hard bound so disposal can never hang on a queue wait.
+      const hardStop = setTimeout(() => server.closeAllConnections(), CLOSE_GRACE_MS)
+      hardStop.unref?.()
+      server.close(() => {
+        clearTimeout(hardStop)
+        resolve()
+      })
     }),
   }
 }

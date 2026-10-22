@@ -32,6 +32,18 @@ export interface QoderChatDependencies {
   onDiag?: (message: string) => void
   /** Whether to poll out a queue answer; false hands the failure to the host with its hint. */
   queueWait?: () => boolean
+  /**
+   * Floor for one poll interval. Production keeps
+   * {@link queuePollMinIntervalMs}; tests shorten it so a paced wait can be
+   * observed without spending the production interval.
+   */
+  queuePollFloorMs?: number
+  /**
+   * Ceiling for one poll interval. Production keeps
+   * {@link queuePollMaxIntervalMs}; tests shorten it for the same reason as the
+   * floor.
+   */
+  queuePollCeilingMs?: number
 }
 
 /** One queue round as the transport observed it. */
@@ -60,8 +72,6 @@ function queueBudgetMs(dependencies: QoderChatDependencies): number {
 const queuePollMinIntervalMs = 2_000
 /** Ceiling for one poll interval, so a stale countdown cannot outlive the budget. */
 const queuePollMaxIntervalMs = 30_000
-/** Chat replays a queue wait may drive; the official client allows ten recoveries. */
-const maxQueueReplays = 10
 /** Consecutive unusable poll answers before the queue wait gives up. */
 const maxPollFailures = 3
 /** Consecutive "empty queue, no capacity" answers before giving up. */
@@ -158,10 +168,18 @@ async function waitForQueue(
   queue: { retryAfterMs?: number, queueType?: string },
   deadline: number,
   signal: AbortSignal,
+  /**
+   * Callback that keeps the caller's own idle clock alive. A queue wait is
+   * silence on the wire, but it is not idleness: without this the stream-idle
+   * window would end the wait long before the budget the user configured.
+   */
+  touch: () => void,
   attemptStart = 0,
   maxAttempts?: number,
 ): Promise<{ ready: boolean, attempts: number }> {
   const diag = (message: string): void => dependencies.onDiag?.(message)
+  const floor = dependencies.queuePollFloorMs ?? queuePollMinIntervalMs
+  const ceiling = dependencies.queuePollCeilingMs ?? queuePollMaxIntervalMs
   let retryAfterMs = queue.retryAfterMs ?? queuePollMinIntervalMs
   let attempt = attemptStart
   let waitedMs = 0
@@ -171,15 +189,17 @@ async function waitForQueue(
     // Read before sleeping: the entry exists as soon as the rejection arrives,
     // and an already-clear one must not cost a full retryAfterSeconds.
     attempt += 1
+    touch()
     const status = await readQueueStatus(dependencies, credentials, requestSetId, modelKey, queue.queueType, requestId, sessionId, signal)
     if (status === undefined) {
       failures += 1
       diag(`poll ${attempt}: unusable answer (${failures}/${maxPollFailures})`)
       if (failures >= maxPollFailures) return { ready: false, attempts: attempt }
-      const retry = Math.min(queuePollMinIntervalMs * failures, queuePollMaxIntervalMs)
+      const retry = Math.min(floor * failures, ceiling)
       const remaining = deadline - Date.now()
       if (remaining <= 0) return { ready: false, attempts: attempt }
       waitedMs = Math.min(retry, remaining)
+      touch()
       await sleep(waitedMs, signal)
       continue
     }
@@ -204,8 +224,8 @@ async function waitForQueue(
       // or the row would count 1 → 3. It still reports, so the caller can close
       // the row it opened; without that a later wait updates a stale row.
       const settle = Math.min(
-        Math.max(retryAfterMs, queuePollMinIntervalMs),
-        queuePollMaxIntervalMs,
+        Math.max(retryAfterMs, floor),
+        ceiling,
         Math.max(remaining, 0),
       )
       dependencies.onQueueWait?.({
@@ -215,12 +235,13 @@ async function waitForQueue(
         ...sessionId === undefined ? {} : { sessionId },
       })
       diag(`poll ${attempt}: clear; settling ${settle}ms before replay`)
+      touch()
       if (settle > 0) await sleep(settle, signal)
       return { ready: true, attempts: attempt - 1 }
     }
     // What the caller waits from here on: the next poll interval. The countdown
     // reads this value.
-    const nextWait = Math.min(Math.max(retryAfterMs, queuePollMinIntervalMs), queuePollMaxIntervalMs, Math.max(remaining, 0))
+    const nextWait = Math.min(Math.max(retryAfterMs, floor), ceiling, Math.max(remaining, 0))
     dependencies.onQueueWait?.({
       attempt,
       waitMs: nextWait,
@@ -234,6 +255,7 @@ async function waitForQueue(
       return { ready: false, attempts: attempt }
     }
     waitedMs = nextWait
+    touch()
     await sleep(waitedMs, signal)
   }
 }
@@ -250,6 +272,7 @@ async function rideQueue(
   sessionId: string | undefined,
   deadline: number,
   signal: AbortSignal,
+  touch: () => void,
   attemptStart: number,
   maxAttempts?: number,
 ): Promise<{ ready: boolean, attempts: number, maxAttempts?: number }> {
@@ -266,9 +289,9 @@ async function rideQueue(
   dependencies.onDiag?.(`queue: detected retryAfterMs=${queue.retryAfterMs} queueType=${queue.queueType ?? '-'}`)
   // Rounds this budget can hold at the upstream's own pace; the row's
   // denominator, so it never reads smaller than the numerator.
-  const pace = Math.max(queue.retryAfterMs, queuePollMinIntervalMs)
+  const pace = Math.max(queue.retryAfterMs, dependencies.queuePollFloorMs ?? queuePollMinIntervalMs)
   const allowed = maxAttempts ?? Math.max(1, Math.floor((deadline - Date.now()) / pace))
-  const outcome = await waitForQueue(dependencies, credentials, requestSetId, modelKey, requestId, sessionId, queue, deadline, signal, attemptStart, allowed)
+  const outcome = await waitForQueue(dependencies, credentials, requestSetId, modelKey, requestId, sessionId, queue, deadline, signal, touch, attemptStart, allowed)
   return { ...outcome, maxAttempts: allowed }
 }
 
@@ -291,12 +314,27 @@ export async function* streamQoderChat(
   let requestId = request.request_id
   const modelKey = options.model || 'cmodel'
   const sessionId = options.sessionId === undefined ? undefined : String(options.sessionId)
+  /**
+   * The one cap on a queue wait, shared by every replay of this call.
+   *
+   * The configured budget is the only thing that may end a wait early. A hidden
+   * ceiling — a fixed replay count, a per-round maximum — would make a longer
+   * setting meaningless, which is exactly what the setting exists to avoid. The
+   * request volume stays bounded regardless: every round sleeps at least
+   * {@link queuePollMinIntervalMs}, so the budget can hold no more requests than
+   * it has intervals.
+   *
+   * The transport's own stream-idle window is not a second cap: every poll round
+   * restarts it (see {@link waitForQueue}), because a queue wait is deliberate
+   * silence rather than a stalled stream.
+   */
   const queueDeadline = Date.now() + (dependencies.queueWaitBudgetMs ?? queueBudgetMs(dependencies))
   let replays = 0
   // Poll rounds count across replays, so the notice keeps climbing instead of
   // restarting at 1 after every replay.
   let queueAttempts = 0
-  // Denominator fixed by the first wait, so it never trails the numerator.
+  // The row's denominator, fixed by the first wait so it never trails the
+  // numerator. Display only: the deadline above is what ends a wait.
   let queueMaxAttempts: number | undefined
   let reqId: ReturnType<typeof qoderRequestId> | undefined
 
@@ -377,10 +415,12 @@ export async function* streamQoderChat(
           errorBody = undefined
         }
         const failure = qoderHttpError(`Qoder upstream service returned HTTP ${response.status}.`, response, errorBody)
-        if (replays < maxQueueReplays) {
-          const outcome = await rideQueue(failure, errorBody, dependencies, credentials, requestSetId, modelKey, requestId, sessionId, queueDeadline, requestController.signal, queueAttempts, queueMaxAttempts)
+        // The budget is the cap: `rideQueue` refuses a spent deadline by itself,
+        // and this check only spares the call. No replay count stands in for it.
+        if (Date.now() < queueDeadline) {
+          const outcome = await rideQueue(failure, errorBody, dependencies, credentials, requestSetId, modelKey, requestId, sessionId, queueDeadline, requestController.signal, resetIdleTimer, queueAttempts, queueMaxAttempts)
           queueAttempts = outcome.attempts
-          queueMaxAttempts = outcome.maxAttempts
+          queueMaxAttempts = outcome.maxAttempts ?? queueMaxAttempts
           if (outcome.ready) {
             replays += 1
             rotateAttempt()
@@ -424,9 +464,11 @@ export async function* streamQoderChat(
           yield chunk
         }
       } catch (error: unknown) {
-        const outcome = chunkCount !== 0 || replays >= maxQueueReplays
+        // Same cap as above, and one more rule: a chunk already forwarded means a
+        // replay would duplicate output, so only a silent failure may queue.
+        const outcome = chunkCount !== 0 || Date.now() >= queueDeadline
           ? { ready: false, attempts: queueAttempts }
-          : await rideQueue(error, undefined, dependencies, credentials, requestSetId, modelKey, requestId, sessionId, queueDeadline, requestController.signal, queueAttempts, queueMaxAttempts)
+          : await rideQueue(error, undefined, dependencies, credentials, requestSetId, modelKey, requestId, sessionId, queueDeadline, requestController.signal, resetIdleTimer, queueAttempts, queueMaxAttempts)
         queueAttempts = outcome.attempts
         queueMaxAttempts = outcome.maxAttempts ?? queueMaxAttempts
         if (!outcome.ready) {
