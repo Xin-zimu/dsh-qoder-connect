@@ -1,7 +1,6 @@
 /** Qoder chat request encoding, timeout lifecycle, and SSE streaming. */
 
 import {
-  attributionHeaders,
   type GenerateOptions,
   type StreamChunk,
   type TokenUsage,
@@ -13,7 +12,7 @@ import type { QoderRegion } from '../region.ts'
 import { getQoderChatUrl, getQoderQueueStatusUrl } from './endpoints.ts'
 import { redactLogValue, type QoderLogger } from './logging.ts'
 import { defaultMaxErrorBytes, readLimitedText } from './request.ts'
-import { buildAuthHeaders, type CosyCredentials } from './wire/cosy.ts'
+import { buildAuthHeaders, qoderUserAgent, type CosyCredentials } from './wire/cosy.ts'
 import { qoderEncodeBody } from './wire/encoding.ts'
 import { buildQoderRequestBody } from './wire/serialize.ts'
 import { parseQoderSse } from './wire/sse.ts'
@@ -121,6 +120,8 @@ async function readQueueStatus(
         // The status endpoint compresses unless asked not to; one host's
         // encoding is not something this client can decode.
         'accept-encoding': 'identity',
+        // Same identity as the chat call it polls for: one client, one UA.
+        'user-agent': qoderUserAgent,
         ...buildAuthHeaders(null, url, credentials, { requestId, ...sessionId === undefined ? {} : { sessionId } }),
       },
       signal,
@@ -345,7 +346,10 @@ export async function* streamQoderChat(
           'accept-encoding': 'identity',
           'x-model-key': modelKey,
           'x-model-source': model?.source || 'system',
-          ...attributionHeaders(),
+          // The upstream only ever sees the Qoder client identity: every
+          // channel shares one UA so the traffic cannot be split into
+          // different clients by host or by endpoint.
+          'user-agent': qoderUserAgent,
           ...buildAuthHeaders(encodedBytes, chatUrl, credentials),
         },
         body: encodedBytes,

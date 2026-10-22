@@ -17,14 +17,14 @@ MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDA8iMH5c02LilrsERw9t6Pv5Nc
 XcW+ML9FoCI6AOvOzwIDAQAB
 -----END PUBLIC KEY-----`
 
-export const qoderIdeVersion = '1.1.47'
+export const qoderIdeVersion = '1.1.76'
 export const qoderClientType = '5'
 /**
  * The desktop client identifier the campaign endpoints require; the generic
  * {@link qoderClientType} yields 200 with an empty campaign list.
  */
 export const qoderDesktopClientType = '10'
-export const defaultUserAgent = `qoder/${qoderIdeVersion}`
+export const qoderUserAgent = `qoder/${qoderIdeVersion}`
 const qoderDataPolicy = 'disagree'
 const qoderLoginVersion = 'v2'
 const qoderMachineOs = process.platform === 'win32'

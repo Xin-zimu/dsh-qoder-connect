@@ -12,7 +12,7 @@ import { QoderLlmError } from '../errors.ts'
 import { getQoderImageUploadUrl, type QoderRegion } from './endpoints.ts'
 import { redactLogValue, type QoderLogger } from './logging.ts'
 import { defaultMaxJsonBytes, readLimitedText, SingleFlight } from './request.ts'
-import { buildAuthHeaders, type CosyCredentials } from './wire/cosy.ts'
+import { buildAuthHeaders, qoderUserAgent, type CosyCredentials } from './wire/cosy.ts'
 
 /** Upstream deadline for one image publication attempt. */
 export const defaultImageUploadTimeoutMs = 30_000
@@ -313,6 +313,7 @@ export class QoderImageUploader {
         method: 'PUT',
         headers: {
           ...buildAuthHeaders(signedBody, url, credentials),
+          'user-agent': qoderUserAgent,
           'AI-CLIENT-TIMESTAMP': String(Math.floor(this.now() / 1000)),
           'Content-Type': `multipart/form-data; boundary=${multipart.boundary}`,
           'Content-Length': String(multipart.body.length),

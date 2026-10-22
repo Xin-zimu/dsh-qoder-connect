@@ -1,7 +1,7 @@
 /** Fetch and normalize the model catalog exposed to a Qoder subscriber. */
 
 import type { CosyCredentials } from './wire/cosy.ts'
-import { buildAuthHeaders } from './wire/cosy.ts'
+import { buildAuthHeaders, qoderUserAgent } from './wire/cosy.ts'
 import { getQoderModelListUrl, type QoderRegion } from './endpoints.ts'
 import { QoderLlmError, qoderHttpError, qoderRequestId } from '../errors.ts'
 import {
@@ -43,6 +43,7 @@ export async function fetchQoderModels(
       headers: {
         accept: 'application/json',
         'accept-encoding': 'identity',
+        'user-agent': qoderUserAgent,
         ...buildAuthHeaders(null, url, credentials),
       },
       signal: deadline.signal,

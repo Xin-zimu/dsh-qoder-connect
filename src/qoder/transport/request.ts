@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { brotliDecompressSync, gunzipSync, inflateSync } from 'node:zlib'
 import { QoderLlmError, qoderHttpError, qoderRequestId } from '../errors.ts'
 import { logParsedResponse, redactLogPayload, type QoderLogger } from './logging.ts'
-import { defaultUserAgent, qoderClientType } from './wire/cosy.ts'
+import { qoderClientType, qoderIdeVersion, qoderUserAgent } from './wire/cosy.ts'
 
 export const defaultMetadataTimeoutMs = 15_000
 export const defaultResponseHeaderTimeoutMs = 60_000
@@ -212,10 +212,13 @@ export async function openApiJsonRequest<T>(
       // Some hosts do not decompress, and a compressed stream would reach the
       // JSON parser as binary noise; readLimitedText decompresses as a fallback.
       'accept-encoding': 'identity',
-      'user-agent': options.userAgent ?? defaultUserAgent,
-      'cosy-version': '1.0.1',
+      'user-agent': options.userAgent ?? qoderUserAgent,
       'cosy-clienttype': qoderClientType,
-      ...options.headers,
+      // HTTP header names are case-insensitive; keep exactly one version header.
+      ...Object.fromEntries(Object.entries(options.headers ?? {}).filter(
+        ([name]) => name.toLowerCase() !== 'cosy-version',
+      )),
+      'Cosy-Version': qoderIdeVersion,
     }
     if (options.token) {
       headers.authorization = `Bearer ${options.token}`
