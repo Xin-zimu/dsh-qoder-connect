@@ -7,6 +7,7 @@ import type { QoderCatalogModel } from '../catalog.ts'
 import type { QoderRegion } from '../region.ts'
 import type { QoderCheckInResult } from './checkin.ts'
 import type { QoderQueueWait } from './chat.ts'
+import type { QoderSseNotice } from './wire/sse.ts'
 import { DefaultQoderTransport, defaultStreamIdleTimeoutMs } from './default-transport.ts'
 import { defaultResponseHeaderTimeoutMs } from './request.ts'
 import type { QoderLogger } from './logging.ts'
@@ -51,6 +52,14 @@ export interface QoderTransportOptions {
   onQueueWait?: (info: QoderQueueWait) => void
   /** Create an observer owned by one stream, including its internal replays. */
   createQueueWaitHandler?: (options: GenerateOptions) => (info: QoderQueueWait) => void
+  /**
+   * Create the per-stream notice sink. A filtered or unrecognised ending is reported as a
+   * normal stop, so this is the only channel that can tell the user the answer may be
+   * incomplete.
+   */
+  createNoticeHandler?: (options: GenerateOptions) => ((notice: QoderSseNotice) => void)
+  /** Called when one stream raises a notice; the per-stream handler wins. */
+  onNotice?: (notice: QoderSseNotice) => void
   /** Budget for one chat call's queue wait; read per call so settings apply live. */
   queueWaitBudgetMs?: () => number
   /** One-line diagnostic sink (chat vs queue decisions). */

@@ -18,6 +18,12 @@ export interface QoderSseOptions {
   maxBufferChars?: number
   /** One-line diagnostic sink; reports a tolerated damaged tool-call argument block. */
   onDiag?: (message: string) => void
+  /**
+   * Called once per notice: the upstream filtered the reply, or named a finish reason this
+   * client does not know. Both end as a normal stop, so these are the only user-visible
+   * traces that the answer may be incomplete.
+   */
+  onNotice?: (notice: QoderSseNotice) => void
 }
 
 interface TextualBlockState {
@@ -40,76 +46,24 @@ function malformed(message: string): QoderLlmError {
   return new QoderLlmError(message, 'MALFORMED_RESPONSE')
 }
 
-/** What a completed tool call's argument text amounts to. */
-type QoderArgumentShape =
-  | { kind: 'complete' }
-  /** Began as JSON and did not survive: a closed object plus a tail, or no close at all. */
-  | { kind: 'damaged'; detail: string }
-  /** Never looked like JSON: nothing to answer, so the stream is corrupt. */
-  | { kind: 'foreign' }
-
-function isJsonObject(text: string): boolean {
-  let value: unknown
-  try {
-    value = JSON.parse(text)
-  } catch {
-    return false
-  }
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-/** Index just past the first complete JSON value, or undefined when none closed. */
-function closedValueEnd(text: string): number | undefined {
-  let depth = 0
-  let inString = false
-  let escaped = false
-  for (let index = 0; index < text.length; index += 1) {
-    const char = text[index]
-    if (escaped) {
-      escaped = false
-      continue
-    }
-    if (char === '\\') {
-      escaped = true
-      continue
-    }
-    if (inString) {
-      if (char === '"') inString = false
-      continue
-    }
-    if (char === '"') {
-      inString = true
-      continue
-    }
-    if (char === '{' || char === '[') depth += 1
-    else if (char === '}' || char === ']') {
-      depth -= 1
-      if (depth < 0) return undefined
-      if (depth === 0) return index + 1
-    }
-  }
-  return undefined
-}
-
 /**
- * Classify one call's arguments.
+ * Describe a completed call's arguments for the diagnostic log, never for control flow.
  *
- * The upstream has shipped three damaged shapes for #21 across live runs - a closed
- * object plus a 1-char tail, the same plus a 5-char tail, and one that never closed -
- * all with `finish_reason: tool_calls`, so the shape cannot decide whether a turn
- * dies. What can: whether the bytes ever claimed to be JSON. A damaged JSON attempt
- * is answered as a tool-input error (with a diagnostic); a payload that is not JSON
- * at all is still provider corruption.
+ * The official client does not judge argument text at the transport layer: it concatenates
+ * the deltas, tries `JSON.parse` once at block end, and on failure hands the caller an empty
+ * input plus the raw string. The tool layer then answers `Error: Invalid parameters provided`
+ * as a tool result, so the model re-emits the call and the turn survives. Every "damaged
+ * shape" this file used to classify was a case of the transport deciding to die where the
+ * client upstream of it would not, so the judgment is gone; what remains is a log line.
  */
-function classifyArguments(text: string): QoderArgumentShape {
-  if (isJsonObject(text)) return { kind: 'complete' }
-  const first = text.trimStart()[0]
-  if (first !== '{' && first !== '[') return { kind: 'foreign' }
-  const end = closedValueEnd(text)
-  if (end === undefined) return { kind: 'damaged', detail: `${text.length} chars, never closed` }
-  const head = text.slice(0, end)
-  if (!isJsonObject(head)) return { kind: 'foreign' }
-  return { kind: 'damaged', detail: `closed at ${end} chars, ${text.length - end}-char tail` }
+function argumentsIssue(text: string): string | undefined {
+  if (!text.trim()) return undefined
+  try {
+    JSON.parse(text)
+    return undefined
+  } catch {
+    return `${text.length} chars, not valid JSON`
+  }
 }
 
 function parseEnvelope(rawData: string): QoderSseEnvelope {
@@ -175,15 +129,43 @@ function tokenUsage(innerChunk: QoderInnerChunk): TokenUsage | undefined {
   }
 }
 
-function finishKind(value: string | null | undefined): SuccessfulFinishKind | undefined {
+/**
+ * The finish reasons the official client treats as a filtered reply.
+ *
+ * `qodercli` classifies `content_filter`, `refusal` and `sensitive` as a refusal stop
+ * reason (`Ffo` in its bundle). The harness has no refusal kind, so the caller reports a
+ * normal stop plus a visible notice; what it must NOT do is let a filtered response carry
+ * executable tool calls, which is why {@link parseQoderSse} withholds them.
+ */
+const filteredFinishReasons: ReadonlySet<string> = new Set(['content_filter', 'refusal', 'sensitive'])
+
+/** What a caller may need to tell the user about how one stream ended. */
+export type QoderSseNotice = { kind: 'filtered', reason: string }
+
+/**
+ * Map one upstream finish reason onto the harness vocabulary.
+ *
+ * A filtered reply becomes `stop`: the official client would call it `refusal`, which the
+ * harness cannot express, and the caller adds a visible notice instead. An unrecognised
+ * reason fails the stream as non-retryable, exactly as the official chat client does
+ * (`UnsupportedFinishReasonError`, `retryable = false`); guessing a normal stop there would
+ * hide a vocabulary drift as a complete answer.
+ */
+function finishKind(
+  value: string | null | undefined,
+  onDiag?: (message: string) => void,
+): SuccessfulFinishKind | undefined {
   if (value === undefined || value === null || value === '') return undefined
   if (value === 'stop') return 'stop'
   if (value === 'length') return 'max-tokens'
-  if (value === 'tool_calls' || value === 'toolUse') return 'tool-calls'
-  if (value === 'content_filter') {
-    throw new QoderLlmError('Qoder blocked the response through its content filter.', 'PROVIDER_ERROR')
+  if (value === 'tool_calls' || value === 'toolUse' || value === 'function_call') return 'tool-calls'
+  if (filteredFinishReasons.has(value)) {
+    onDiag?.(`upstream filtered the response (${value}); reporting a normal stop`)
+    return 'stop'
   }
-  throw malformed(`Qoder returned unknown finish reason "${value}".`)
+  // `UNSUPPORTED_` is the prefix the host classifies as a non-retryable client failure, so
+  // this surfaces as a clear error instead of a retried 5xx.
+  throw new QoderLlmError(`Qoder returned unsupported finish reason "${value}".`, 'UNSUPPORTED_FINISH_REASON')
 }
 
 export async function* parseQoderSse(
@@ -202,6 +184,9 @@ export async function* parseQoderSse(
   let pendingUsage: TokenUsage | undefined
   let terminalKind: SuccessfulFinishKind = 'stop'
   let sawContent = false
+  // The notices are user-visible rows, so report each at most once per stream even when
+  // the upstream repeats the reason on several choices.
+  let filteredReason: string | undefined
   const maxBufferChars = options.maxBufferChars ?? defaultMaxSseBufferChars
 
   const closeTextual = (): StreamChunk[] => {
@@ -293,7 +278,13 @@ export async function* parseQoderSse(
         pendingUsage = tokenUsage(innerChunk) ?? pendingUsage
 
         for (const choice of innerChunk.choices ?? []) {
-          terminalKind = finishKind(choice.finish_reason) ?? terminalKind
+          if (typeof choice.finish_reason === 'string'
+            && filteredFinishReasons.has(choice.finish_reason)
+            && filteredReason === undefined) {
+            filteredReason = choice.finish_reason
+            options.onNotice?.({ kind: 'filtered', reason: choice.finish_reason })
+          }
+          terminalKind = finishKind(choice.finish_reason, options.onDiag) ?? terminalKind
           const delta = choice.delta
           if (!delta) continue
 
@@ -334,7 +325,6 @@ export async function* parseQoderSse(
                   state.id = rawCall.id
                 }
               }
-              let hasNewName = false
               if (rawCall.function?.name !== undefined) {
                 const name = rawCall.function.name
                 if (name === '' || name === null) {
@@ -344,10 +334,7 @@ export async function* parseQoderSse(
                   throw malformed('Qoder tool call has an invalid name.')
                 } else {
                   if (state.name && state.name !== name) throw malformed('Qoder changed a streamed tool-call name.')
-                  if (state.name !== name) {
-                    state.name = name
-                    hasNewName = true
-                  }
+                  state.name = name
                 }
               }
               if (rawCall.function?.arguments !== undefined) {
@@ -357,27 +344,12 @@ export async function* parseQoderSse(
                 state.arguments += rawCall.function.arguments
               }
 
-              const wasOpen = state.blockIndex !== undefined
-              for (const chunk of openToolCall(state)) yield chunk
-              if (wasOpen && state.blockIndex !== undefined && state.emittedArguments < state.arguments.length) {
-                const argumentsDelta = state.arguments.slice(state.emittedArguments)
-                state.emittedArguments = state.arguments.length
-                yield {
-                  type: 'tool-call-delta',
-                  index: state.blockIndex,
-                  id: ToolCallId(state.id),
-                  ...state.name ? { name: state.name } : {},
-                  argumentsDelta,
-                }
-              } else if (wasOpen && state.blockIndex !== undefined && hasNewName) {
-                yield {
-                  type: 'tool-call-delta',
-                  index: state.blockIndex,
-                  id: ToolCallId(state.id),
-                  name: state.name,
-                  argumentsDelta: '',
-                }
-              }
+              // Tool blocks are NOT opened while streaming. `finish_reason` arrives in a later
+              // chunk, so a call opened here would already be a dangling block when a filter
+              // is announced; the harness assembles an unclosed tool call from its deltas and
+              // then executes it (BlockAssembler only drops calls on max-tokens). Buffering the
+              // arguments until the stream ends is what makes "filtered replies carry no calls"
+              // true for the real ordering, at the cost of showing the call once it completes.
             }
           }
         }
@@ -397,26 +369,32 @@ export async function* parseQoderSse(
   }
   for (const chunk of closeTextual()) yield chunk
 
-  // An unidentifiable call cannot be executed at all, so it stays provider corruption unless
-  // the provider already admitted it ran out of output. Arguments are judged by whether they
-  // ever claimed to be JSON: a damaged attempt (#21) reaches the harness as a tool-input error
-  // and is reported here, while a payload that is not JSON at all stays fatal.
+  // An unidentifiable call cannot execute at all, so it stays provider corruption unless the
+  // provider already admitted it ran out of output. The ARGUMENTS are never judged here: the
+  // official client concatenates them, parses once, and hands an unparsable payload on as an
+  // empty input plus the raw text, which the tool layer answers as an invalid-argument error
+  // so the model can retry. Sending the bytes through keeps that behavior, whatever shape.
+  //
+  // A FILTERED reply is the one case that must not carry calls: the harness plans tools from
+  // the blocks, not from the finish kind, so an emitted call would run something the upstream
+  // refused to deliver. Calls are only opened here, at the end, so skipping this loop leaves
+  // the downstream with text alone.
   const truncated = terminalKind === 'max-tokens'
   let emittedCalls = 0
-  for (const [, state] of [...toolCalls.entries()].sort(([left], [right]) => left - right)) {
+  if (filteredReason !== undefined && toolCalls.size > 0) {
+    options.onDiag?.(`withheld ${toolCalls.size} tool call(s): the reply was filtered (${filteredReason})`)
+  }
+  for (const [, state] of filteredReason === undefined
+    ? [...toolCalls.entries()].sort(([left], [right]) => left - right)
+    : []) {
     const normalizedArguments = state.arguments.trim() ? state.arguments : '{}'
     if (!state.id || !state.name) {
       if (truncated) continue
       throw malformed('Qoder completed an unidentifiable tool call.')
     }
-    const shape = classifyArguments(normalizedArguments)
-    if (shape.kind === 'damaged') {
-      // The block carries the bytes upstream sent; only deltas cross the shim, so pi-ai still
-      // answers this as a tool-input error. The point is that the turn survives - and that the
-      // shape is visible instead of silent.
-      options.onDiag?.(`tool call "${state.name}" carried damaged arguments (${shape.detail})`)
-    } else if (shape.kind === 'foreign' && !truncated) {
-      throw malformed(`Qoder completed tool call "${state.name}" with malformed JSON arguments.`)
+    const issue = argumentsIssue(normalizedArguments)
+    if (issue !== undefined) {
+      options.onDiag?.(`tool call "${state.name}" carried unparsable arguments (${issue})`)
     }
     for (const chunk of openToolCall(state)) yield chunk
     if (state.blockIndex === undefined) throw malformed('Qoder failed to open a completed tool call.')
@@ -448,7 +426,12 @@ export async function* parseQoderSse(
       type: 'finish',
       reason: {
         kind: 'error',
-        failure: { message: 'Model returned a completed response with no content.', code: EMPTY_RESPONSE_CODE },
+        failure: {
+          message: filteredReason === undefined
+            ? 'Model returned a completed response with no content.'
+            : `Qoder filtered the reply (${filteredReason}) before returning any content.`,
+          code: EMPTY_RESPONSE_CODE,
+        },
       },
     }
     return

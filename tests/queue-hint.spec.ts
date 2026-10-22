@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createQueueHint, type QueueHintSession } from '../src/queue-hint.ts'
-import { installJobTokenHint } from '../src/job-token-hint.ts'
+import { emitNoticeRow, installJobTokenHint } from '../src/job-token-hint.ts'
 
 interface HintEvent {
   type: string
-  data: { commandId: string, text?: string }
+  data: { commandId: string, text?: string, kind?: string }
 }
 
 function session() {
@@ -144,5 +144,15 @@ describe('request-owned queue hints', () => {
     const [oldId, newId] = runs(a).map(event => event.data.commandId)
     expect(oldId).not.toBe(newId)
     expect(dones(a).map(event => event.data.commandId)).toEqual([oldId, newId, newId])
+  })
+
+  it('prints a one-off filtered-reply notice as its own run/done pair', () => {
+    const a = session()
+    emitNoticeRow(a, 'error', '回复被上游内容安全策略过滤（content_filter），内容可能不完整')
+    expect(runs(a)).toHaveLength(1)
+    expect(dones(a)).toHaveLength(1)
+    expect(dones(a)[0]?.data.commandId).toBe(runs(a)[0]?.data.commandId)
+    expect(dones(a)[0]?.data.kind).toBe('error')
+    expect(dones(a)[0]?.data.text).toContain('content_filter')
   })
 })

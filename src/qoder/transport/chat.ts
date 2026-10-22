@@ -15,7 +15,7 @@ import { defaultMaxErrorBytes, readLimitedText } from './request.ts'
 import { buildAuthHeaders, qoderUserAgent, type CosyCredentials } from './wire/cosy.ts'
 import { qoderEncodeBody } from './wire/encoding.ts'
 import { buildQoderRequestBody } from './wire/serialize.ts'
-import { parseQoderSse } from './wire/sse.ts'
+import { parseQoderSse, type QoderSseNotice } from './wire/sse.ts'
 import type { QoderWireMessage } from './wire/wire-types.ts'
 
 export interface QoderChatDependencies {
@@ -30,6 +30,11 @@ export interface QoderChatDependencies {
   onQueueWait?: (info: QoderQueueWait) => void
   /** One-line diagnostic sink (chat vs queue decisions). */
   onDiag?: (message: string) => void
+  /**
+   * Called when the upstream filtered the reply. The turn still ends as a normal stop, so
+   * this is the only user-visible trace that the answer was cut short.
+   */
+  onNotice?: (notice: QoderSseNotice) => void
   /** Whether to poll out a queue answer; false hands the failure to the host with its hint. */
   queueWait?: () => boolean
   /**
@@ -446,6 +451,7 @@ export async function* streamQoderChat(
         for await (const chunk of parseQoderSse(response.body, {
           onActivity: resetIdleTimer,
           ...dependencies.onDiag === undefined ? {} : { onDiag: dependencies.onDiag },
+          ...dependencies.onNotice === undefined ? {} : { onNotice: dependencies.onNotice },
         })) {
           chunkCount++
           if (firstChunkDurationMs === undefined) {

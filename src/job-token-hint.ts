@@ -85,6 +85,25 @@ export function emitJobTokenRefreshFailedHint(at: number, text: string): void {
   appendHintRow(agent, 'error', text)
 }
 
+/**
+ * Append one one-off notice row into a specific session.
+ *
+ * A notice reports something the user needs to see but that neither fails the turn
+ * nor belongs to a row lifecycle: today that is the upstream filtering a reply. It
+ * reuses the `qoder` row name, so it reads exactly like the heal rows.
+ *
+ * @param session - the session to append into.
+ * @param kind - how the row renders; `error` marks an incomplete answer.
+ * @param text - the row's summary line.
+ */
+export function emitNoticeRow(
+  session: { append(type: string, data: unknown): unknown },
+  kind: 'success' | 'error',
+  text: string,
+): void {
+  appendHintRow({ id: 'notice', session }, kind, text)
+}
+
 /** Append one log-only command pair carrying `text` as its outcome. */
 function appendHintRow(agent: HintAgent, kind: 'success' | 'error', text: string): void {
   const session = agent.session

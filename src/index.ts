@@ -34,7 +34,7 @@ import type { QoderModelInfo } from './catalog.ts'
 import type { QoderWebCatalog, QoderWebProbeSection } from './status-paths.ts'
 import { QODER_SETTINGS_FACE_PATH } from './status-paths.ts'
 import { clearHostHeartbeat, writeHostHeartbeat } from './host-heartbeat.ts'
-import { emitJobTokenHint, emitJobTokenRefreshFailedHint, installJobTokenHint } from './job-token-hint.ts'
+import { emitJobTokenHint, emitJobTokenRefreshFailedHint, emitNoticeRow, installJobTokenHint } from './job-token-hint.ts'
 import { SettingsStore } from './settings-store.ts'
 import { QODER_CONNECT_VERSION } from './version.ts'
 import { CHINA_VARIANT, GLOBAL_VARIANT, QODER_VARIANTS, type QoderVariant } from './variants.ts'
@@ -527,6 +527,21 @@ function jobTokenRefreshFailedHintText(at: number): string {
   return `jobToken 已重换但仍被上游拒绝（${time}）— 自愈未恢复，该请求已失败`
 }
 
+/**
+ * The filtered-reply row's summary line.
+ *
+ * The upstream cut the answer by policy; the turn still ends normally, so without this
+ * row the user would read a truncated reply as a complete one.
+ */
+function contentFilterHintText(reason: string): string {
+  return `回复被上游内容安全策略过滤（${reason}），内容可能不完整`
+}
+
+/** The compaction-specific wording: the summary, not the conversation reply, was cut short. */
+function compactionFilteredHintText(reason: string): string {
+  return `压缩摘要被上游内容安全策略过滤（${reason}），压缩结果可能不完整`
+}
+
 /** Build one variant's stores, transport, and probe state. */
 function createVariantRuntime(
   ctx: Context,
@@ -615,6 +630,25 @@ function createVariantRuntime(
         | undefined)?.get(id),
       onDiag: writeQueueDiag,
     }),
+    // A filtered ending is reported as a normal stop (the official client calls it a refusal,
+    // which this host cannot express), so the row is the only trace. A title request gets the
+    // diagnostic only: its filter must not claim the conversation's reply was cut short. A
+    // compaction request DOES get a row, worded for the summary it was producing.
+    createNoticeHandler: options => {
+      const sessionId = options.sessionId === undefined ? undefined : String(options.sessionId)
+      const purpose = options.purpose
+      return notice => {
+        writeQueueDiag(`notice: ${notice.kind} (${notice.reason}) purpose=${purpose ?? 'none'} sessionId=${sessionId ?? 'none'}`)
+        if (purpose === 'session-title') return
+        const session = sessionId === undefined
+          ? undefined
+          : (ctx.get('sessions') as { get(id: string): QueueHintSession | undefined } | undefined)?.get(sessionId)
+        if (session === undefined) return
+        emitNoticeRow(session, 'error', purpose === 'compaction'
+          ? compactionFilteredHintText(notice.reason)
+          : contentFilterHintText(notice.reason))
+      }
+    },
   })
   const client = new QoderUpstreamClient({
     region: variant.region,
