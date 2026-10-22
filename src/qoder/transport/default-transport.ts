@@ -51,6 +51,7 @@ export class DefaultQoderTransport implements QoderTransport {
   private readonly onJobTokenRefreshed: QoderTransportOptions['onJobTokenRefreshed']
   private readonly onJobTokenRefreshFailed: QoderTransportOptions['onJobTokenRefreshFailed']
   private readonly onQueueWait: QoderTransportOptions['onQueueWait']
+  private readonly createQueueWaitHandler: QoderTransportOptions['createQueueWaitHandler']
   private readonly queueWaitBudgetMs: QoderTransportOptions['queueWaitBudgetMs']
   private readonly onDiag: QoderTransportOptions['onDiag']
   private readonly queueWait: QoderTransportOptions['queueWait']
@@ -72,6 +73,7 @@ export class DefaultQoderTransport implements QoderTransport {
     this.onJobTokenRefreshed = options.onJobTokenRefreshed
     this.onJobTokenRefreshFailed = options.onJobTokenRefreshFailed
     this.onQueueWait = options.onQueueWait
+    this.createQueueWaitHandler = options.createQueueWaitHandler
     this.queueWaitBudgetMs = options.queueWaitBudgetMs
     this.onDiag = options.onDiag
     this.queueWait = options.queueWait
@@ -110,7 +112,8 @@ export class DefaultQoderTransport implements QoderTransport {
   }
 
   stream(options: GenerateOptions, model?: QoderCatalogModel): AsyncIterable<StreamChunk> {
-    return this.generate(options, model)
+    const onQueueWait = this.createQueueWaitHandler?.(options) ?? this.onQueueWait
+    return this.generate(options, model, onQueueWait)
   }
 
   /** Report the pending self-heal once a chat is accepted, then clear it. */
@@ -193,6 +196,7 @@ export class DefaultQoderTransport implements QoderTransport {
     credentials: CosyCredentials,
     messages: QoderWireMessage[],
     onAccepted: () => void,
+    onQueueWait: QoderTransportOptions['onQueueWait'],
   ): AsyncGenerator<StreamChunk> {
     const stream = streamQoderChat(options, model, credentials, messages, {
       fetch: this.fetchImpl,
@@ -200,7 +204,7 @@ export class DefaultQoderTransport implements QoderTransport {
       region: this.region,
       responseHeaderTimeoutMs: this.responseHeaderTimeoutMs,
       streamIdleTimeoutMs: this.streamIdleTimeoutMs,
-      ...this.onQueueWait === undefined ? {} : { onQueueWait: this.onQueueWait },
+      ...onQueueWait === undefined ? {} : { onQueueWait },
       ...this.queueWaitBudgetMs === undefined ? {} : { queueWaitBudgetMs: this.queueWaitBudgetMs() },
       ...this.onDiag === undefined ? {} : { onDiag: this.onDiag },
       ...this.queueWait === undefined ? {} : { queueWait: this.queueWait },
@@ -213,7 +217,8 @@ export class DefaultQoderTransport implements QoderTransport {
 
   private async * generate(
     options: GenerateOptions,
-    model?: QoderCatalogModel,
+    model: QoderCatalogModel | undefined,
+    onQueueWait: QoderTransportOptions['onQueueWait'],
   ): AsyncGenerator<StreamChunk> {
     if (options.signal?.aborted) throw aborted('Request was aborted prior to generation.')
 
@@ -235,7 +240,7 @@ export class DefaultQoderTransport implements QoderTransport {
       // A pending notice from an earlier heal is reported once this request is accepted.
       yield* this.streamChat(options, model, chatCredentials, messages, () => {
         this.onChatAccepted()
-      })
+      }, onQueueWait)
       return
     } catch (error: unknown) {
       // A cached job token the upstream started rejecting reads as HTTP 401 before
@@ -261,7 +266,7 @@ export class DefaultQoderTransport implements QoderTransport {
       try {
         yield* this.streamChat(options, model, refreshed, messages, () => {
           this.onChatAccepted()
-        })
+        }, onQueueWait)
         return
       } catch (error: unknown) {
         if (!isQoderAuthRejection(error) || options.signal?.aborted) throw error

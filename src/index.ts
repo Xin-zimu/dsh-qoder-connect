@@ -26,7 +26,7 @@ import { QoderUpstreamClient, validateApiKey } from './upstream.ts'
 import { createQoderTransport, type QoderCheckInResult, type QoderTransport } from './qoder/transport/index.ts'
 import { getMachineId } from './qoder/transport/machine-id.ts'
 import { configurePluginPaths, qoderMachineIdPath, qoderPluginDataDir, qoderStateDir } from './paths.ts'
-import { queueCopy } from './copy.ts'
+import { createQueueHint, type QueueHintSession } from './queue-hint.ts'
 import { registerQoderStatusRoute } from './web-status.ts'
 import { createProbeKey, registerQoderProbeRoute } from './probe-route.ts'
 import { CheckInScheduler, DEFAULT_CHECK_IN_MINUTE, EARLIEST_CHECK_IN_MINUTE, JsonFileCheckInStore, normalizeCheckInMinute } from './checkin-scheduler.ts'
@@ -34,7 +34,7 @@ import type { QoderModelInfo } from './catalog.ts'
 import type { QoderWebCatalog, QoderWebProbeSection } from './status-paths.ts'
 import { QODER_SETTINGS_FACE_PATH } from './status-paths.ts'
 import { clearHostHeartbeat, writeHostHeartbeat } from './host-heartbeat.ts'
-import { emitJobTokenHint, emitJobTokenRefreshFailedHint, emitQueueHint, installJobTokenHint, openQueueHint, updateQueueHint } from './job-token-hint.ts'
+import { emitJobTokenHint, emitJobTokenRefreshFailedHint, installJobTokenHint } from './job-token-hint.ts'
 import { SettingsStore } from './settings-store.ts'
 import { QODER_CONNECT_VERSION } from './version.ts'
 import { CHINA_VARIANT, GLOBAL_VARIANT, QODER_VARIANTS, type QoderVariant } from './variants.ts'
@@ -469,8 +469,6 @@ interface VariantRuntime {
   inflightFetch: CatalogFetch | undefined
   /** Notify the model directory that this variant's answers changed. */
   invalidate: () => void
-  /** Host session of the most recent adapter call; the transport has no session id. */
-  sessionRef: { id: string | undefined }
   /** Configured queue-wait budget in ms, read per call. */
   queueBudgetMs: () => number
   /** Whether the provider registered successfully. */
@@ -562,11 +560,6 @@ function createVariantRuntime(
       // Diagnostics only; never affect the chat.
     }
   }
-  // The adapter sees the host session; the shim-based transport does not.
-  const sessionRef: { id: string | undefined } = { id: undefined }
-  // Last row written, and the row this wait opened (undefined until it opens one).
-  let lastQueueHint = { attempt: 0, at: 0 }
-  let queueHintId: string | undefined
   const transport = createQoderTransport({
     region: variant.region,
     resolvePat: () => store.patPromise(),
@@ -598,46 +591,15 @@ function createVariantRuntime(
       )
       emitJobTokenRefreshFailedHint(info.at, jobTokenRefreshFailedHintText(info.at))
     },
-    onQueueWait: info => {
-      // `llm/retry` is the host's own retry state machine: writing it from here
-      // corrupted sessions whenever a wait was interrupted or its round numbers
-      // skipped. This row is a plain log line that touches no state machine.
-      if (info.cleared === true) {
-        // The wait ended; the next one opens a fresh row.
-        queueHintId = undefined
-        return
-      }
-      const now = Date.now()
-      // The session-title request shares this provider, so two calls can open a
-      // wait at the same moment; one row per burst is the point.
-      if (now - lastQueueHint.at < 5_000) return
-      lastQueueHint = { attempt: info.attempt, at: now }
-      const copy = queueCopy()
-      const text = copy.hint({
-        display: variant.displayName,
-        attempt: info.attempt,
-        ...info.waitTimeMs === undefined ? {} : { waitSeconds: Math.ceil(info.waitTimeMs / 1000) },
-      })
-      const sessionId = info.sessionId ?? sessionRef.id
-      const sessions = ctx.get('sessions') as
+    createQueueWaitHandler: options => createQueueHint({
+      sessionId: options.sessionId === undefined ? undefined : String(options.sessionId),
+      purpose: options.purpose,
+      displayName: variant.displayName,
+      resolveSession: id => (ctx.get('sessions') as
         | { get(id: string): QueueHintSession | undefined }
-        | undefined
-      const session = sessionId === undefined ? undefined : sessions?.get(sessionId)
-      if (session === undefined) {
-        writeQueueDiag(`hint fallback: no session (sessionId=${sessionId ?? 'none'})`)
-        emitQueueHint(text)
-        return
-      }
-      // Rounds update the one row this wait opened, so a long wait never adds
-      // rows: `command/done` folds into the row its `commandId` created.
-      if (queueHintId === undefined) {
-        queueHintId = openQueueHint(session, text)
-        writeQueueDiag(`hint open attempt=${info.attempt} id=${queueHintId ?? 'none'}`)
-        return
-      }
-      updateQueueHint(session, queueHintId, text)
-      writeQueueDiag(`hint update attempt=${info.attempt}`)
-    },
+        | undefined)?.get(id),
+      onDiag: writeQueueDiag,
+    }),
   })
   const client = new QoderUpstreamClient({
     region: variant.region,
@@ -699,7 +661,6 @@ function createVariantRuntime(
     invalidate: () => {},
     registered: false,
     jobTokenRefreshedAt: () => jobTokenRefreshedAt,
-    sessionRef,
     queueBudgetMs: () => Math.max(1, current().queueWaitSeconds ?? QUEUE_WAIT_SECONDS_DEFAULT) * 1_000,
     checkIn: (signal?: AbortSignal) => transport.checkIn(signal),
   }
@@ -725,11 +686,6 @@ function catalogSection(runtime: VariantRuntime): QoderWebCatalog {
 function isProbeCandidate(info: QoderModelInfo): boolean {
   if (info.reasoning?.supports !== true) return false
   return (info.reasoning.supportedEfforts?.length ?? 0) === 0
-}
-
-/** The slice of a session the queue notice needs. */
-interface QueueHintSession {
-  append(type: string, data: unknown): unknown
 }
 
 /** Compact probe state for one card: consent, candidates, observations. */
@@ -843,7 +799,6 @@ async function startVariant(ctx: Context, runtime: VariantRuntime, seedCatalog: 
       catalog,
       resolveAttachments: () => ctx.get('attachments'),
       observe: modelId => probeService.recordFor(modelId),
-      onSession: id => { runtime.sessionRef.id = id },
       queueBudgetMs: runtime.queueBudgetMs,
     })
     runtime.invalidate = () => {

@@ -19,6 +19,7 @@ import type { QoderCatalog, QoderModelInfo } from './catalog.ts'
 import type { QoderProbeRecord } from './probe-store.ts'
 import { retryAfterFromMessage, type QoderShim } from './shim.ts'
 import { normalizeCredits } from './upstream.ts'
+import { qoderSessionHeaders, withQoderRequestPurpose } from './request-session.ts'
 
 /** Default provider route owned by this bundle (the China variant). */
 export const QODER_PROVIDER = 'qoder'
@@ -122,12 +123,6 @@ export interface QoderAdapterOptions {
   observe?: (modelId: string) => QoderProbeRecord | undefined
   /** Configured queue-wait budget in ms, read per call to size the idle window. */
   queueBudgetMs?: () => number
-  /**
-   * Report the host session a request belongs to. The shim's HTTP body carries
-   * no session id, so this is the only place the transport's queue notices can
-   * learn which conversation is waiting.
-   */
-  onSession?: (sessionId: string | undefined) => void
 }
 
 /** What {@link createQoderAdapter} hands back. */
@@ -225,6 +220,7 @@ export function createQoderAdapter(options: QoderAdapterOptions): QoderAdapter {
     return catalog.current().map(info => toPiModel(info, baseUrl, observe?.(info.id), providerId))
   }
 
+  const api = openAICompletionsApi()
   const base = createProvider({
     id: providerId,
     name: displayName,
@@ -240,7 +236,19 @@ export function createQoderAdapter(options: QoderAdapterOptions): QoderAdapter {
       },
     },
     models: buildModels(),
-    api: openAICompletionsApi(),
+    // pi-ai receives the host session per call, but OpenAI's body omits it.
+    // Carry it explicitly to our loopback shim for both dispatch entry points.
+    api: {
+      ...api,
+      stream: (model, context, request) => api.stream(model, context, {
+        ...request,
+        headers: qoderSessionHeaders(request?.sessionId, request?.headers),
+      }),
+      streamSimple: (model, context, request) => api.streamSimple(model, context, {
+        ...request,
+        headers: qoderSessionHeaders(request?.sessionId, request?.headers),
+      }),
+    },
   })
 
   // `getModels` is delegated to a live read (the reuse-catalog pattern from
@@ -282,7 +290,7 @@ export function createQoderAdapter(options: QoderAdapterOptions): QoderAdapter {
     // itself via the store, so the secret never reaches upstream.
     resolveApiKey: async () => shim.token(),
     ...resolveAttachments === undefined ? {} : { resolveAttachments },
-  }, options.onSession)
+  })
 
   return {
     adapter,
@@ -346,7 +354,6 @@ class QoderPiAiAdapter extends PiAiAdapter {
   constructor(
     private readonly catalog: QoderCatalog,
     options: ConstructorParameters<typeof PiAiAdapter>[0],
-    private readonly onSession?: (sessionId: string | undefined) => void,
   ) {
     super(options)
   }
@@ -380,26 +387,17 @@ class QoderPiAiAdapter extends PiAiAdapter {
    * which never calls `this.stream`. Only the field is rewritten, never the message.
    */
   override async *stream(options: GenerateOptions): AsyncGenerator<StreamChunk> {
-    this.reportSession(options)
-    yield* rejectDamagedToolArguments(this.withRetryHint(super.stream(options)))
+    yield* withQoderRequestPurpose(options.purpose,
+      rejectDamagedToolArguments(this.withRetryHint(super.stream(options))))
   }
 
   override async prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<PreparedAdapterCall> {
     const prepared = await super.prepareCall(provider, model, signal)
     return {
       ...prepared,
-      // The harness uses this stream, never `this.stream`, so the session has to
-      // be reported here too.
-      stream: (options: GenerateOptions) => {
-        this.reportSession(options)
-        return rejectDamagedToolArguments(this.withRetryHint(prepared.stream(options)))
-      },
+      stream: (options: GenerateOptions) => withQoderRequestPurpose(options.purpose,
+        rejectDamagedToolArguments(this.withRetryHint(prepared.stream(options)))),
     }
-  }
-
-  /** Remember which host session this call belongs to. */
-  private reportSession(options: GenerateOptions): void {
-    this.onSession?.(options.sessionId === undefined ? undefined : String(options.sessionId))
   }
 
   /** Re-stamp `failure.providerRetryAfterMs` on every terminal failure chunk. */

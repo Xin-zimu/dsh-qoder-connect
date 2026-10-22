@@ -340,7 +340,13 @@ async function openAiContentBlocks(
  */
 async function toGenerateOptions(
   bodyJson: string,
-  context: { providerId: string, attachments: Pick<AttachmentStore, 'saveImage'> | undefined, signal?: AbortSignal | undefined },
+  context: {
+    providerId: string
+    attachments: Pick<AttachmentStore, 'saveImage'> | undefined
+    signal?: AbortSignal | undefined
+    sessionId?: string | undefined
+    purpose?: GenerateOptions['purpose']
+  },
 ): Promise<GenerateOptions> {
   let parsed: unknown
   try {
@@ -462,6 +468,8 @@ async function toGenerateOptions(
       ? { stop: stop.filter((entry): entry is string => typeof entry === 'string') }
       : typeof stop === 'string' ? { stop: [stop] } : {},
     ...context.signal === undefined ? {} : { signal: context.signal },
+    ...context.sessionId === undefined ? {} : { sessionId: context.sessionId as NonNullable<GenerateOptions['sessionId']> },
+    ...context.purpose === undefined ? {} : { purpose: context.purpose },
   }
 }
 
@@ -792,12 +800,14 @@ export class QoderUpstreamClient {
    * real HTTP status, not a 200 whose first frame is an error. Once streaming has
    * begun, failures degrade to the error-frame-then-`[DONE]` form.
    */
-  async chatStream(bodyJson: string, signal?: AbortSignal): Promise<QoderChatResult> {
+  async chatStream(bodyJson: string, signal?: AbortSignal, sessionId?: string, purpose?: GenerateOptions['purpose']): Promise<QoderChatResult> {
     let options: GenerateOptions
     try {
       options = await toGenerateOptions(bodyJson, {
         providerId: this.providerId,
         attachments: this.attachments,
+        sessionId,
+        purpose,
         ...signal === undefined ? {} : { signal },
       })
     } catch (error) {

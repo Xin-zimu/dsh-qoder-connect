@@ -49,6 +49,8 @@ export interface QoderTransportOptions {
   onJobTokenRefreshFailed?: (info: { region: QoderRegion; at: number; status?: number }) => void
   /** Called once per queue poll round, so the conversation can show progress. */
   onQueueWait?: (info: QoderQueueWait) => void
+  /** Create an observer owned by one stream, including its internal replays. */
+  createQueueWaitHandler?: (options: GenerateOptions) => (info: QoderQueueWait) => void
   /** Budget for one chat call's queue wait; read per call so settings apply live. */
   queueWaitBudgetMs?: () => number
   /** One-line diagnostic sink (chat vs queue decisions). */

@@ -85,18 +85,6 @@ export function emitJobTokenRefreshFailedHint(at: number, text: string): void {
   appendHintRow(agent, 'error', text)
 }
 
-/** Print one queue-wait row; best effort, like the token rows. */
-export function emitQueueHint(text: string): void {
-  const agent = lastRunningAgent
-  if (agent?.session === undefined) return
-  appendHintRow(agent, 'success', text)
-}
-
-/** Print one queue-wait row into a specific session, not the last running agent. */
-export function emitQueueHintTo(session: { append(type: string, data: unknown): unknown }, text: string): void {
-  appendHintRow({ id: 'queue', session }, 'success', text)
-}
-
 /** Append one log-only command pair carrying `text` as its outcome. */
 function appendHintRow(agent: HintAgent, kind: 'success' | 'error', text: string): void {
   const session = agent.session

@@ -19,6 +19,7 @@ import type { QoderCredentialStore } from './auth.ts'
 import type { QoderCatalog } from './catalog.ts'
 import { hostIsLoopback, originIsLoopback } from './loopback.ts'
 import { KIND_STATUS, type QoderUpstreamClient } from './upstream.ts'
+import { QODER_PURPOSE_HEADER, QODER_SESSION_HEADER, readQoderPurposeHeader, readQoderSessionHeader } from './request-session.ts'
 
 /** Minimal logger surface the plugin context already provides. */
 export interface ShimLogger {
@@ -276,7 +277,9 @@ export function createQoderShim(options: QoderShimOptions): QoderShim {
     res.on('close', () => {
       if (!res.writableEnded) controller.abort('client closed the response')
     })
-    const result = await client.chatStream(raw, controller.signal)
+    const sessionId = readQoderSessionHeader(req.headers[QODER_SESSION_HEADER])
+    const purpose = readQoderPurposeHeader(req.headers[QODER_PURPOSE_HEADER])
+    const result = await client.chatStream(raw, controller.signal, sessionId, purpose)
 
     if (!result.ok) {
       // The message quotes the shim's OUTBOUND status, never the upstream's

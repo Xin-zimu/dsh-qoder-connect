@@ -1010,7 +1010,7 @@ declare class QoderUpstreamClient {
    * real HTTP status, not a 200 whose first frame is an error. Once streaming has
    * begun, failures degrade to the error-frame-then-`[DONE]` form.
    */
-  chatStream(bodyJson: string, signal?: AbortSignal): Promise<QoderChatResult>;
+  chatStream(bodyJson: string, signal?: AbortSignal, sessionId?: string, purpose?: GenerateOptions['purpose']): Promise<QoderChatResult>;
   /** Drive the SSE body from an already-started chunk iterator. */
   private bodyStream;
   /**
@@ -1211,12 +1211,6 @@ interface QoderAdapterOptions {
   observe?: (modelId: string) => QoderProbeRecord | undefined;
   /** Configured queue-wait budget in ms, read per call to size the idle window. */
   queueBudgetMs?: () => number;
-  /**
-   * Report the host session a request belongs to. The shim's HTTP body carries
-   * no session id, so this is the only place the transport's queue notices can
-   * learn which conversation is waiting.
-   */
-  onSession?: (sessionId: string | undefined) => void;
 }
 /** What {@link createQoderAdapter} hands back. */
 interface QoderAdapter {
