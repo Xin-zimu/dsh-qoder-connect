@@ -26,9 +26,6 @@ import type { QoderWireMessage } from './wire/wire-types.ts'
 
 export const defaultStreamIdleTimeoutMs = 10 * 60 * 1000
 
-/** Upper bound on how long a rotated-token notice may wait for an accepted chat. */
-const jobTokenNoticeMaxAgeMs = 5 * 60 * 1000
-
 function aborted(message: string): QoderLlmError {
   return new QoderLlmError(message, 'ABORTED')
 }
@@ -57,8 +54,6 @@ export class DefaultQoderTransport implements QoderTransport {
   private readonly queueWaitBudgetMs: QoderTransportOptions['queueWaitBudgetMs']
   private readonly onDiag: QoderTransportOptions['onDiag']
   private readonly queueWait: QoderTransportOptions['queueWait']
-  /** When a self-heal exchanged a fresh job token; cleared once a chat succeeds. */
-  private pendingRefreshAt: number | undefined
   /** Whether the current unresolved heal failure has already been reported, once per outage. */
   private refreshFailureAnnounced = false
 
@@ -121,26 +116,24 @@ export class DefaultQoderTransport implements QoderTransport {
     return this.generate(options, model, onQueueWait, onNotice)
   }
 
-  /** Report the pending self-heal once a chat is accepted, then clear it. */
-  private flushPendingRefreshNotice(): void {
-    if (this.pendingRefreshAt === undefined) return
-    const at = this.pendingRefreshAt
-    this.pendingRefreshAt = undefined
-    // Too old to be news: its timestamp would name a moment the user cannot connect to now.
-    if (Date.now() - at > jobTokenNoticeMaxAgeMs) return
+  /**
+   * Report a self-heal notice into the configured sink.
+   *
+   * No age guard: the notice belongs to this request and is reported at its own
+   * acceptance, so an age limit could only cut a row whose retry queued a while.
+   */
+  private emitRefreshedNotice(notice: { at: number; sessionId?: string }): void {
     this.logger?.warn?.('[Qoder Stream] Job token was auto-refreshed after an upstream rejection; the chat has recovered')
-    this.onJobTokenRefreshed?.({ region: this.region, at })
-  }
-
-  /** Drop a pending rotation notice whose heal did not rescue anything. */
-  private discardPendingRefreshNotice(): void {
-    this.pendingRefreshAt = undefined
+    this.onJobTokenRefreshed?.({
+      region: this.region,
+      at: notice.at,
+      ...(notice.sessionId !== undefined ? { sessionId: notice.sessionId } : {}),
+    })
   }
 
   /** Note that the upstream accepted a chat, ending any unresolved heal failure. */
   private onChatAccepted(): void {
     this.refreshFailureAnnounced = false
-    this.flushPendingRefreshNotice()
   }
 
   async discoverModels(signal?: AbortSignal): Promise<readonly QoderCatalogModel[]> {
@@ -244,13 +237,20 @@ export class DefaultQoderTransport implements QoderTransport {
     // Image publication may have refreshed a rejected job token, so re-read the
     // credential that actually signs the chat.
     const chatCredentials = await this.auth.getCredentials(pat, options.signal)
+    // Track whether any chunk was yielded to the consumer across this request.
+    // If output was already produced mid-stream before an error (e.g. 401 mid-flight),
+    // replaying the whole request would emit duplicated content to the user.
+    let produced = false
     try {
-      // A pending notice from an earlier heal is reported once this request is accepted.
-      yield* this.streamChat(options, model, chatCredentials, messages, () => {
+      for await (const chunk of this.streamChat(options, model, chatCredentials, messages, () => {
         this.onChatAccepted()
-      }, onQueueWait, onNotice)
+      }, onQueueWait, onNotice)) {
+        produced = true
+        yield chunk
+      }
       return
     } catch (error: unknown) {
+      if (produced) throw error
       // A cached job token the upstream started rejecting reads as HTTP 401 before
       // any stream byte. One fresh exchange self-heals that window; a revoked PAT
       // fails the retry identically. RATE_LIMIT/QUOTA are never healed here.
@@ -264,19 +264,29 @@ export class DefaultQoderTransport implements QoderTransport {
     // Each retry exchanges outside the shared single-flight, which a departing
     // waiter can abort.
     let lastRejection: unknown
-    // The rotation this request armed; discarding on failure must clear only it.
-    let noticeAt: number | undefined
+    let requestNotice: { at: number; sessionId?: string } | undefined
     for (let round = 0; round < 2; round++) {
       const refreshed = await this.auth.exchangeFresh(pat, options.signal)
-      // The next chat accepted after the rotation is what makes it reportable.
-      this.pendingRefreshAt = Date.now()
-      noticeAt = this.pendingRefreshAt
+      // The notice is kept local to this request so concurrent rotations in other
+      // sessions cannot crosstalk, overwrite each other, or drop notices.
+      requestNotice = {
+        at: Date.now(),
+        ...(options.sessionId !== undefined ? { sessionId: String(options.sessionId) } : {}),
+      }
       try {
-        yield* this.streamChat(options, model, refreshed, messages, () => {
+        for await (const chunk of this.streamChat(options, model, refreshed, messages, () => {
           this.onChatAccepted()
-        }, onQueueWait, onNotice)
+          if (requestNotice !== undefined) {
+            this.emitRefreshedNotice(requestNotice)
+            requestNotice = undefined
+          }
+        }, onQueueWait, onNotice)) {
+          produced = true
+          yield chunk
+        }
         return
       } catch (error: unknown) {
+        if (produced) throw error
         if (!isQoderAuthRejection(error) || options.signal?.aborted) throw error
         lastRejection = error
         if (round + 1 < 2) {
@@ -285,18 +295,25 @@ export class DefaultQoderTransport implements QoderTransport {
             round: round + 1,
           })
           await new Promise<void>((resolve, reject) => {
-            const timer = setTimeout(resolve, 2_000)
-            options.signal?.addEventListener('abort', () => {
-              clearTimeout(timer)
+            const signal = options.signal
+            if (signal?.aborted) {
               reject(aborted('Request was aborted during the re-auth backoff.'))
-            }, { once: true })
+              return
+            }
+            let timer: ReturnType<typeof setTimeout> | undefined
+            const onAbort = () => {
+              if (timer !== undefined) clearTimeout(timer)
+              reject(aborted('Request was aborted during the re-auth backoff.'))
+            }
+            timer = setTimeout(() => {
+              signal?.removeEventListener('abort', onAbort)
+              resolve()
+            }, 2_000)
+            signal?.addEventListener('abort', onAbort, { once: true })
           })
         }
       }
     }
-    // Both rounds exhausted on authorization rejections: report the last one, and
-    // void only this request's own notice so no later acceptance flushes it.
-    if (this.pendingRefreshAt === noticeAt) this.discardPendingRefreshNotice()
     // Report the failed heal once per outage, so the user learns recovery was attempted.
     if (!this.refreshFailureAnnounced) {
       this.refreshFailureAnnounced = true
@@ -306,6 +323,7 @@ export class DefaultQoderTransport implements QoderTransport {
       this.onJobTokenRefreshFailed?.({
         region: this.region,
         at: Date.now(),
+        ...(options.sessionId !== undefined ? { sessionId: String(options.sessionId) } : {}),
         ...(lastRejection instanceof LlmError && lastRejection.failure.status !== undefined
           ? { status: lastRejection.failure.status }
           : {}),

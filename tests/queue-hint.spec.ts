@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createQueueHint, type QueueHintSession } from '../src/queue-hint.ts'
-import { emitNoticeRow, installJobTokenHint } from '../src/job-token-hint.ts'
+import { dispatchJobTokenNotice, emitJobTokenHint, emitJobTokenRefreshFailedHint, emitNoticeRow } from '../src/job-token-hint.ts'
 
 interface HintEvent {
   type: string
@@ -93,11 +93,8 @@ describe('request-owned queue hints', () => {
     expect(dones(a)).toHaveLength(2)
   })
 
-  it('does not print unowned requests into the last running agent', () => {
+  it('does not print an unattributed queue request into any conversation', () => {
     const a = session()
-    let listener: ((payload: unknown) => void) | undefined
-    installJobTokenHint({ on: (_name: string, callback: (payload: unknown) => void) => { listener = callback } } as never)
-    listener?.({ status: 'running', agent: { id: 'A', session: a } })
     const resolveSession = vi.fn(() => a)
     const notify = createQueueHint({ sessionId: undefined, displayName: 'Qoder', resolveSession })
     notify(wait(1))
@@ -154,5 +151,50 @@ describe('request-owned queue hints', () => {
     expect(dones(a)[0]?.data.commandId).toBe(runs(a)[0]?.data.commandId)
     expect(dones(a)[0]?.data.kind).toBe('error')
     expect(dones(a)[0]?.data.text).toContain('content_filter')
+  })
+
+  it('routes job token hints directly to the explicit session without crosstalk', () => {
+    const a = session()
+    const b = session()
+    emitJobTokenHint('Token refreshed', a)
+    emitJobTokenRefreshFailedHint('Token refresh failed', b)
+
+    expect(runs(a)).toHaveLength(1)
+    expect(dones(a)).toHaveLength(1)
+    expect(dones(a)[0]?.data.kind).toBe('success')
+    expect(dones(a)[0]?.data.text).toBe('Token refreshed')
+
+    expect(runs(b)).toHaveLength(1)
+    expect(dones(b)).toHaveLength(1)
+    expect(dones(b)[0]?.data.kind).toBe('error')
+    expect(dones(b)[0]?.data.text).toBe('Token refresh failed')
+  })
+
+  it('prints a job token notice only into the session the request itself names', () => {
+    const own = session()
+    const other = session()
+    const resolveSession = (id: string) => (id === 'own' ? own : id === 'other' ? other : undefined)
+
+    // 1. Unattributed request: nothing is printed anywhere, and the resolver is not
+    //    even consulted — there is no candidate left to guess a destination from.
+    const spy = vi.fn(resolveSession)
+    dispatchJobTokenNotice({ text: 'unattributed', kind: 'error', resolveSession: spy })
+    expect(spy).not.toHaveBeenCalled()
+    expect(own.events).toEqual([])
+    expect(other.events).toEqual([])
+
+    // 2. Attributed to a session that no longer resolves (closed, deleted, or the
+    //    sessions service is down): dropped, never redirected to another live one.
+    dispatchJobTokenNotice({ text: 'dropped', kind: 'error', sessionId: 'gone', resolveSession })
+    expect(own.events).toEqual([])
+    expect(other.events).toEqual([])
+
+    // 3. Attributed and resolvable: exactly one run/done pair, in that session only.
+    dispatchJobTokenNotice({ text: 'ok', kind: 'success', sessionId: 'own', resolveSession })
+    expect(runs(own)).toHaveLength(1)
+    expect(dones(own)).toHaveLength(1)
+    expect(dones(own)[0]?.data.commandId).toBe(runs(own)[0]?.data.commandId)
+    expect(dones(own)[0]?.data.text).toBe('ok')
+    expect(other.events).toEqual([])
   })
 })

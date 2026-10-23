@@ -34,7 +34,7 @@ import type { QoderModelInfo } from './catalog.ts'
 import type { QoderWebCatalog, QoderWebProbeSection } from './status-paths.ts'
 import { QODER_SETTINGS_FACE_PATH } from './status-paths.ts'
 import { clearHostHeartbeat, writeHostHeartbeat } from './host-heartbeat.ts'
-import { emitJobTokenHint, emitJobTokenRefreshFailedHint, emitNoticeRow, installJobTokenHint } from './job-token-hint.ts'
+import { dispatchJobTokenNotice, emitNoticeRow } from './job-token-hint.ts'
 import { SettingsStore } from './settings-store.ts'
 import { QODER_CONNECT_VERSION } from './version.ts'
 import { CHINA_VARIANT, GLOBAL_VARIANT, QODER_VARIANTS, type QoderVariant } from './variants.ts'
@@ -134,7 +134,6 @@ export {
   QODER_HOST_HEARTBEAT_FILENAME,
   clearHostHeartbeat,
   isHeartbeatProcessAlive,
-  processStartTimeMs,
   readHostHeartbeat,
   qoderHostHeartbeatPath,
   type QoderHostHeartbeat,
@@ -585,6 +584,12 @@ function createVariantRuntime(
     QUEUE_WAIT_SECONDS_MIN * 1_000,
     (current().queueWaitSeconds ?? QUEUE_WAIT_SECONDS_DEFAULT) * 1_000,
   )
+  const sessionOf = (id: string | undefined): QueueHintSession | undefined =>
+    id === undefined ? undefined : (ctx.get('sessions') as { get(id: string): QueueHintSession | undefined } | undefined)?.get(id)
+  // A heal row goes only into the request's own session; unattributed prints nothing.
+  const emitNotice = (sessionId: string | undefined, kind: 'success' | 'error', text: string): void => {
+    dispatchJobTokenNotice({ text, kind, sessionId, resolveSession: id => sessionOf(id) })
+  }
   const transport = createQoderTransport({
     region: variant.region,
     resolvePat: () => store.patPromise(),
@@ -611,23 +616,20 @@ function createVariantRuntime(
       ctx.logger.warn(
         `dsh-qoder-connect: ${variant.displayName} job token was auto-refreshed after an upstream rejection`,
       )
-      // The visible channel: one line in the conversation that triggered the refresh.
-      emitJobTokenHint(info.at, jobTokenHintText(info.at))
+      emitNotice(info.sessionId, 'success', jobTokenHintText(info.at))
     },
     onJobTokenRefreshFailed: info => {
       // The heal ran and lost; announced at most once per outage.
       ctx.logger.warn(
         `dsh-qoder-connect: ${variant.displayName} job token refresh did not recover the chat (upstream status ${info.status ?? 'unknown'})`,
       )
-      emitJobTokenRefreshFailedHint(info.at, jobTokenRefreshFailedHintText(info.at))
+      emitNotice(info.sessionId, 'error', jobTokenRefreshFailedHintText(info.at))
     },
     createQueueWaitHandler: options => createQueueHint({
       sessionId: options.sessionId === undefined ? undefined : String(options.sessionId),
       purpose: options.purpose,
       displayName: variant.displayName,
-      resolveSession: id => (ctx.get('sessions') as
-        | { get(id: string): QueueHintSession | undefined }
-        | undefined)?.get(id),
+      resolveSession: id => sessionOf(id),
       onDiag: writeQueueDiag,
     }),
     // A filtered ending is reported as a normal stop (the official client calls it a refusal,
@@ -640,9 +642,7 @@ function createVariantRuntime(
       return notice => {
         writeQueueDiag(`notice: ${notice.kind} (${notice.reason}) purpose=${purpose ?? 'none'} sessionId=${sessionId ?? 'none'}`)
         if (purpose === 'session-title') return
-        const session = sessionId === undefined
-          ? undefined
-          : (ctx.get('sessions') as { get(id: string): QueueHintSession | undefined } | undefined)?.get(sessionId)
+        const session = sessionOf(sessionId)
         if (session === undefined) return
         emitNoticeRow(session, 'error', purpose === 'compaction'
           ? compactionFilteredHintText(notice.reason)
@@ -1039,15 +1039,33 @@ function jsonFace(res: { writeHead: (status: number, headers: Record<string, str
 }
 
 /** Read the request body, or undefined when absent or oversized. */
-function readFaceBody(req: { on: (event: string, handler: (chunk?: unknown) => void) => void }): Promise<string | undefined> {
+function readFaceBody(req: {
+  on: (event: string, handler: (chunk?: unknown) => void) => void
+  destroy?: () => void
+}): Promise<string | undefined> {
   return new Promise(resolve => {
+    let settled = false
     let body = ''
     req.on('data', (chunk: unknown) => {
+      if (settled) return
       body += String(chunk)
-      if (body.length > 1e6) { resolve(undefined) }
+      if (body.length > 1e6) {
+        settled = true
+        body = ''
+        req.destroy?.()
+        resolve(undefined)
+      }
     })
-    req.on('end', () => resolve(body))
-    req.on('error', () => resolve(undefined))
+    req.on('end', () => {
+      if (settled) return
+      settled = true
+      resolve(body)
+    })
+    req.on('error', () => {
+      if (settled) return
+      settled = true
+      resolve(undefined)
+    })
   })
 }
 
@@ -1275,9 +1293,6 @@ export function apply(ctx: Context, config: Config): void {
     startupCatchUpDone = true
     checkInScheduler.catchUp()
   }
-
-  // The session-visible hint row for a self-heal: one line, nothing global.
-  installJobTokenHint(ctx)
 
   // Same-origin routes backing each card; the webServer service is optional.
   // Keys are per-process (see {@link controlKeys}), since a settings write

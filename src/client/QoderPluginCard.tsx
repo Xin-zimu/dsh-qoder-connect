@@ -626,7 +626,8 @@ function ModelSwitchTable({
   }
 
   const handleBatch = (enabled: boolean): void => {
-    const targets = Array.from(selected)
+    const availableIds = new Set((models ?? []).map(m => m.id))
+    const targets = Array.from(selected).filter(id => availableIds.has(id))
     if (targets.length === 0) return
     onSetModelsEnabled(targets, enabled)
     setSelected(new Set())
@@ -1362,8 +1363,6 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
           style={patInputStyle}
         />
       ) : null}
-      {patError === undefined ? null : <p style={errorStyle}>{patError}</p>}
-      {patNotice === undefined ? null : <p style={bodyStyle}>{patNotice}</p>}
     </div>
   )
 
@@ -1549,6 +1548,8 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
                   {status.pat === undefined ? null : patSummaryLine(status.pat)}
                 </div>
                 {replacing ? patEntry() : null}
+                {patError === undefined ? null : <p style={errorStyle}>{patError}</p>}
+                {patNotice === undefined ? null : <p style={bodyStyle}>{patNotice}</p>}
                 {status.jobTokenRefreshedAt === undefined
                   ? null
                   : <p style={bodyStyle}>{t('jobTokenRefreshed', { time: formatTime(status.jobTokenRefreshedAt) })}</p>}
@@ -1630,6 +1631,7 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
                 ) : tab === 'models' ? (
                   <div style={tabPanelStyle}>
                     <ModelSwitchTable
+                      key={activeVariantId}
                       models={status.models}
                       disabledModels={status.disabledModels}
                       t={t}
@@ -1685,6 +1687,8 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
                   {status.reason ?? t(currentVariant.signedOutKey)}
                 </p>
                 {authKey === undefined ? null : patEntry()}
+                {patError === undefined ? null : <p style={errorStyle}>{patError}</p>}
+                {patNotice === undefined ? null : <p style={bodyStyle}>{patNotice}</p>}
               </>
             : null}
           {status?.status === 'error' ? <p style={errorStyle}>{status.message}</p> : null}

@@ -104,11 +104,11 @@ export async function readLimitedText(
   if (encoding !== '' || looksGzipped) {
     try {
       if (encoding.includes('gzip') || (encoding === '' && looksGzipped)) {
-        payload = gunzipSync(payload)
+        payload = gunzipSync(payload, { maxOutputLength: maxBytes })
       } else if (encoding.includes('br')) {
-        payload = brotliDecompressSync(payload)
+        payload = brotliDecompressSync(payload, { maxOutputLength: maxBytes })
       } else if (encoding.includes('deflate')) {
-        payload = inflateSync(payload)
+        payload = inflateSync(payload, { maxOutputLength: maxBytes })
       }
     } catch {
       throw new QoderLlmError(`${label} arrived compressed but could not be decompressed.`, 'MALFORMED_RESPONSE')
@@ -214,9 +214,12 @@ export async function openApiJsonRequest<T>(
       'accept-encoding': 'identity',
       'user-agent': options.userAgent ?? qoderUserAgent,
       'cosy-clienttype': qoderClientType,
-      // HTTP header names are case-insensitive; keep exactly one version header.
+      // HTTP header names are case-insensitive; keep exactly one version and user-agent header.
       ...Object.fromEntries(Object.entries(options.headers ?? {}).filter(
-        ([name]) => name.toLowerCase() !== 'cosy-version',
+        ([name]) => {
+          const lower = name.toLowerCase()
+          return lower !== 'cosy-version' && lower !== 'user-agent'
+        },
       )),
       'Cosy-Version': qoderIdeVersion,
     }

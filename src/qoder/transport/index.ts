@@ -42,12 +42,12 @@ export interface QoderTransportOptions {
    * Called once per successful re-auth refresh, after a fresh job token was
    * exchanged and accepted following a 401 rejection.
    */
-  onJobTokenRefreshed?: (info: { region: QoderRegion; at: number }) => void
+  onJobTokenRefreshed?: (info: { region: QoderRegion; at: number; sessionId?: string | undefined }) => void
   /**
    * Called once per unresolved self-heal failure (refreshed token rejected too),
    * and at most once per outage, reset when a later chat is accepted.
    */
-  onJobTokenRefreshFailed?: (info: { region: QoderRegion; at: number; status?: number }) => void
+  onJobTokenRefreshFailed?: (info: { region: QoderRegion; at: number; status?: number; sessionId?: string | undefined }) => void
   /** Called once per queue poll round, so the conversation can show progress. */
   onQueueWait?: (info: QoderQueueWait) => void
   /** Create an observer owned by one stream, including its internal replays. */

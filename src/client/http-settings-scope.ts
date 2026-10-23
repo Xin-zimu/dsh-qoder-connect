@@ -60,6 +60,8 @@ export class OwnQuotaSettingsScope implements QuotaSettingsScope<QuotaSection> {
   private document: SettingsFaceDocument | undefined
   private readonly listeners = new Set<() => void>()
   private snapshot: QuotaSettingsSnapshot<QuotaSection> = { status: 'loading', value: undefined, writable: true }
+  private writeChain: Promise<unknown> = Promise.resolve()
+  private lastWriteFailed = false
 
   /**
    * Load the current document. Call once before the card binds; repeated calls
@@ -108,24 +110,32 @@ export class OwnQuotaSettingsScope implements QuotaSettingsScope<QuotaSection> {
     return this.patch({ [field]: null })
   }
 
-  /** Send one patch and adopt the host's answer. */
+  /** Send one patch and adopt the host's answer, serialized via writeChain. */
   private async patch(patch: Record<string, unknown>): Promise<boolean> {
     const key = this.document?.key
     if (key === undefined) return false
-    try {
-      this.document = await request({
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Qoder-Settings-Key': key,
-        },
-        body: JSON.stringify(patch),
-      })
-      this.publish()
-      return true
-    } catch {
-      return false
+    const task = async (): Promise<boolean> => {
+      try {
+        this.document = await request({
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Qoder-Settings-Key': key,
+          },
+          body: JSON.stringify(patch),
+        })
+        this.lastWriteFailed = false
+        this.publish()
+        return true
+      } catch {
+        this.lastWriteFailed = true
+        this.publish()
+        return false
+      }
     }
+    const resultPromise = this.writeChain.then(task, task)
+    this.writeChain = resultPromise.catch(() => {})
+    return resultPromise
   }
 
   /** Rebuild the cached snapshot and notify the subscribers. */
@@ -133,7 +143,7 @@ export class OwnQuotaSettingsScope implements QuotaSettingsScope<QuotaSection> {
     this.snapshot = {
       status: this.document === undefined ? 'loading' : 'ready',
       value: this.document?.value,
-      writable: true,
+      writable: !this.lastWriteFailed,
     }
     for (const listener of this.listeners) listener()
   }

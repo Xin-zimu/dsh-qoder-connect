@@ -17,7 +17,12 @@ MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDA8iMH5c02LilrsERw9t6Pv5Nc
 XcW+ML9FoCI6AOvOzwIDAQAB
 -----END PUBLIC KEY-----`
 
-export const qoderIdeVersion = '1.1.76'
+// Injected at build time from package.json's `qoderIdeVersion`; the fallback
+// string is what tests (running without the build define) and dev runs see.
+// Keep the fallback in sync with package.json — it is the single source of truth.
+declare const __QODER_IDE_VERSION__: string | undefined
+export const qoderIdeVersion: string =
+  typeof __QODER_IDE_VERSION__ === 'string' ? __QODER_IDE_VERSION__ : '1.1.77'
 export const qoderClientType = '5'
 /**
  * The desktop client identifier the campaign endpoints require; the generic
@@ -27,13 +32,14 @@ export const qoderDesktopClientType = '10'
 export const qoderUserAgent = `qoder/${qoderIdeVersion}`
 const qoderDataPolicy = 'disagree'
 const qoderLoginVersion = 'v2'
-const qoderMachineOs = process.platform === 'win32'
-  ? process.arch === 'arm64'
-    ? 'aarch64_windows'
-    : 'x86_64_windows'
-  : process.arch === 'arm64'
-    ? 'aarch64_linux'
-    : 'x86_64_linux'
+// Matches the official qodercli formula: <arch>_<platform>, where arch maps
+// arm64→aarch64, x64→x86_64, and platform is process.platform verbatim
+// (win32/darwin/linux). Verified against bundle h4e/uig assignments.
+const qoderMachineOs = `${
+  process.arch === 'arm64' ? 'aarch64'
+    : process.arch === 'x64' ? 'x86_64'
+      : process.arch
+}_${process.platform}`
 const qoderMachineTypeMagic = '5'
 
 export interface CosyCredentials {

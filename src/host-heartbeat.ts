@@ -7,7 +7,6 @@
  * @module dsh-qoder-connect/host-heartbeat
  */
 
-import { execFileSync } from 'node:child_process'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { qoderStateDir } from './paths.ts'
@@ -26,7 +25,7 @@ export interface QoderHostHeartbeat {
   pluginVersion: string
   /** Epoch milliseconds when the host registered the provider. */
   registeredAt: number
-  /** Host process PID, to distinguish a stale heartbeat after a crash. */
+  /** Host process PID. Liveness is a bare existence probe: a reused PID reads as alive. */
   pid: number
 }
 
@@ -58,11 +57,13 @@ export async function writeHostHeartbeat(): Promise<void> {
 }
 
 /** Remove the heartbeat on plugin disposal so a stale file does not linger. */
-export async function clearHostHeartbeat(): Promise<void> {
+export async function clearHostHeartbeat(expectedPid: number = process.pid): Promise<void> {
   try {
+    const current = await readHostHeartbeat()
+    if (current !== undefined && current.pid !== expectedPid) return
     await rm(qoderHostHeartbeatPath(), { force: true })
   } catch {
-    // Best-effort cleanup; a stale heartbeat is harmless (PID mismatch is detected by the reader).
+    // Best-effort cleanup; a leftover file reads as alive only while its PID is still in use.
   }
 }
 
@@ -97,54 +98,25 @@ export async function readHostHeartbeat(): Promise<QoderHostHeartbeat | undefine
 }
 
 /**
- * Absolute start time (epoch ms) of the process holding `pid`, or `undefined`
- * when it cannot be determined.
+ * Whether the heartbeat's PID is still alive.
  *
- * macOS/Linux use `ps -o lstart=` parsed against the local clock; Windows uses
- * WMI `CreationDate` in UTC. Failures return `undefined` so callers fall back to
- * plain PID liveness instead of mis-reporting a live host as dead.
- */
-export function processStartTimeMs(pid: number): number | undefined {
-  try {
-    if (process.platform === 'win32') {
-      const out = execFileSync(
-        'wmic',
-        ['process', 'where', `processid=${pid}`, 'get', 'CreationDate'],
-        { encoding: 'utf8', windowsHide: true },
-      )
-      const m = out.match(/(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.\d+([+-]\d{4})/)
-      if (m === null) return undefined
-      const [, y, mo, d, h, mi, s] = m
-      const ms = Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s))
-      return Number.isFinite(ms) ? ms : undefined
-    }
-    const out = execFileSync(
-      'ps',
-      ['-o', 'lstart=', '-p', String(pid)],
-      { encoding: 'utf8', env: { ...process.env, LC_ALL: 'C', LANG: 'C' } },
-    ).trim()
-    if (out === '') return undefined
-    const ms = Date.parse(out)
-    return Number.isFinite(ms) ? ms : undefined
-  } catch {
-    return undefined
-  }
-}
-
-/**
- * Whether the heartbeat's PID is still alive *and* still the same process that
- * registered it: signal 0 tests existence, and the holder's start time must be at
- * or before `registeredAt`. PID-only detection is not enough — the OS may recycle
- * the PID after a crash, producing a false "Host running". When the start time is
- * unreadable the check degrades to plain PID liveness.
+ * Uses Node's native `process.kill(pid, 0)` cross-platform signal probe:
+ * - Returns true on success or EPERM (process exists and is alive);
+ * - Returns false on ESRCH (process does not exist in the operating system);
+ * - Rejects non-positive or non-integer PIDs to prevent matching process groups.
+ *
+ * Known limitation: after a host crash, if the OS recycles and reassigns the same PID
+ * to another process before cleanup, it reads as alive until that PID exits. This trade-off
+ * is accepted because wmic was removed in Windows 11 24H2+, PowerShell child processes are
+ * fragile under restrictive sandboxes, and the status check serves only as an informational
+ * hint in the doctor CLI rather than a critical operational invariant.
  */
 export function isHeartbeatProcessAlive(heartbeat: QoderHostHeartbeat): boolean {
+  if (!Number.isInteger(heartbeat.pid) || heartbeat.pid <= 0) return false
   try {
     process.kill(heartbeat.pid, 0)
-  } catch {
-    return false
+    return true
+  } catch (error: unknown) {
+    return (error as { code?: string })?.code === 'EPERM'
   }
-  const startAtMs = processStartTimeMs(heartbeat.pid)
-  if (startAtMs === undefined) return true // platform cannot read start time; PID alive is the best signal
-  return startAtMs <= heartbeat.registeredAt
 }

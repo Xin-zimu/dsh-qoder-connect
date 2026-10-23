@@ -307,7 +307,7 @@ export async function* streamQoderChat(
   messages: QoderWireMessage[],
   dependencies: QoderChatDependencies,
 ): AsyncGenerator<StreamChunk> {
-  const request = await buildQoderRequestBody(options, credentials.userID, messages, model)
+  const request = await buildQoderRequestBody(options, credentials.userID, messages, model, undefined, dependencies.region)
   // The queue entry is keyed by request_set_id, which stays for the whole call;
   // a replay rotates only request_id/chat_record_id, exactly as the official
   // client does before re-sending.

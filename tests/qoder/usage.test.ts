@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { QoderAuthService } from '../../src/qoder/transport/auth.ts'
 import { QoderLlmError } from '../../src/qoder/errors.ts'
 import { QoderUsageReader } from '../../src/qoder/transport/account-reader.ts'
+import { qoderIdeVersion } from '../../src/qoder/transport/wire/cosy.ts'
 
 test('QoderUsageReader reads subscriber profile and quota usage, and caches within TTL', async () => {
   let quotaCalls = 0
@@ -309,9 +310,9 @@ test('QoderUsageReader reads subscriber plan and user status with machine finger
   assert.equal(statusHeaders?.authorization, 'Bearer jt-plan-test')
   assert.equal(statusHeaders?.['Cosy-MachineToken'], 'umid-fingerprint-test')
   assert.equal(statusHeaders?.['Cosy-MachineType'], 'host')
-  assert.equal(planHeaders?.['user-agent'], 'qoder/1.1.76')
-  assert.equal(statusHeaders?.['user-agent'], 'qoder/1.1.76')
-  assert.equal(quotaHeaders?.['user-agent'], 'qoder/1.1.76')
+  assert.equal(planHeaders?.['user-agent'], `qoder/${qoderIdeVersion}`)
+  assert.equal(statusHeaders?.['user-agent'], `qoder/${qoderIdeVersion}`)
+  assert.equal(quotaHeaders?.['user-agent'], `qoder/${qoderIdeVersion}`)
   assert.equal(planHeaders?.['cosy-clienttype'], '5')
   assert.equal(statusHeaders?.['cosy-clienttype'], '5')
   assert.equal(quotaHeaders?.['cosy-clienttype'], '5')

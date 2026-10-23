@@ -16,8 +16,8 @@ import { QoderImageUploader } from '../../src/qoder/transport/image-upload.ts'
 import { openApiJsonRequest } from '../../src/qoder/transport/request.ts'
 import { qoderIdeVersion, qoderUserAgent, type CosyCredentials } from '../../src/qoder/transport/wire/cosy.ts'
 
-/** The literal the upstream must see; a version bump changes it in one place. */
-const EXPECTED_USER_AGENT = 'qoder/1.1.76'
+/** The literal the upstream must see; derived from the same constant the source uses. */
+const EXPECTED_USER_AGENT = `qoder/${qoderIdeVersion}`
 
 interface RecordedRequest {
   url: string

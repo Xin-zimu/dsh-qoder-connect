@@ -1411,30 +1411,28 @@ interface QoderHostHeartbeat {
   pluginVersion: string;
   /** Epoch milliseconds when the host registered the provider. */
   registeredAt: number;
-  /** Host process PID, to distinguish a stale heartbeat after a crash. */
+  /** Host process PID. Liveness is a bare existence probe: a reused PID reads as alive. */
   pid: number;
 }
 /** Absolute path of the host heartbeat file. */
 declare function qoderHostHeartbeatPath(): string;
 /** Remove the heartbeat on plugin disposal so a stale file does not linger. */
-declare function clearHostHeartbeat(): Promise<void>;
+declare function clearHostHeartbeat(expectedPid?: number): Promise<void>;
 /** Read and validate the heartbeat; returns `undefined` when absent or malformed. */
 declare function readHostHeartbeat(): Promise<QoderHostHeartbeat | undefined>;
 /**
- * Absolute start time (epoch ms) of the process holding `pid`, or `undefined`
- * when it cannot be determined.
+ * Whether the heartbeat's PID is still alive.
  *
- * macOS/Linux use `ps -o lstart=` parsed against the local clock; Windows uses
- * WMI `CreationDate` in UTC. Failures return `undefined` so callers fall back to
- * plain PID liveness instead of mis-reporting a live host as dead.
- */
-declare function processStartTimeMs(pid: number): number | undefined;
-/**
- * Whether the heartbeat's PID is still alive *and* still the same process that
- * registered it: signal 0 tests existence, and the holder's start time must be at
- * or before `registeredAt`. PID-only detection is not enough — the OS may recycle
- * the PID after a crash, producing a false "Host running". When the start time is
- * unreadable the check degrades to plain PID liveness.
+ * Uses Node's native `process.kill(pid, 0)` cross-platform signal probe:
+ * - Returns true on success or EPERM (process exists and is alive);
+ * - Returns false on ESRCH (process does not exist in the operating system);
+ * - Rejects non-positive or non-integer PIDs to prevent matching process groups.
+ *
+ * Known limitation: after a host crash, if the OS recycles and reassigns the same PID
+ * to another process before cleanup, it reads as alive until that PID exits. This trade-off
+ * is accepted because wmic was removed in Windows 11 24H2+, PowerShell child processes are
+ * fragile under restrictive sandboxes, and the status check serves only as an informational
+ * hint in the doctor CLI rather than a critical operational invariant.
  */
 declare function isHeartbeatProcessAlive(heartbeat: QoderHostHeartbeat): boolean;
 //#endregion
@@ -1533,4 +1531,4 @@ declare const QUOTA_SECTION_KEYS: readonly ["sidebarQuotaCN", "sidebarQuotaGloba
  */
 declare function apply(ctx: Context, config: Config): void;
 //#endregion
-export { CHINA_VARIANT, CN_SECTION_KEYS, Config, FALLBACK_QODER_MODELS, GLOBAL_SECTION_KEYS, GLOBAL_VARIANT, KIND_STATUS, PROBE_EFFORT_CANDIDATES, type ProbeAttempt, type ProbeOutcome, type ProbeSender, QODER_AUTH_FILENAME, QODER_AUTH_PATH, QODER_DATA_DIR_ENV, QODER_DATA_DIR_NAME, QODER_GLOBAL_AUTH_PATH, QODER_GLOBAL_PROBE_PATH, QODER_GLOBAL_SETTINGS_NS, QODER_GLOBAL_STATUS_PATH, QODER_HOST_HEARTBEAT_FILENAME, QODER_PAT_ENV_CN, QODER_PAT_ENV_GLOBAL, QODER_PROBE_FILENAME, QODER_PROBE_PATH, QODER_PROVIDER, QODER_QUOTA_SETTINGS_NS, QODER_SETTINGS_NS, QODER_STATUS_PATH, QODER_STREAM_IDLE_TIMEOUT_MS, QODER_VARIANTS, QUEUE_WAIT_SECONDS_DEFAULT, QUEUE_WAIT_SECONDS_MIN, QUOTA_POLL_DEFAULT_MS, QUOTA_POLL_MIN_MS, QUOTA_SECTION_KEYS, type QoderAdapter, type QoderAuthRequest, type QoderAuthRouteOptions, type QoderAuthSaveResult, type QoderAuthStatus, QoderCatalog, type QoderCatalogFetch, type QoderCatalogModelSnapshot, QoderCatalogStore, type QoderCatalogStoreOptions, type QoderChatResult, type QoderCredential, type QoderCredentialEntry, QoderCredentialStore, type QoderCreditAccount, type QoderCredits, type QoderEffort, type QoderHostHeartbeat, type QoderModelBilling, type QoderModelInfo, type QoderModelReasoning, type QoderPatProfile, type QoderPatSummary, type QoderProbeAction, type QoderProbeRecord, QoderProbeService, type QoderProbeStatus, QoderProbeStore, type QoderProbeValidation, type QoderShim, QoderUpstreamClient, type QoderVariant, type QoderVariantId, type QoderWebCatalog, type QoderWebCreditAccount, type QoderWebCredits, type QoderWebProbeModel, type QoderWebProbeSection, type QoderWebStatus, type ShimLogger, type UpstreamErrorKind, apply, classifyUpstreamError, clearHostHeartbeat, createAuthKey, createQoderAdapter, createQoderShim, fingerprintModel, inject, isHeartbeatProcessAlive, kindFromQoderFailure, modelInfoOf, name, normalizeCredits, patTail, probeModel, processStartTimeMs, qoderAuthHandler, qoderCatalogPath, qoderCredentialId, qoderCredentialIdentity, qoderHostHeartbeatPath, qoderOwnAuthPath, qoderPluginDataDir, qoderProbePath, randomSentinel, readHostHeartbeat, registerQoderAuthRoute, variantFor };
+export { CHINA_VARIANT, CN_SECTION_KEYS, Config, FALLBACK_QODER_MODELS, GLOBAL_SECTION_KEYS, GLOBAL_VARIANT, KIND_STATUS, PROBE_EFFORT_CANDIDATES, type ProbeAttempt, type ProbeOutcome, type ProbeSender, QODER_AUTH_FILENAME, QODER_AUTH_PATH, QODER_DATA_DIR_ENV, QODER_DATA_DIR_NAME, QODER_GLOBAL_AUTH_PATH, QODER_GLOBAL_PROBE_PATH, QODER_GLOBAL_SETTINGS_NS, QODER_GLOBAL_STATUS_PATH, QODER_HOST_HEARTBEAT_FILENAME, QODER_PAT_ENV_CN, QODER_PAT_ENV_GLOBAL, QODER_PROBE_FILENAME, QODER_PROBE_PATH, QODER_PROVIDER, QODER_QUOTA_SETTINGS_NS, QODER_SETTINGS_NS, QODER_STATUS_PATH, QODER_STREAM_IDLE_TIMEOUT_MS, QODER_VARIANTS, QUEUE_WAIT_SECONDS_DEFAULT, QUEUE_WAIT_SECONDS_MIN, QUOTA_POLL_DEFAULT_MS, QUOTA_POLL_MIN_MS, QUOTA_SECTION_KEYS, type QoderAdapter, type QoderAuthRequest, type QoderAuthRouteOptions, type QoderAuthSaveResult, type QoderAuthStatus, QoderCatalog, type QoderCatalogFetch, type QoderCatalogModelSnapshot, QoderCatalogStore, type QoderCatalogStoreOptions, type QoderChatResult, type QoderCredential, type QoderCredentialEntry, QoderCredentialStore, type QoderCreditAccount, type QoderCredits, type QoderEffort, type QoderHostHeartbeat, type QoderModelBilling, type QoderModelInfo, type QoderModelReasoning, type QoderPatProfile, type QoderPatSummary, type QoderProbeAction, type QoderProbeRecord, QoderProbeService, type QoderProbeStatus, QoderProbeStore, type QoderProbeValidation, type QoderShim, QoderUpstreamClient, type QoderVariant, type QoderVariantId, type QoderWebCatalog, type QoderWebCreditAccount, type QoderWebCredits, type QoderWebProbeModel, type QoderWebProbeSection, type QoderWebStatus, type ShimLogger, type UpstreamErrorKind, apply, classifyUpstreamError, clearHostHeartbeat, createAuthKey, createQoderAdapter, createQoderShim, fingerprintModel, inject, isHeartbeatProcessAlive, kindFromQoderFailure, modelInfoOf, name, normalizeCredits, patTail, probeModel, qoderAuthHandler, qoderCatalogPath, qoderCredentialId, qoderCredentialIdentity, qoderHostHeartbeatPath, qoderOwnAuthPath, qoderPluginDataDir, qoderProbePath, randomSentinel, readHostHeartbeat, registerQoderAuthRoute, variantFor };

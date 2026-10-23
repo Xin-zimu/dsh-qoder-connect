@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { QoderAuthService } from '../../src/qoder/transport/auth.ts'
 import { QoderLlmError } from '../../src/qoder/errors.ts'
+import { qoderIdeVersion } from '../../src/qoder/transport/wire/cosy.ts'
 
 test('QoderAuthService exchanges once, resolves identity, and caches credentials', async () => {
   let exchangeCalls = 0
@@ -35,9 +36,9 @@ test('QoderAuthService exchanges once, resolves identity, and caches credentials
   assert.equal(second, first)
   assert.equal(exchangeCalls, 1)
   assert.equal(userInfoCalls, 1)
-  assert.equal(exchangeHeaders?.['user-agent'], 'qoder/1.1.76')
+  assert.equal(exchangeHeaders?.['user-agent'], `qoder/${qoderIdeVersion}`)
   assert.equal(exchangeHeaders?.['cosy-clienttype'], '5')
-  assert.equal(userInfoHeaders?.['user-agent'], 'qoder/1.1.76')
+  assert.equal(userInfoHeaders?.['user-agent'], `qoder/${qoderIdeVersion}`)
   assert.equal(userInfoHeaders?.['cosy-clienttype'], '5')
 })
 

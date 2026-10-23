@@ -1,88 +1,62 @@
 /**
- * The conversation hint row for a self-healed job token.
+ * Conversation rows printed into one named session.
  *
- * The visible channel is the session: appending the log-only event pair
- * `command/run` + `command/done` prints one row into the conversation without
- * opening a turn, calling the model, or registering a command. Attribution is
- * best effort (`lastRunningAgent`): with two agents running concurrently the row
- * can land in the other one's conversation, which is display imprecision only.
- * The recorded name is the ASCII `qoder`; without a client renderer it becomes
- * the row title.
+ * A row is the log-only `command/run` + `command/done` pair: one line, no turn,
+ * no model call. The destination is never guessed — a request that cannot name
+ * its session prints nothing, the same rule the queue hint follows.
  *
  * @module dsh-qoder-connect/job-token-hint
  */
-
-import type { Context } from '@deepseek-ai/cordis'
 
 /** The name recorded on the hint row (and therefore its displayed title). */
 export const JOB_TOKEN_HINT_NAME = 'qoder'
 
 /** The session slice this module appends to. */
-interface HintSession {
+export interface HintSession {
   append(type: string, data: unknown): unknown
 }
-
-/** The agent slice this module needs: identity plus its session. */
-interface HintAgent {
-  readonly id: unknown
-  readonly session?: HintSession
-}
-
-/** Refresh time per agent id, so a later read can name when it happened. */
-const lastRefreshAt = new Map<string, number>()
-
-/** The most recent agent observed entering a running turn. */
-let lastRunningAgent: HintAgent | undefined
 
 /** Monotonic suffix keeping appended ids unique within this process. */
 let hintSeq = 0
 
 /**
- * Start tracking which agent is running.
+ * Print the refresh row into the session whose request triggered it.
  *
- * `agent/status` is a plain `emit` event, so a listener returning nothing cannot
- * disturb the emitting path. The self-heal fires inside that agent's request, so
- * the most recently running agent is the conversation to print into.
+ * @param text - The row's summary line.
+ * @param session - The session to append into; never inferred.
  */
-export function installJobTokenHint(ctx: Context): void {
-  ctx.on('agent/status' as never, ((payload: { agent?: HintAgent, status?: string }) => {
-    if (payload.status === 'running' && payload.agent !== undefined) {
-      lastRunningAgent = payload.agent
-    }
-  }) as never)
+export function emitJobTokenHint(text: string, session: HintSession): void {
+  appendHintRow(session, 'success', text)
 }
 
 /**
- * Print the refresh row into the conversation whose request triggered it.
+ * Print the failed-heal row into the same session; the mirror of
+ * {@link emitJobTokenHint}. Rate limited by the transport, so this stays a printer.
  *
- * Best effort by design: a missing agent, an absent session, or a projection
- * that rejects the append must never affect the chat that just recovered.
- *
- * @param at - When the job token was rotated.
  * @param text - The row's summary line.
+ * @param session - The session to append into; never inferred.
  */
-export function emitJobTokenHint(at: number, text: string): void {
-  const agent = lastRunningAgent
-  if (agent?.session === undefined) return
-  lastRefreshAt.set(String(agent.id), at)
-  appendHintRow(agent, 'success', text)
+export function emitJobTokenRefreshFailedHint(text: string, session: HintSession): void {
+  appendHintRow(session, 'error', text)
 }
 
 /**
- * Print the failed-heal row into the conversation whose request triggered it;
- * the mirror of {@link emitJobTokenHint}.
+ * Dispatch a heal row to the one session that may receive it.
  *
- * Without it the user saw only the authorization failure and could not tell that
- * recovery had already been attempted and lost. Rate limited by the transport
- * (once per unresolved outage), so this module stays a pure printer.
- *
- * @param at - When the failed heal was recorded.
- * @param text - The row's summary line.
+ * Fails closed: no `sessionId`, or one that no longer resolves, prints nothing.
  */
-export function emitJobTokenRefreshFailedHint(at: number, text: string): void {
-  const agent = lastRunningAgent
-  if (agent?.session === undefined) return
-  appendHintRow(agent, 'error', text)
+export function dispatchJobTokenNotice(options: {
+  text: string
+  kind: 'success' | 'error'
+  sessionId?: string | undefined
+  resolveSession: (id: string) => HintSession | undefined
+}): void {
+  const { text, kind, sessionId, resolveSession } = options
+  if (sessionId === undefined) return
+  const session = resolveSession(sessionId)
+  if (session === undefined) return
+  if (kind === 'success') emitJobTokenHint(text, session)
+  else emitJobTokenRefreshFailedHint(text, session)
 }
 
 /**
@@ -96,18 +70,12 @@ export function emitJobTokenRefreshFailedHint(at: number, text: string): void {
  * @param kind - how the row renders; `error` marks an incomplete answer.
  * @param text - the row's summary line.
  */
-export function emitNoticeRow(
-  session: { append(type: string, data: unknown): unknown },
-  kind: 'success' | 'error',
-  text: string,
-): void {
-  appendHintRow({ id: 'notice', session }, kind, text)
+export function emitNoticeRow(session: HintSession, kind: 'success' | 'error', text: string): void {
+  appendHintRow(session, kind, text)
 }
 
 /** Append one log-only command pair carrying `text` as its outcome. */
-function appendHintRow(agent: HintAgent, kind: 'success' | 'error', text: string): void {
-  const session = agent.session
-  if (session === undefined) return
+function appendHintRow(session: HintSession, kind: 'success' | 'error', text: string): void {
   const commandId = `cmd-qoder-hint-${Date.now().toString(36)}-${++hintSeq}`
   try {
     // The official pairing: `command/run` opens the row, `command/done` carries
@@ -135,7 +103,7 @@ function appendHintRow(agent: HintAgent, kind: 'success' | 'error', text: string
  * The row title is the ASCII name; the display name belongs in `text`, since the
  * card renders `{name} · {text}` and would otherwise repeat it.
  */
-export function openQueueHint(session: { append(type: string, data: unknown): unknown }, text: string): string | undefined {
+export function openQueueHint(session: HintSession, text: string): string | undefined {
   const commandId = `cmd-qoder-queue-${Date.now().toString(36)}-${++hintSeq}`
   try {
     session.append('command/run', {
@@ -160,7 +128,7 @@ export function openQueueHint(session: { append(type: string, data: unknown): un
  * The chat view folds a `command/done` into the row its `commandId` opened and
  * keeps the original seq, so the row stays in place and only its text changes.
  */
-export function updateQueueHint(session: { append(type: string, data: unknown): unknown }, commandId: string, text: string): void {
+export function updateQueueHint(session: HintSession, commandId: string, text: string): void {
   try {
     session.append('command/done', {
       commandId,
@@ -170,9 +138,4 @@ export function updateQueueHint(session: { append(type: string, data: unknown): 
   } catch {
     // Diagnostics-grade, like every other row here.
   }
-}
-
-/** The refresh time recorded for one agent, if this process rotated its token. */
-export function jobTokenRefreshAt(agentId: unknown): number | undefined {
-  return lastRefreshAt.get(String(agentId))
 }

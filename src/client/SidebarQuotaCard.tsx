@@ -401,9 +401,7 @@ export function QuotaDashboard(props: QuotaDashboardProps): React.ReactNode {
   // snapshot carries only the followed tab, documents come from the shared revision.
   useSyncExternalStore(onQuotaSettingsChange, quotaSettingsRevision)
   const state = useQuotaDashboard(s => s)
-  const followedPath = state.activePath
-  const [userPicked, setUserPicked] = useState<string | undefined>(undefined)
-  const activePathResolved = userPicked ?? followedPath
+  const activePathResolved = state.activePath
   const activeVariant = variantOfStatusPath(activePathResolved)
   const status = quotaStatus(activeVariant)
   const loading = state.loading
@@ -456,7 +454,6 @@ export function QuotaDashboard(props: QuotaDashboardProps): React.ReactNode {
                   aria-selected={path === activePathResolved}
                   className={path === activePathResolved ? 'qdp-tab qdp-tabActive' : 'qdp-tab'}
                   onClick={() => {
-                    setUserPicked(path)
                     // Fetch the newly shown variant when the shared store has
                     // nothing (or something stale) for it — its sidebar card
                     // being off means no other surface ever fetched it.

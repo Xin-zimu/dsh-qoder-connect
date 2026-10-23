@@ -101,6 +101,7 @@ export async function buildQoderRequestBody(
   translatedMessages?: QoderWireMessage[],
   model?: QoderCatalogModel,
   attachments?: QoderImageAttachments,
+  region?: string,
 ): Promise<QoderWireRequest> {
   if (!userId) {
     throw new QoderLlmError('Qoder request identity is missing.', 'AUTH')
@@ -161,7 +162,7 @@ export async function buildQoderRequestBody(
     is_retry: false,
     source: 1,
     version: '3',
-    session_type: 'qodercli',
+    session_type: region === 'china' ? 'qoderclicn' : 'qodercli',
     agent_id: 'agent_common',
     task_id: 'common',
     code_language: '',

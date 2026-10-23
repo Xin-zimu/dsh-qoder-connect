@@ -5,7 +5,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   clearHostHeartbeat,
   isHeartbeatProcessAlive,
-  processStartTimeMs,
   qoderHostHeartbeatPath,
   QODER_HOST_HEARTBEAT_FILENAME,
   readHostHeartbeat,
@@ -28,6 +27,7 @@ afterEach(async () => {
   if (root !== undefined) await rm(root, { recursive: true, force: true })
   root = undefined
   vi.unstubAllEnvs()
+  vi.restoreAllMocks()
 })
 
 /** A temporary data dir with the state subdirectory the runtime creates. */
@@ -99,30 +99,44 @@ describe('host heartbeat', () => {
     expect(heartbeat?.package).toBe('dsh-qoder-connect')
   })
 
-  it('detects a recycled PID as dead when the process start time is readable', async () => {
-    // A `registeredAt` older than this process's start means the PID was recycled:
-    // alive per `kill(pid, 0)`, dead by age.
-    const startAtMs = processStartTimeMs(process.pid)
-    const recycled: QoderHostHeartbeat = {
+  it('probes PID liveness with process.kill and rejects invalid PIDs', async () => {
+    const genuine: QoderHostHeartbeat = {
       version: 1,
       package: 'dsh-qoder-connect',
       pluginVersion: '0.0.0-test',
-      // 1 min before this process started (the recycled-PID case).
-      registeredAt: (startAtMs ?? Date.now()) - 60_000,
+      registeredAt: Date.now(),
       pid: process.pid,
     }
-    if (startAtMs === undefined) {
-      // Documented degradation: platforms (or restricted environments) whose
-      // process start time cannot be read fall back to plain PID liveness.
-      expect(isHeartbeatProcessAlive(recycled)).toBe(true)
-    } else {
-      expect(isHeartbeatProcessAlive(recycled)).toBe(false)
-    }
-
-    // A heartbeat registered *after* this process started (a genuine host on
-    // this very PID) is alive either way.
-    const genuine: QoderHostHeartbeat = { ...recycled, registeredAt: Date.now() }
     expect(isHeartbeatProcessAlive(genuine)).toBe(true)
+
+    // A fake PID that does not exist in the OS is detected as dead
+    const fakeHeartbeat: QoderHostHeartbeat = { ...genuine, pid: 2_147_483_647 }
+    expect(isHeartbeatProcessAlive(fakeHeartbeat)).toBe(false)
+
+    // Invalid PIDs (0, negative, non-integer) are rejected before probing
+    expect(isHeartbeatProcessAlive({ ...genuine, pid: 0 })).toBe(false)
+    expect(isHeartbeatProcessAlive({ ...genuine, pid: -1 })).toBe(false)
+    expect(isHeartbeatProcessAlive({ ...genuine, pid: 1.5 })).toBe(false)
+
+    // EPERM is treated as alive (process exists but unprivileged)
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw Object.assign(new Error('denied'), { code: 'EPERM' })
+    })
+    expect(isHeartbeatProcessAlive(genuine)).toBe(true)
+
+    // ESRCH is treated as dead (process does not exist)
+    kill.mockImplementation(() => {
+      throw Object.assign(new Error('gone'), { code: 'ESRCH' })
+    })
+    expect(isHeartbeatProcessAlive(genuine)).toBe(false)
+
+    // Unknown error code is treated as dead
+    kill.mockImplementation(() => {
+      throw Object.assign(new Error('unknown'), { code: 'ENOSYS' })
+    })
+    expect(isHeartbeatProcessAlive(genuine)).toBe(false)
+
+    kill.mockRestore()
   })
 
   it('treats a malformed heartbeat file as absent', async () => {

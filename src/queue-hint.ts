@@ -2,12 +2,10 @@
 
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { queueCopy } from './copy.ts'
-import { openQueueHint, updateQueueHint } from './job-token-hint.ts'
+import { openQueueHint, updateQueueHint, type HintSession } from './job-token-hint.ts'
 import type { QoderQueueWait } from './qoder/transport/chat.ts'
 
-export interface QueueHintSession {
-  append(type: string, data: unknown): unknown
-}
+export type QueueHintSession = HintSession
 
 /**
  * Capture the request's destination and keep its row private to this observer.
