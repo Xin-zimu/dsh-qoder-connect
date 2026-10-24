@@ -184,10 +184,12 @@ export function quotaStatusIsFresh(variantId: QoderVariantId, maxAgeMs: number):
 /**
  * One read's outcome as every surface reports it: `invalid` is a 200 whose body
  * is not a status document; `transport` carries the raw reason, which each
- * surface renders through its own copy.
+ * surface renders through its own copy. `status` is the HTTP status when the
+ * server answered at all — a 404 means this route does not exist, which is how
+ * a surface recognizes that the plugin never registered its host half.
  */
 export type QuotaReadFailure =
-  | { kind: 'transport'; message: string }
+  | { kind: 'transport'; message: string; status?: number }
   | { kind: 'invalid' }
 
 /** The last read failure per variant, cleared by the next successful read. */
@@ -257,13 +259,23 @@ function publishReadFailure(variantId: QoderVariantId, failure: QuotaReadFailure
   const previous = readFailures[variantId]
   if (previous === failure) return
   if (previous !== undefined && failure !== undefined && previous.kind === failure.kind
-    && (previous.kind !== 'transport' || failure.kind !== 'transport' || previous.message === failure.message)) return
+    && (previous.kind !== 'transport'
+      || failure.kind !== 'transport'
+      || (previous.message === failure.message && previous.status === failure.status))) return
   readFailures[variantId] = failure
   bump()
 }
 
 /** A 200 whose body is not a status document — reported as `invalid`, not as a transport failure. */
 class InvalidStatusDocumentError extends Error {}
+
+/** A non-2xx answer; carries the status so surfaces can tell "missing route" from "server down". */
+class HttpStatusError extends Error {
+  constructor(readonly status: number) {
+    super(`HTTP ${status}`)
+    this.name = 'HttpStatusError'
+  }
+}
 
 /**
  * Fetch one variant's status document and publish it (or its failure) for every
@@ -280,7 +292,7 @@ async function readVariant(variantId: QoderVariantId): Promise<QoderWebStatus | 
       credentials: 'same-origin',
     })
     const body: unknown = await response.json().catch(() => undefined)
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    if (!response.ok) throw new HttpStatusError(response.status)
     if (!isQoderWebStatus(body)) throw new InvalidStatusDocumentError()
     publishRead(variantId, seq, { doc: body })
     return body
@@ -288,7 +300,9 @@ async function readVariant(variantId: QoderVariantId): Promise<QoderWebStatus | 
     publishRead(variantId, seq, {
       failure: error instanceof InvalidStatusDocumentError
         ? { kind: 'invalid' }
-        : { kind: 'transport', message: error instanceof Error ? error.message : 'request failed' },
+        : error instanceof HttpStatusError
+          ? { kind: 'transport', message: error.message, status: error.status }
+          : { kind: 'transport', message: error instanceof Error ? error.message : 'request failed' },
     })
     return undefined
   }

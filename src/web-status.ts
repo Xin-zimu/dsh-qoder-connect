@@ -244,3 +244,36 @@ export function registerQoderStatusRoute(ctx: Context, deps: QoderStatusRouteOpt
     }
   }, 'dsh-qoder-connect: Web status route')
 }
+
+/**
+ * Mount the status route of a plugin that refused to load.
+ *
+ * Every other route this plugin would register belongs to machinery that never
+ * started, so the card must not offer those controls. This one route exists so
+ * the refusal itself — the load-time message, verbatim — reaches the browser and
+ * can be copied out; the alternative is a card whose every action answers 404.
+ *
+ * @param ctx - context that exposes the web server.
+ * @param path - exact status path for one variant.
+ * @param message - the load-time failure text, already human-readable.
+ */
+export function registerInactiveStatusRoute(ctx: Context, path: string, message: string): () => void {
+  // Registered directly rather than through `ctx.effect`: this runs from an
+  // injection callback, after `apply` returned, and an effect opened there is
+  // dropped with the applying scope — the route would exist only on paper.
+  return ctx.webServer.register({
+    kind: 'exact',
+    path,
+    handler: async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+      if (req.method !== 'GET') {
+        json(res, 405, { error: 'method not allowed' })
+        return
+      }
+      if (!loopbackRequest(req)) {
+        json(res, 403, { error: 'request-not-trusted' })
+        return
+      }
+      json(res, 200, { status: 'error', message, inactive: true } satisfies QoderWebStatus)
+    },
+  })
+}

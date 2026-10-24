@@ -320,4 +320,10 @@ export type QoderWebStatus =
      */
     authKey?: string
   }
-  | { status: 'error'; message: string }
+  /**
+   * The host half refused to load, and `message` is that refusal verbatim.
+   *
+   * The card renders this instead of its body: a degraded host registers only
+   * the status route, so every other control it offered would answer 404.
+   */
+  | { status: 'error'; message: string; inactive?: true }

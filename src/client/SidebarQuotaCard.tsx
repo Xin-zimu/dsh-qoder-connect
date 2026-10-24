@@ -247,6 +247,11 @@ export function SidebarQuotaCard(props: SidebarQuotaCardProps): React.ReactNode 
   // slot ledger while an off setting renders nothing. It sits after every hook.
   if (enabled === false) return null
 
+  // A host half that never started answers with the refusal document. The
+  // settings card is the one place that explains it; a sidebar badge here would
+  // only repeat an error the user cannot act on from the sidebar.
+  if (status !== undefined && status.status === 'error' && status.inactive === true) return null
+
   const credits = status !== undefined && 'credits' in status ? status.credits : undefined
   const bars = credits === undefined ? [] : buildBars(credits.accounts ?? [])
   const lowest = bars.reduce<number | undefined>((acc, bar) => {
@@ -417,6 +422,10 @@ export function QuotaDashboard(props: QuotaDashboardProps): React.ReactNode {
   const rows = credits === undefined ? [] : buildPackageRows(credits.accounts ?? [])
   const nameKey: QuotaCopyKey = activeVariant === 'qoder-global' ? 'quotaCardGlobal' : 'quotaCardCN'
   const signedIn = status?.status === 'signed-in'
+  // Same rule as the sidebar card: a plugin whose host half never started is
+  // explained only in its settings card, so this panel stays closed instead of
+  // rendering an empty ledger.
+  if (status !== undefined && status.status === 'error' && status.inactive === true) return null
   // Overall bar: remaining over granted, summed from the packages. Qoder's
   // `credits.total` is a USAGE percentage, not a remainder. A 0 size renders the
   // bar as indeterminate rather than asserting a false full usage.

@@ -8,6 +8,8 @@
  * @module dsh-qoder-connect
  */
 
+import { createRequire } from 'node:module'
+import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
@@ -17,7 +19,7 @@ import { createAuthKey, registerQoderAuthRoute } from './auth-route.ts'
 import { FALLBACK_QODER_MODELS, QoderCatalog } from './catalog.ts'
 import { qoderCatalogPath, QoderCatalogStore } from './catalog-store.ts'
 import { createQoderAdapter } from './adapter.ts'
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { createQoderShim } from './shim.ts'
 import { QoderProbeService } from './probe-service.ts'
@@ -27,7 +29,7 @@ import { createQoderTransport, defaultStreamIdleTimeoutMs, type QoderCheckInResu
 import { getMachineId } from './qoder/transport/machine-id.ts'
 import { configurePluginPaths, qoderMachineIdPath, qoderPluginDataDir, qoderStateDir } from './paths.ts'
 import { createQueueHint, type QueueHintSession } from './queue-hint.ts'
-import { registerQoderStatusRoute } from './web-status.ts'
+import { registerInactiveStatusRoute, registerQoderStatusRoute } from './web-status.ts'
 import { createProbeKey, registerQoderProbeRoute } from './probe-route.ts'
 import { CheckInScheduler, DEFAULT_CHECK_IN_MINUTE, EARLIEST_CHECK_IN_MINUTE, JsonFileCheckInStore, normalizeCheckInMinute } from './checkin-scheduler.ts'
 import type { QoderModelInfo } from './catalog.ts'
@@ -1187,7 +1189,237 @@ const lastLiveFetchAt = new Map<string, number>()
  * variant registers unconditionally; an empty catalog is how DSH hides a group,
  * which keeps a token saved after startup working without re-registering.
  */
+/** One peer this plugin cannot run without: the spec and its declared range. */
+interface PeerExpectation {
+  readonly spec: string
+  readonly range: string
+}
+
+/**
+ * Peers whose resolved copy decides whether this build can run.
+ *
+ * Only the packages this plugin imports at load time; the rest of the declared
+ * peers belong to the browser half or to optional paths, where a missing copy
+ * does not make every turn fail. The RANGES are read from this package's own
+ * `package.json`, so a version bump is one edit and the check can never disagree
+ * with what the manifest advertises.
+ */
+const CHECKED_PEERS: readonly string[] = [
+  '@deepseek-ai/dsh-llm',
+  '@deepseek-ai/dsh-llm-pi-ai',
+  '@earendil-works/pi-ai',
+]
+
+/**
+ * Read the checked peers' ranges from the manifest beside this build.
+ *
+ * @returns one expectation per peer that declares a string range; an unreadable
+ * manifest yields none, which simply skips the check rather than blocking a load
+ * on a fact it cannot establish.
+ * @internal Exported for tests.
+ */
+export function peerExpectations(): readonly PeerExpectation[] {
+  let peers: Record<string, unknown>
+  try {
+    const manifest = JSON.parse(
+      readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8'),
+    ) as { peerDependencies?: Record<string, unknown> }
+    peers = manifest.peerDependencies ?? {}
+  } catch {
+    return []
+  }
+  return CHECKED_PEERS.flatMap(spec => {
+    const range = peers[spec]
+    return typeof range === 'string' ? [{ spec, range }] : []
+  })
+}
+
+interface ParsedSemver {
+  major: number
+  minor: number
+  patch: number
+  pre: ReadonlyArray<string | number> | null
+}
+
+/** Parse a semver string into comparable parts; non-conforming input is null. */
+function parseSemver(version: unknown): ParsedSemver | null {
+  if (typeof version !== 'string') return null
+  const m = version.trim().match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/)
+  if (!m) return null
+  return {
+    major: Number(m[1]),
+    minor: Number(m[2]),
+    patch: Number(m[3]),
+    pre: m[4] !== undefined
+      ? m[4].split('.').map((id): string | number => (/^\d+$/.test(id) ? Number(id) : id))
+      : null,
+  }
+}
+
+/** Full semver ordering: numeric fields, then pre-release tag rules. */
+function compareSemver(a: ParsedSemver, b: ParsedSemver): number {
+  if (a.major !== b.major) return a.major - b.major
+  if (a.minor !== b.minor) return a.minor - b.minor
+  if (a.patch !== b.patch) return a.patch - b.patch
+  if (a.pre === null && b.pre === null) return 0
+  if (a.pre === null) return 1
+  if (b.pre === null) return -1
+  const len = Math.max(a.pre.length, b.pre.length)
+  for (let i = 0; i < len; i++) {
+    const x = a.pre[i]
+    const y = b.pre[i]
+    if (x === undefined) return -1
+    if (y === undefined) return 1
+    if (x === y) continue
+    const xNum = typeof x === 'number'
+    const yNum = typeof y === 'number'
+    if (xNum && yNum) return x - y
+    if (xNum) return -1
+    if (yNum) return 1
+    return x < y ? -1 : 1
+  }
+  return 0
+}
+
+/**
+ * Compare a resolved version to a declared bound.
+ *
+ * For a bound carrying no pre-release (`>=0.2.1`), compare only the three
+ * numeric fields: a `0.2.1-rc.x` resolved package counts as at-or-above the
+ * `0.2.1` floor — rc builds of this ecosystem carry the same API as the
+ * matching base release, so the build tag must not hide it.
+ * For a bound with a tag (`>=0.2.1-rc.1`), run the full semver comparison so
+ * `-alpha < -beta < -rc.1` orders correctly.
+ */
+function compareToBound(v: ParsedSemver, bound: ParsedSemver): number {
+  if (bound.pre === null) return compareCore(v, bound)
+  return compareSemver(v, bound)
+}
+
+/** Numeric fields only, ignoring any pre-release tag on either side. */
+function compareCore(a: ParsedSemver, b: ParsedSemver): number {
+  return a.major - b.major || a.minor - b.minor || a.patch - b.patch
+}
+
+/**
+ * Compare a resolved package version against a semver range. Only `^x.y.z`
+ * and `>=x.y.z` are enforced; unknown or unparseable forms return true so a
+ * working install is never blocked by a declaration it cannot express.
+ *
+ * @internal Exported for tests; the load-time check is the only caller.
+ */
+export function satisfiesRange(version: string, range: string): boolean {
+  if (typeof range !== 'string') return true
+  const trimmed = range.trim()
+  const v = parseSemver(version)
+  if (v === null) return true
+
+  let m = trimmed.match(/^>=\s*(\S+)$/)
+  if (m) {
+    const bound = parseSemver(m[1])
+    if (bound === null) return true
+    return compareToBound(v, bound) >= 0
+  }
+
+  m = trimmed.match(/^\^\s*(\S+)$/)
+  if (m) {
+    const bound = parseSemver(m[1])
+    if (bound === null) return true
+    if (compareToBound(v, bound) < 0) return false
+    // ^x.y.z: first non-zero component locks the bound above it.
+    // ^1.2.3 → <2.0.0; ^0.2.1 → <0.3.0; ^0.0.5 → <0.0.6; ^0.0.0 → <0.0.1.
+    let upper: ParsedSemver
+    if (bound.major > 0) {
+      upper = { major: bound.major + 1, minor: 0, patch: 0, pre: null }
+    } else if (bound.minor > 0) {
+      upper = { major: 0, minor: bound.minor + 1, patch: 0, pre: null }
+    } else {
+      upper = { major: 0, minor: bound.minor, patch: bound.patch + 1, pre: null }
+    }
+    // Compare cores only: `2.0.0-rc.1` sits below `2.0.0` in semver order, so a
+    // full comparison would let the next major's preview through a caret that
+    // must stop at 2.0.0.
+    return compareCore(v, upper) < 0
+  }
+
+  return true
+}
+
+/**
+ * Fail loudly when the dependency tree this plugin resolves from is older than
+ * the declared peer floor. pnpm installs plugins with `autoInstallPeers: false`,
+ * so a stale `dsh-llm`/`pi-ai` in the shared profile `node_modules` keeps the
+ * plugin alive long enough to misbehave; the first `import` it touches dies on
+ * an unguarded `.length` read with no trace back to the version gap.
+ *
+ * Runtime resolution is the only reliable check: `createRequire` resolves to the
+ * exact copy Node will load, and `resolve.paths` gives the same lookup order.
+ * Each spec reads the resolved `package.json` once — three reads, ~20ms, at
+ * `apply` time only.
+ */
+function readResolvedVersion(require_: NodeJS.Require, spec: string): string | undefined {
+  for (const p of require_.resolve.paths(spec) ?? []) {
+    const pj = join(p, spec, 'package.json')
+    if (!existsSync(pj)) continue
+    try {
+      const parsed = JSON.parse(readFileSync(pj, 'utf8')) as { version?: unknown }
+      return typeof parsed.version === 'string' ? parsed.version : undefined
+    } catch {
+      // An unreadable manifest is the profile's problem, not a verdict about
+      // this plugin: keep looking rather than fail the load on a parse error.
+      continue
+    }
+  }
+  return undefined
+}
+
+/**
+ * Report the first peer whose resolved copy cannot run this build.
+ *
+ * pnpm installs plugins with `autoInstallPeers: false`, so a stale
+ * `dsh-llm`/`pi-ai` beside the plugin or in the shared profile `node_modules`
+ * stays resolvable long after this build declared a floor; the first import it
+ * touches dies on an unguarded `.length` read with no trace back to the version
+ * gap. Runtime resolution is the only reliable check: `createRequire` resolves to
+ * the exact copy Node will load, and `resolve.paths` gives the same lookup order.
+ *
+ * @param require_ - resolver anchored at this module.
+ * @param expectations - peers to check, in the order they are reported.
+ * @returns the failure text, or undefined when every peer is usable.
+ * @internal Exported for tests; `apply` passes the real resolver and peer list.
+ */
+export function peerVersionFailure(
+  require_: NodeJS.Require = createRequire(import.meta.url),
+  expectations: readonly PeerExpectation[] = peerExpectations(),
+): string | undefined {
+  for (const { spec, range } of expectations) {
+    const version = readResolvedVersion(require_, spec)
+    if (version === undefined) {
+      return `${spec} is not resolvable from this installation; reinstall the plugin so its dependencies are installed again`
+    }
+    if (!satisfiesRange(version, range)) {
+      return `${spec}@${range} is required, but this profile resolves ${version}; `
+        + `rebuild the profile dependency tree or update that package`
+    }
+  }
+  return undefined
+}
+
 export function apply(ctx: Context, config: Config): void {
+  // A refused load still has to explain itself, and the browser half is loaded
+  // from the manifest regardless of whether this half started. Registering one
+  // status route that carries the refusal lets the card show the real message
+  // and stop offering controls whose machinery never exists; throwing instead
+  // would leave that card rendering actions that can only answer 404.
+  const peerFailure = peerVersionFailure()
+  if (peerFailure !== undefined) {
+    const message = `dsh-qoder-connect: ${peerFailure}`
+    ctx.logger.warn(message)
+    ctx.inject(['webServer'], webCtx => {
+      for (const variant of QODER_VARIANTS) registerInactiveStatusRoute(webCtx, variant.statusPath, message)
+    })
+    return
+  }
   // Before anything reads a path: every store built below freezes what it gets.
   // `ctx.get` rather than `inject` — a profile context is absent in compositions
   // booted without a profile, and this plugin still has to load there.

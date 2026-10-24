@@ -1031,6 +1031,8 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
   const [checkInNotice, setCheckInNotice] = useState<string>()
   /** A write action's failure, reported on the same line as a read failure. */
   const [writeFailure, setWriteFailure] = useState<string>()
+  /** Transient acknowledgement for the copy button on the inactive-host card. */
+  const [copiedInactive, setCopiedInactive] = useState(false)
   const mounted = useRef(true)
   const manualControllers = useRef(new Set<AbortController>())
 
@@ -1482,6 +1484,28 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
   const cardTitle = isUnified ? t('unifiedTitle') : t(currentVariant.titleKey)
   const cardIntro = isUnified ? t('unifiedIntro') : t(currentVariant.introKey)
 
+  /**
+   * The host half declined to load, and this document is how it says so.
+   *
+   * Its message is the load-time failure verbatim, so nothing here guesses at a
+   * cause. The card header stays as-is — the block belongs to the host, and
+   * collapsing it is still the user's call — while the body it would normally
+   * fill is replaced: every control there belongs to machinery that never
+   * started, so offering them would only produce 404s.
+   */
+  const inactiveMessage = status?.status === 'error' && status.inactive === true ? status.message : undefined
+  /** No status route at all: an older build, or a host that dropped the entry. */
+  const hostMissing = readFailure?.kind === 'transport' && readFailure.status === 404
+  /** Nothing known yet: render neither the body nor the refusal before the first read lands. */
+  const statusUnknown = status === undefined && readFailure === undefined
+  const inactiveNotice = inactiveMessage !== undefined || hostMissing
+    ? {
+      title: inactiveMessage === undefined ? t('hostMissingTitle') : t('inactiveTitle'),
+      body: inactiveMessage === undefined ? t('hostMissingBody') : inactiveMessage,
+      hint: inactiveMessage === undefined ? t('hostMissingHint') : t('inactiveHint'),
+    }
+    : undefined
+
   const label = status === undefined
     ? t('loading')
     : status.status === 'signed-in'
@@ -1548,6 +1572,31 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
       </button>
       {open ? (
         <div style={cardBodyStyle}>
+          {inactiveNotice !== undefined ? (
+            <>
+              <p style={{ ...bodyStyle, fontWeight: 600 }}>{inactiveNotice.title}</p>
+              <p style={{ ...bodyStyle, wordBreak: 'break-word' }}>{inactiveNotice.body}</p>
+              <p style={bodyStyle}>{inactiveNotice.hint}</p>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <button
+                  type="button"
+                  style={buttonStyle}
+                  onClick={() => {
+                    const text = [inactiveNotice.title, '', inactiveNotice.body, '', inactiveNotice.hint].join('\n')
+                    void navigator.clipboard?.writeText(text).then(() => {
+                      setCopiedInactive(true)
+                      window.setTimeout(() => setCopiedInactive(false), 1600)
+                    }).catch(() => setCopiedInactive(false))
+                  }}
+                >
+                  {copiedInactive ? t('copied') : t('copyReport')}
+                </button>
+              </div>
+            </>
+          ) : statusUnknown ? (
+            <p style={bodyStyle} aria-busy="true">{t('loading')}</p>
+          ) : (
+            <>
           {isUnified ? (
             <>
               {/* Top section: Qoder 侧栏设置 */}
@@ -1805,6 +1854,8 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
               </>
             : null}
           {status?.status === 'error' ? <p style={errorStyle}>{status.message}</p> : null}
+            </>
+          )}
         </div>
       ) : null}
     </li>
