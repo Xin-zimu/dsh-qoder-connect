@@ -561,39 +561,100 @@ function ContextTable({ models, t, useMaximumContextWindow, disabled, onUseMaxim
   if (known.length === 0 && !showPreference) return null
   return (
     <div style={quotaListStyle}>
-      <h3 style={quotaTitleStyle}>{t('contextHeading')}</h3>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <h3 style={quotaTitleStyle}>{t('contextHeading')}</h3>
+        <p style={descriptionStyle}>{t('contextSubtitle')}</p>
+      </div>
       {showPreference && onUseMaximumContextWindow !== undefined ? (
-        <label style={contextPreferenceStyle}>
-          <input
-            type="checkbox"
-            checked={useMaximumContextWindow === true}
-            disabled={disabled}
-            onChange={event => { onUseMaximumContextWindow(event.currentTarget.checked) }}
-          />
-          <span style={contextPreferenceCopyStyle}>
-            <span>{t('useMaximumContextWindow')}</span>
-            <span style={modelRateStyle}>{t('useMaximumContextWindowHint')}</span>
-          </span>
-        </label>
-      ) : null}
-      {known.map(model => {
-        const capacity = model.contextWindow as number
-        const max = maxDeclaredWindow(model)
-        const alternative = max !== undefined && max > capacity ? max : undefined
-        return (
-          <div key={model.id} style={quotaLabelStyle}>
-            <span>{model.name}</span>
-            <span style={contextPickerRowStyle}>
-              <span>{formatTokens(capacity)}</span>
-              {alternative !== undefined
-                ? <span style={modelRateStyle}>{t('contextUpTo', { size: formatTokens(alternative) })}</span>
-                : model.defaultContextWindow !== undefined && model.defaultContextWindow < capacity
-                  ? <span style={modelRateStyle}>{t('contextDefault', { size: formatTokens(model.defaultContextWindow) })}</span>
-                  : null}
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: '10px 12px',
+          borderRadius: 8,
+          background: 'var(--dsw-alias-bg-layer-2)',
+          border: '.5px solid var(--dsw-alias-border-l4)',
+          gap: 12,
+        }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, flex: 1 }}>
+            <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--dsw-alias-label-primary)' }}>
+              {t('useMaximumContextWindow')}
+            </span>
+            <span style={{ fontSize: 12, color: 'var(--dsw-alias-label-tertiary)', lineHeight: 1.5 }}>
+              {t('useMaximumContextWindowHint')}
             </span>
           </div>
-        )
-      })}
+          <button
+            type="button"
+            role="switch"
+            aria-checked={useMaximumContextWindow === true}
+            disabled={disabled}
+            aria-label={t('useMaximumContextWindow')}
+            onClick={() => { if (!disabled) onUseMaximumContextWindow(!(useMaximumContextWindow === true)) }}
+            style={{
+              ...switchStyle,
+              background: useMaximumContextWindow === true ? 'var(--dsw-alias-brand-primary)' : 'var(--dsw-alias-bg-layer-3, rgba(127,127,127,0.2))',
+              justifyContent: useMaximumContextWindow === true ? 'flex-end' : 'flex-start',
+              opacity: disabled === true ? 0.45 : 1,
+              cursor: disabled === true ? 'not-allowed' : 'pointer',
+            }}
+          >
+            <span style={knobStyle} />
+          </button>
+        </div>
+      ) : null}
+      {known.length > 0 ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {known.map(model => {
+            const capacity = model.contextWindow as number
+            const max = maxDeclaredWindow(model)
+            const alternative = max !== undefined && max > capacity ? max : undefined
+            return (
+              <div key={model.id} style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: '10px 12px',
+                borderRadius: 8,
+                background: 'var(--dsw-alias-bg-layer-2)',
+                border: '.5px solid var(--dsw-alias-border-l4)',
+                gap: 12,
+              }}>
+                <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, flex: 1 }}>
+                  <span style={{ fontWeight: 500, fontSize: 13, color: 'var(--dsw-alias-label-primary)' }}>
+                    {model.name}
+                    {(() => {
+                      const rate = modelRateLabel(model)
+                      return rate ? (
+                        <span style={{ fontSize: 12, color: 'var(--dsw-alias-label-tertiary)', fontWeight: 400, marginLeft: 6 }}>
+                          · {rate}
+                        </span>
+                      ) : null
+                    })()}
+                  </span>
+                  <span style={{ fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' }}>
+                    {model.id}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+                  <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--dsw-alias-label-primary)' }}>
+                    {formatTokens(capacity)}
+                  </span>
+                  {alternative !== undefined
+                    ? <span style={{ fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }}>
+                        {t('contextUpTo', { size: formatTokens(alternative) })}
+                      </span>
+                    : model.defaultContextWindow !== undefined && model.defaultContextWindow < capacity
+                      ? <span style={{ fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }}>
+                          {t('contextDefault', { size: formatTokens(model.defaultContextWindow) })}
+                        </span>
+                      : null}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      ) : null}
     </div>
   )
 }
