@@ -1198,11 +1198,17 @@ interface PeerExpectation {
 /**
  * Peers whose resolved copy decides whether this build can run.
  *
- * Only the packages this plugin imports at load time; the rest of the declared
- * peers belong to the browser half or to optional paths, where a missing copy
- * does not make every turn fail. The RANGES are read from this package's own
- * `package.json`, so a version bump is one edit and the check can never disagree
- * with what the manifest advertises.
+ * These three are the ones whose shapes this build's request path walks into:
+ * the provider seam, the adapter base, and the event stream the harness reads
+ * back. The other declared peers (`dsh-attachment`, `dsh-atomic-write`,
+ * `dsh-home-paths`, `schemastery`) are also imported, but they ride the host's
+ * version line and a mismatch there surfaces as a plain missing export at import
+ * time — a case this check cannot reach anyway, because ESM links before
+ * `apply()` runs. Listing them here would only produce false alarms for builds
+ * this plugin has no opinion about.
+ *
+ * The RANGES are read from this package's own `package.json`, so a version bump
+ * is one edit and the check can never disagree with what the manifest advertises.
  */
 const CHECKED_PEERS: readonly string[] = [
   '@deepseek-ai/dsh-llm',
@@ -1302,9 +1308,26 @@ function compareCore(a: ParsedSemver, b: ParsedSemver): number {
 }
 
 /**
- * Compare a resolved package version against a semver range. Only `^x.y.z`
- * and `>=x.y.z` are enforced; unknown or unparseable forms return true so a
- * working install is never blocked by a declaration it cannot express.
+ * Whether this checker can decide a range at all.
+ *
+ * Form alone is not enough: `~1`, `^1.2` and `>=abc` share the shape of a range
+ * this checker claims to enforce, yet its bound does not parse, so the
+ * comparison would pass everything without ever saying so. Callers use this to
+ * report the limit instead of enforcing nothing quietly.
+ *
+ * @internal Exported for tests.
+ */
+export function supportsRange(range: unknown): boolean {
+  if (typeof range !== 'string') return false
+  const m = range.trim().match(/^(?:>=|\^|~)\s*(\S+)$/)
+  return m !== null && parseSemver(m[1]) !== null
+}
+
+/**
+ * Compare a resolved package version against a semver range. `^x.y.z`, `~x.y.z`
+ * and `>=x.y.z` are enforced; every other form returns true, because a
+ * declaration this checker cannot express must not block a working install —
+ * callers report those forms rather than treating the pass as a verdict.
  *
  * @internal Exported for tests; the load-time check is the only caller.
  */
@@ -1319,6 +1342,16 @@ export function satisfiesRange(version: string, range: string): boolean {
     const bound = parseSemver(m[1])
     if (bound === null) return true
     return compareToBound(v, bound) >= 0
+  }
+
+  // ~x.y.z allows patch upgrades only: >=x.y.z <x.(y+1).0.
+  m = trimmed.match(/^~\s*(\S+)$/)
+  if (m) {
+    const bound = parseSemver(m[1])
+    if (bound === null) return true
+    if (compareToBound(v, bound) < 0) return false
+    const upper: ParsedSemver = { major: bound.major, minor: bound.minor + 1, patch: 0, pre: null }
+    return compareCore(v, upper) < 0
   }
 
   m = trimmed.match(/^\^\s*(\S+)$/)
@@ -1363,7 +1396,11 @@ function readResolvedVersion(require_: NodeJS.Require, spec: string): string | u
     if (!existsSync(pj)) continue
     try {
       const parsed = JSON.parse(readFileSync(pj, 'utf8')) as { version?: unknown }
-      return typeof parsed.version === 'string' ? parsed.version : undefined
+      // A candidate that exists but states no version says nothing about the
+      // copy Node will load; keep looking, the same way an unreadable manifest
+      // does, so a partial directory never reads as "not installed".
+      if (typeof parsed.version === 'string') return parsed.version
+      continue
     } catch {
       // An unreadable manifest is the profile's problem, not a verdict about
       // this plugin: keep looking rather than fail the load on a parse error.
@@ -1385,17 +1422,25 @@ function readResolvedVersion(require_: NodeJS.Require, spec: string): string | u
  *
  * @param require_ - resolver anchored at this module.
  * @param expectations - peers to check, in the order they are reported.
+ * @param warn - sink for a range this checker cannot interpret, so a guard that
+ *   silently stops enforcing is visible in the host log instead of passing quiet.
  * @returns the failure text, or undefined when every peer is usable.
  * @internal Exported for tests; `apply` passes the real resolver and peer list.
  */
 export function peerVersionFailure(
   require_: NodeJS.Require = createRequire(import.meta.url),
   expectations: readonly PeerExpectation[] = peerExpectations(),
+  warn?: (message: string) => void,
 ): string | undefined {
   for (const { spec, range } of expectations) {
     const version = readResolvedVersion(require_, spec)
     if (version === undefined) {
       return `${spec} is not resolvable from this installation; reinstall the plugin so its dependencies are installed again`
+    }
+    if (!supportsRange(range)) {
+      warn?.(`dsh-qoder-connect: cannot interpret the range "${range}" declared for ${spec}; `
+        + `that peer is not enforced`)
+      continue
     }
     if (!satisfiesRange(version, range)) {
       return `${spec}@${range} is required, but this profile resolves ${version}; `
@@ -1411,7 +1456,14 @@ export function apply(ctx: Context, config: Config): void {
   // status route that carries the refusal lets the card show the real message
   // and stop offering controls whose machinery never exists; throwing instead
   // would leave that card rendering actions that can only answer 404.
-  const peerFailure = peerVersionFailure()
+  // Explicit arguments rather than a second `undefined`: the injected peer list
+  // and the real resolver are what the check should run with, and reading that
+  // from defaults hides it behind two placeholders.
+  const peerFailure = peerVersionFailure(
+    createRequire(import.meta.url),
+    peerExpectations(),
+    message => { ctx.logger.warn(message) },
+  )
   if (peerFailure !== undefined) {
     const message = `dsh-qoder-connect: ${peerFailure}`
     ctx.logger.warn(message)

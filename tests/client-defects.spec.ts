@@ -323,10 +323,13 @@ describe('QoderPluginCard', () => {
       await act(async () => { view!.root.findAllByType('button')[0]!.props.onClick() })
       await pressCard(en.tabContext)
     }
-    /** Fire the preference checkbox, the smallest write the card offers. */
+    /** Fire the preference switch, the smallest write the card offers. */
     async function firePreferenceWrite(): Promise<void> {
-      const checkbox = view!.root.findAllByType('input').find(node => node.props.type === 'checkbox')!
-      await act(async () => { checkbox.props.onChange({ currentTarget: { checked: true } }) })
+      const toggle = view!.root.findAll(node =>
+        (node.type as unknown) === 'button'
+        && (node.props as { role?: string }).role === 'switch'
+        && (node.props as { 'aria-label'?: string })['aria-label'] === en.useMaximumContextWindow)[0]!
+      await act(async () => { toggle.props.onClick() })
     }
 
     it('keeps the account and credits on screen when the write is rejected', async () => {

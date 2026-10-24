@@ -46,6 +46,9 @@ describe('Qoder plugin card', () => {
   /** Resolvers for held POSTs, so "in flight" is observable, not a race. */
   let releaseQueue: ((body: unknown) => void)[] = []
   let holdPosts = false
+  /** Held status GETs, so "the first read has not landed yet" is observable. */
+  let holdStatus = false
+  let releaseStatus: ((body: unknown) => void)[] = []
   const intervalHandles = new Map<number, () => void>()
   let nextHandle = 1
 
@@ -72,6 +75,8 @@ describe('Qoder plugin card', () => {
     signedIn()
     statusFails = false
     holdPosts = false
+    holdStatus = false
+    releaseStatus = []
     posts.length = 0
     releaseQueue = []
     intervalHandles.clear()
@@ -87,7 +92,10 @@ describe('Qoder plugin card', () => {
       }
       gets.push(String(input))
       if (statusFails) throw new Error('socket died')
-      return { ok: true, status: 200, json: async () => statusBody }
+      const body = holdStatus
+        ? await new Promise<unknown>(resolve => { releaseStatus.push(resolve) })
+        : statusBody
+      return { ok: true, status: 200, json: async () => body }
     }))
     vi.stubGlobal('window', {
       setInterval: (handler: () => void) => {
@@ -366,6 +374,34 @@ describe('Qoder plugin card', () => {
 
   // ---- context tab: maximum-window preference -------------------------------
 
+  it('holds back the quota block until the first read, keeping the tab switcher', async () => {
+    holdStatus = true
+    // A ready settings scope: without one the quota block never renders, and the
+    // absence assertion below would pass for the wrong reason.
+    const scope = {
+      getSnapshot: () => ({ status: 'ready', writable: true, value: {} }),
+      subscribe: () => () => {},
+      set: () => {},
+    }
+    const props = { t, unified: true, scope } as unknown as Parameters<typeof QoderPluginCard>[0]
+    await act(async () => { view = create(createElement(QoderPluginCard, props)) })
+    await act(async () => { view!.root.findAllByType('button')[0]!.props.onClick() })
+    // The version switcher is part of the card's chrome and must survive an
+    // unknown status; the quota toggles would flash a refusal on their way in.
+    expect(view!.root.findAll(node => (node.props as { role?: string }).role === 'tablist').length).toBe(1)
+    expect(JSON.stringify(view!.toJSON())).not.toContain(en.quotaToggleCN)
+    await act(async () => { for (const release of releaseStatus) release(statusBody) })
+    vi.advanceTimersByTime(0)
+    await act(async () => {})
+    expect(JSON.stringify(view!.toJSON())).toContain(en.quotaToggleCN)
+  })
+
+  /** The max-window preference is a switch button, not an input, since the panel rewrite. */
+  const maxWindowSwitch = () => view!.root.findAll(node =>
+    (node.type as unknown) === 'button'
+    && (node.props as { role?: string }).role === 'switch'
+    && (node.props as { 'aria-label'?: string })['aria-label'] === en.useMaximumContextWindow)[0]
+
   it('offers the max-window preference on both cards, each a route write', async () => {
     statusBody = {
       status: 'signed-in',
@@ -376,9 +412,9 @@ describe('Qoder plugin card', () => {
     for (const variant of [undefined, QODER_GLOBAL_CARD]) {
       await mount(variant)
       await press(en.tabContext)
-      const checkbox = inputs().find(input => input.props.type === 'checkbox')
-      expect(checkbox).toBeDefined()
-      await act(async () => { checkbox!.props.onChange({ currentTarget: { checked: true } }) })
+      const toggle = maxWindowSwitch()
+      expect(toggle).toBeDefined()
+      await act(async () => { toggle!.props.onClick() })
       expect(posts).toHaveLength(1)
       expect(JSON.parse(String(posts[0]!.init.body))).toEqual({ action: 'set-maximum-context-window', enabled: true })
       await act(async () => view?.unmount())
@@ -532,9 +568,9 @@ describe('Qoder plugin card', () => {
     }
     await mount(QODER_GLOBAL_CARD)
     await press(en.tabContext)
-    const checkbox = inputs().find(input => input.props.type === 'checkbox')
-    expect(checkbox).toBeDefined()
-    await act(async () => { checkbox!.props.onChange({ currentTarget: { checked: true } }) })
+    const toggle = maxWindowSwitch()
+    expect(toggle).toBeDefined()
+    await act(async () => { toggle!.props.onClick() })
     expect(posts).toHaveLength(1)
     expect(posts[0]!.url).toBe(QODER_GLOBAL_CARD.probePath)
     expect(JSON.parse(String(posts[0]!.init.body))).toEqual({ action: 'set-maximum-context-window', enabled: true })

@@ -57,7 +57,12 @@ describe('peer range comparison', () => {
     ['0.2.1+build.5', '>=0.2.1-rc.1', true, 'build metadata is ignored'],
     ['1.0.0', '', true, 'empty range passes'],
     ['1.0.0', 'invalid', true, 'unparseable range passes'],
-    ['1.0.0', '~1.0.0', true, 'unimplemented range form passes'],
+    ['1.0.0', '~1.0.0', true, 'tilde admits its own patch'],
+    ['1.0.4', '~1.0.0', true, 'tilde admits a later patch'],
+    ['1.0.9', '~1.0.0', true, 'tilde stays inside the minor'],
+    ['1.1.0', '~1.0.0', false, 'tilde stops at the next minor'],
+    ['0.2.9', '~0.2.1', true, 'tilde on a 0.x line admits later patches'],
+    ['0.3.0', '~0.2.1', false, 'tilde on a 0.x line stops at the next minor'],
     ['1.0.0', '1.x', true, 'unimplemented range form passes'],
   ]
 
@@ -127,6 +132,40 @@ describe('peer version resolution', () => {
   it('skips an unreadable manifest rather than failing on the parse error', () => {
     const root = fixture({ '@scope/pkg': null })
     expect(peerVersionFailure(createRequireFrom(root), expectations)).toMatch(/is not resolvable/)
+  })
+
+  it('keeps looking past a candidate manifest that states no version', () => {
+    const outer = mkdtempSync(join(tmpdir(), 'qoder-peer-'))
+    dirs.push(outer)
+    const inner = join(outer, 'proj')
+    mkdirSync(inner, { recursive: true })
+    writeFileSync(join(inner, 'package.json'), '{"name":"proj"}')
+    // Nearer candidate parses but states no version; the search must not stop here.
+    mkdirSync(join(inner, 'node_modules', '@scope', 'pkg'), { recursive: true })
+    writeFileSync(
+      join(inner, 'node_modules', '@scope', 'pkg', 'package.json'),
+      JSON.stringify({ name: '@scope/pkg' }),
+    )
+    // Farther candidate is the stale copy that decides the verdict.
+    mkdirSync(join(outer, 'node_modules', '@scope', 'pkg'), { recursive: true })
+    writeFileSync(
+      join(outer, 'node_modules', '@scope', 'pkg', 'package.json'),
+      JSON.stringify({ name: '@scope/pkg', version: '0.1.6-alpha.2' }),
+    )
+    expect(peerVersionFailure(createRequireFrom(inner), expectations)).toMatch(/0\.1\.6-alpha\.2/)
+  })
+
+  it('reports a range it cannot interpret instead of enforcing nothing quietly', () => {
+    const root = fixture({ '@scope/pkg': '0.1.0' })
+    const warnings: string[] = []
+    const failure = peerVersionFailure(
+      createRequireFrom(root),
+      [{ spec: '@scope/pkg', range: '*' }],
+      message => warnings.push(message),
+    )
+    expect(failure).toBeUndefined()
+    expect(warnings.length).toBe(1)
+    expect(warnings[0]).toMatch(/cannot interpret the range "\*"/)
   })
 })
 

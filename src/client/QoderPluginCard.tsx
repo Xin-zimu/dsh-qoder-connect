@@ -1593,14 +1593,13 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
                 </button>
               </div>
             </>
-          ) : statusUnknown ? (
-            <p style={bodyStyle} aria-busy="true">{t('loading')}</p>
           ) : (
             <>
           {isUnified ? (
             <>
-              {/* Top section: Qoder 侧栏设置 */}
-              <QuotaSettingsContent t={t} scope={scope} signedIn={signedIn} />
+              {/* Top section: Qoder 侧栏设置。 Held back until the first read
+                  lands so a refusal cannot flash toggles on its way in. */}
+              {statusUnknown ? null : <QuotaSettingsContent t={t} scope={scope} signedIn={signedIn} />}
               {/* Segmented tab switcher: China / Global version selection */}
               <div style={segmentedContainerStyle} role="tablist" aria-label="Qoder Version Selection">
                 <button
