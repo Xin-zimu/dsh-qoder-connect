@@ -243,6 +243,30 @@ const contextPickerRowStyle: CSSProperties = {
 }
 const progressTrackStyle: CSSProperties = { height: 8, overflow: 'hidden', borderRadius: 999, background: 'var(--dsw-alias-bg-layer-2, rgba(0, 0, 0, 0.08))' }
 
+/** Switch styles for model toggles, matching the quota settings card. */
+const switchStyle: CSSProperties = {
+  flex: 'none',
+  display: 'flex',
+  width: 36,
+  height: 20,
+  borderRadius: 10,
+  borderWidth: '1px',
+  borderStyle: 'solid',
+  borderColor: 'var(--dsw-alias-border-l2)',
+  padding: 1,
+  cursor: 'pointer',
+  alignItems: 'center',
+  transition: 'background .16s',
+}
+const knobStyle: CSSProperties = {
+  display: 'block',
+  width: 16,
+  height: 16,
+  borderRadius: '50%',
+  background: 'var(--dsw-alias-bg-layer-1, #fff)',
+  boxShadow: '0 1px 2px rgba(0,0,0,0.2)',
+}
+
 /**
  * The PAT entry row: the password field takes the flexible width, the Save button
  * keeps its own, and the block sits inside the card body without a nested box.
@@ -580,6 +604,16 @@ function formatTokens(tokens: number): string {
   return String(tokens)
 }
 
+/** The rate label appended to a model name, like "x0" or "x1.5". */
+function modelRateLabel(model: QoderCatalogModelSnapshot): string | undefined {
+  const factor = model.priceFactor
+  if (factor === undefined) return undefined
+  if (factor === 0) return 'x0'
+  if (factor === 1) return 'x1'
+  const formatted = Number.isInteger(factor) ? String(factor) : String(factor)
+  return `x${formatted}`
+}
+
 /** Model visibility table: per-model switches plus batch enable/disable and search. */
 function ModelSwitchTable({
   models,
@@ -718,9 +752,10 @@ function ModelSwitchTable({
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'space-between',
-                  padding: '8px 10px',
-                  borderRadius: 6,
+                  padding: '10px 12px',
+                  borderRadius: 8,
                   background: 'var(--dsw-alias-bg-layer-2)',
+                  border: '.5px solid var(--dsw-alias-border-l4)',
                   gap: 12,
                   opacity: isModelEnabled ? 1 : 0.65,
                 }}
@@ -735,6 +770,14 @@ function ModelSwitchTable({
                   <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
                     <span style={{ fontWeight: 500, fontSize: 13, color: 'var(--dsw-alias-label-primary)' }}>
                       {model.name}
+                      {(() => {
+                        const rate = modelRateLabel(model)
+                        return rate ? (
+                          <span style={{ fontSize: 12, color: 'var(--dsw-alias-label-tertiary)', fontWeight: 400, marginLeft: 6 }}>
+                            · {rate}
+                          </span>
+                        ) : null
+                      })()}
                     </span>
                     <span style={{ fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' }}>
                       {model.id}
@@ -743,17 +786,26 @@ function ModelSwitchTable({
                 </div>
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: disabled ? 'not-allowed' : 'pointer', userSelect: 'none' }}>
-                    <input
-                      type="checkbox"
-                      checked={isModelEnabled}
-                      disabled={disabled}
-                      onChange={event => { onSetModelsEnabled([model.id], event.currentTarget.checked) }}
-                    />
-                    <span style={{ fontSize: 12, color: isModelEnabled ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-label-tertiary)' }}>
-                      {isModelEnabled ? t('modelsEnabled') : t('modelsDisabled')}
-                    </span>
-                  </label>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={isModelEnabled}
+                    disabled={disabled}
+                    aria-label={model.name}
+                    onClick={() => { if (!disabled) onSetModelsEnabled([model.id], !isModelEnabled) }}
+                    style={{
+                      ...switchStyle,
+                      background: isModelEnabled ? 'var(--dsw-alias-brand-primary)' : 'var(--dsw-alias-bg-layer-3, rgba(127,127,127,0.2))',
+                      justifyContent: isModelEnabled ? 'flex-end' : 'flex-start',
+                      opacity: disabled === true ? 0.45 : 1,
+                      cursor: disabled === true ? 'not-allowed' : 'pointer',
+                    }}
+                  >
+                    <span style={knobStyle} />
+                  </button>
+                  <span style={{ fontSize: 12, color: isModelEnabled ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-label-tertiary)', minWidth: '4em', textAlign: 'right' }}>
+                    {isModelEnabled ? t('modelsEnabled') : t('modelsDisabled')}
+                  </span>
                 </div>
               </div>
             )
