@@ -180,6 +180,21 @@ export function reasoningFields(
   return { reasoning: true, thinkingLevelMap: map as ThinkingLevelMap }
 }
 
+/**
+ * Normalize `reasoning` on one resolved model so `normalizeModelInfo` never sees
+ * a partial object. `dsh-llm` reads `reasoning.efforts.length` unconditionally,
+ * so an adapter-side reasoning that has no array must be dropped entirely; a
+ * valid one is passed through untouched.
+ */
+function normalizeReasoning<T extends { reasoning?: unknown }>(resolved: T): T {
+  const reasoning = resolved.reasoning
+  if (reasoning === undefined || reasoning === null) return resolved
+  if (typeof reasoning !== 'object') return { ...resolved, reasoning: undefined }
+  const efforts = (reasoning as { efforts?: unknown }).efforts
+  if (!Array.isArray(efforts) || efforts.length === 0) return { ...resolved, reasoning: undefined }
+  return resolved
+}
+
 /** Build one pi-ai model descriptor pointing at the loopback shim. */
 function toPiModel(info: QoderModelInfo, baseUrl: string, observed?: QoderProbeRecord, providerId = QODER_PROVIDER): Model<Api> {
   return {
@@ -395,6 +410,7 @@ class QoderPiAiAdapter extends PiAiAdapter {
     const prepared = await super.prepareCall(provider, model, signal)
     return {
       ...prepared,
+      model: normalizeReasoning(prepared.model),
       stream: (options: GenerateOptions) => withQoderRequestPurpose(options.purpose,
         rejectDamagedToolArguments(this.withRetryHint(prepared.stream(options)))),
     }
