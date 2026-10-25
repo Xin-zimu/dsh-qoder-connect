@@ -1,0 +1,17 @@
+# Normalize every text file to LF in the repository and in the working tree.
+#
+# Without this, `core.autocrlf=true` (this machine's setting) checks out CRLF while
+# the upstream commits LF, so `git merge` sees every line of a file as changed and
+# reports a whole-file conflict instead of the handful of real hunks. That turns a
+# merge with three real conflicts into one with none of them visible.
+* text=auto eol=lf
+
+# Binary artifacts and generated bundles keep whatever bytes they have.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.svg text
+*.zip binary
+*.bundle binary
