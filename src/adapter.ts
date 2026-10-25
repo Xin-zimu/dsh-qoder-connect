@@ -1,8 +1,6 @@
 /**
  * The Qoder pi-ai provider: one loopback-backed adapter per variant route,
- * registered into the Harness LLM seam, assembled from public
- * `dsh-llm-pi-ai` extension points the way `dsh-codex-connect` assembles its
- * Codex route.
+ * assembled from public `dsh-llm-pi-ai` extension points.
  *
  * @module dsh-qoder-connect/adapter
  */
@@ -11,26 +9,39 @@ import { createProvider } from '@earendil-works/pi-ai'
 import type { Api, AuthContext, CredentialStore, Model, ModelThinkingLevel, Provider, ThinkingLevelMap } from '@earendil-works/pi-ai'
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy'
 import { resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
-import type { LlmModelInfo, LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, LlmModelInfo, LlmResolvedModelInfo, PreparedAdapterCall, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
 import type { ResolvedPiAiProviderProfile } from '@deepseek-ai/dsh-llm-pi-ai'
-import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
+import { requestImageDimensions } from '@deepseek-ai/dsh-attachment'
+import type { AttachmentStore, ImageAttachmentRef, ImageRequestTarget } from '@deepseek-ai/dsh-attachment'
 import type { QoderCredentialStore } from './auth.ts'
 import type { QoderCatalog, QoderModelInfo } from './catalog.ts'
 import type { QoderProbeRecord } from './probe-store.ts'
-import type { QoderShim } from './shim.ts'
+import { retryAfterFromMessage, type QoderShim } from './shim.ts'
 import { normalizeCredits } from './upstream.ts'
+import { qoderSessionHeaders, withQoderRequestPurpose } from './request-session.ts'
 
 /** Default provider route owned by this bundle (the China variant). */
 export const QODER_PROVIDER = 'qoder'
 
-/** Provider idle ceiling while one stream read is outstanding. */
-export const QODER_STREAM_IDLE_TIMEOUT_MS = 300_000
+/**
+ * Provider idle ceiling while one stream read is outstanding.
+ *
+ * It has to cover a queue wait, which the settings bound (up to an hour, the
+ * official client's own limit) plus room for the replay: a shorter ceiling
+ * would abort exactly the wait the user asked for.
+ */
+export const QODER_STREAM_IDLE_TIMEOUT_MS = 3_660_000
 
 /**
- * Image-request budgets at the dsh-llm-pi-ai defaults; the profile type made
- * them required in 0.1.1-rc.2. They bound requests to models whose catalog
- * entry declares `supportsImages`; text-only models never receive images.
+ * Backoff ceiling for this plugin's routes: a hint above `maxDelayMs` makes the
+ * host drop the retry instead of waiting, and Qoder asks for up to 30s.
+ */
+export const QODER_RETRY_MAX_DELAY_MS = 60_000
+
+/**
+ * Image-request budgets (dsh-llm-pi-ai defaults). They bound requests to models
+ * whose catalog entry declares `supportsImages`; text-only models get none.
  */
 const REQUEST_IMAGE_BUDGETS = {
   maxRequestImageBytes: 20_971_520,
@@ -39,11 +50,8 @@ const REQUEST_IMAGE_BUDGETS = {
 } as const
 
 /**
- * Inert pi-ai auth plane. The Qoder routes authenticate only through the
- * shim shared secret resolved per request by `resolveApiKey`, so pi-ai's own
- * credential lifecycle and ambient discovery must never manufacture a
- * credential for them. `PiAiAdapterOptions.auth` is required since 0.1.1-rc.2;
- * every ambient question here answers "nothing stored, nothing set".
+ * Inert pi-ai auth plane. Qoder routes authenticate only through the shim shared
+ * secret, so pi-ai's own credential lifecycle must never manufacture one.
  */
 const INERT_AUTH: { credentials: CredentialStore; authContext: AuthContext } = {
   credentials: {
@@ -64,40 +72,26 @@ const INERT_AUTH: { credentials: CredentialStore; authContext: AuthContext } = {
 const NO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const
 
 /**
- * The suffix appended to a model's display name so its billing rate is visible
- * wherever the name is shown.
+ * The suffix appended to a model's display name so its billing rate is visible.
  *
- * The separator is a middle dot rather than a hyphen or colon: model names
- * commonly contain hyphens, so a hyphen separator would be ambiguous about
- * where the name ends and the rate begins.
+ * The separator is a middle dot because model names commonly contain hyphens.
  */
 const RATE_SEPARATOR = ' · '
 
 /**
  * What the model seat shows in place of a rate the plugin cannot stand behind.
  *
- * The seat has no locale service (the adapter is a host seam), so this is a
- * literal; it matches the settings card's own wording for the same state.
- * Rendering it as WORDS rather than an empty slot: every other model in the
- * seat shows `· x0.3`, so a bare name where the rate should be reads as a
- * rendering bug. This plugin's fallback roster carries no rate at all, so the
- * case is not hypothetical.
+ * A literal, not a locale lookup: the adapter is a host seam. Words beat an empty
+ * slot because every other model in the seat shows a rate.
  */
 const RATE_UNAVAILABLE = '价格暂不可用'
 
 /**
  * Append the billing rate to one model's display name.
  *
- * The rate rides the *name* alone: since DSH 0.1.2 the composer's model seat
- * (`ModelSelect`) renders `model.name` only — `description` is no longer read
- * there at all. The `/model` popup renders the name too, so a separate
- * `description` copy would duplicate the rate depending on client generation.
- *
- * This is display-only and cannot affect routing: the wire request is built
- * from `model.id` (pi-ai's completions API sets `model: model.id`), the
- * selection a picker submits is `{provider, model: id, reasoningEffort}`, and
- * `dsh-llm` validates `name` as a non-empty string without comparing its
- * contents. Nothing in the host resolves a model *by* name.
+ * Display-only: routing is built from `model.id`, and nothing in the host
+ * resolves a model by name. The rate rides the name because the composer's model
+ * seat renders `model.name` alone.
  */
 
 /** The catalog display suffix: the normalized billing rate, when the row has one. */
@@ -127,6 +121,8 @@ export interface QoderAdapterOptions {
    * upstream left undeclared; absent means declared-set-only behavior.
    */
   observe?: (modelId: string) => QoderProbeRecord | undefined
+  /** Configured queue-wait budget in ms, read per call to size the idle window. */
+  queueBudgetMs?: () => number
 }
 
 /** What {@link createQoderAdapter} hands back. */
@@ -137,32 +133,15 @@ export interface QoderAdapter {
 }
 
 /**
- * Resolve a Qoder model's reasoning capability into pi-ai's
- * `thinkingLevelMap` (every level pinned to its wire spelling or `null` for
- * unsupported), mirroring `dsh-llm-pi-ai`'s own `resolveModelReasoning`.
+ * Resolve a Qoder model's reasoning capability into pi-ai's `thinkingLevelMap`
+ * (every level pinned to its wire spelling, or `null` when unsupported).
  *
- * Two sources, strictly ordered (`docs/reasoning-effort-probe-plan.md` §5):
- *
- * 1. **The declared set.** When the upstream declares a non-empty
- *    `supportedEfforts`, exactly those values are offered and nothing else.
- *    This always wins: an observation never widens or narrows a declared set.
- * 2. **A local observation.** Rows the upstream left undeclared normally get
- *    no control at all — their selectable set is client-side knowledge the
- *    catalog does not carry. If the user authorized a probe and it established
- *    that the upstream *validates* the parameter, the verified spellings are
- *    offered.
- *
- * A `non-validating` observation deliberately yields no control: an upstream
- * that accepts values that cannot exist would make every per-level acceptance
- * a false positive.
- *
- * `off` is offered only when the upstream declares `canDisableThinking: true`.
- * It is never probed — disabling thinking is a separate capability, and the
- * per-model acceptance of `off` cannot be inferred from the row's shape.
- *
- * The offered set is described internally as "verified accepted", never as
- * "verified effective": acceptance proves the upstream did not reject the
- * spelling, not that it changes what the model does.
+ * Two ordered sources: a declared `supportedEfforts` set always wins and is never
+ * widened or narrowed by an observation; otherwise a *validating* local probe may
+ * supply the verified spellings. A `non-validating` observation yields no control
+ * — an upstream accepting impossible values would make every acceptance a false
+ * positive. `off` is offered only when `canDisableThinking` is declared, never
+ * probed. Internally the set means "verified accepted", not "verified effective".
  */
 export function reasoningFields(
   info: QoderModelInfo,
@@ -201,6 +180,21 @@ export function reasoningFields(
   return { reasoning: true, thinkingLevelMap: map as ThinkingLevelMap }
 }
 
+/**
+ * Normalize `reasoning` on one resolved model so `normalizeModelInfo` never sees
+ * a partial object. `dsh-llm` reads `reasoning.efforts.length` unconditionally,
+ * so an adapter-side reasoning that has no array must be dropped entirely; a
+ * valid one is passed through untouched.
+ */
+function normalizeReasoning<T extends { reasoning?: unknown }>(resolved: T): T {
+  const reasoning = resolved.reasoning
+  if (reasoning === undefined || reasoning === null) return resolved
+  if (typeof reasoning !== 'object') return { ...resolved, reasoning: undefined }
+  const efforts = (reasoning as { efforts?: unknown }).efforts
+  if (!Array.isArray(efforts) || efforts.length === 0) return { ...resolved, reasoning: undefined }
+  return resolved
+}
+
 /** Build one pi-ai model descriptor pointing at the loopback shim. */
 function toPiModel(info: QoderModelInfo, baseUrl: string, observed?: QoderProbeRecord, providerId = QODER_PROVIDER): Model<Api> {
   return {
@@ -213,7 +207,9 @@ function toPiModel(info: QoderModelInfo, baseUrl: string, observed?: QoderProbeR
     ...reasoningFields(info, observed),
     cost: NO_COST,
     contextWindow: info.contextWindow,
-    maxTokens: info.maxTokens,
+    // Reporting a reserve makes the harness inject it as every request's maxTokens, so
+    // only a provider-declared cap may be advertised.
+    ...info.maxTokensDeclared === true && info.maxTokens !== undefined ? { maxTokens: info.maxTokens } : {},
     // pi-ai cannot infer the shim's field spelling from a random loopback
     // URL, so name the upstream-required field explicitly.
     compat: { maxTokensField: 'max_tokens' },
@@ -221,16 +217,11 @@ function toPiModel(info: QoderModelInfo, baseUrl: string, observed?: QoderProbeR
 }
 
 /**
- * Assemble the adapter. The provider's `getModels` reads the live catalog,
- * and every model's `baseUrl` is re-resolved per read so the shim's
- * ephemeral port applies from the first snapshot after startup.
+ * Assemble the adapter. `getModels` reads the live catalog and each `baseUrl` is
+ * re-resolved per read, so the shim's ephemeral port applies immediately.
  *
- * The profile is constructed by hand rather than through dsh-llm-pi-ai's
- * internal `resolveProfiles()`: that helper is not part of the package's
- * public export surface (root entry, `lib/` deep imports blocked by the
- * exports map, `src/` not shipped), so hand-assembly is the only supported
- * path and every newly required field must be adopted here explicitly —
- * `modelErrors` since 0.1.5-alpha.2 (#12).
+ * The profile is hand-built because dsh-llm-pi-ai's `resolveProfiles()` is not
+ * public, so every newly required profile field must be adopted here explicitly.
  */
 export function createQoderAdapter(options: QoderAdapterOptions): QoderAdapter {
   const { shim, store, catalog, resolveAttachments, observe } = options
@@ -244,6 +235,7 @@ export function createQoderAdapter(options: QoderAdapterOptions): QoderAdapter {
     return catalog.current().map(info => toPiModel(info, baseUrl, observe?.(info.id), providerId))
   }
 
+  const api = openAICompletionsApi()
   const base = createProvider({
     id: providerId,
     name: displayName,
@@ -259,7 +251,19 @@ export function createQoderAdapter(options: QoderAdapterOptions): QoderAdapter {
       },
     },
     models: buildModels(),
-    api: openAICompletionsApi(),
+    // pi-ai receives the host session per call, but OpenAI's body omits it.
+    // Carry it explicitly to our loopback shim for both dispatch entry points.
+    api: {
+      ...api,
+      stream: (model, context, request) => api.stream(model, context, {
+        ...request,
+        headers: qoderSessionHeaders(request?.sessionId, request?.headers),
+      }),
+      streamSimple: (model, context, request) => api.streamSimple(model, context, {
+        ...request,
+        headers: qoderSessionHeaders(request?.sessionId, request?.headers),
+      }),
+    },
   })
 
   // `getModels` is delegated to a live read (the reuse-catalog pattern from
@@ -270,11 +274,21 @@ export function createQoderAdapter(options: QoderAdapterOptions): QoderAdapter {
   const profile: ResolvedPiAiProviderProfile = {
     provider: providerId,
     displayName,
-    streamIdleTimeoutMs: QODER_STREAM_IDLE_TIMEOUT_MS,
-    retryPolicy: resolveRetryPolicy(undefined, `dsh-qoder-connect:${providerId} retryPolicy`),
+    // Read per call: the queue budget is a setting, and the idle window has to
+    // stay longer than it, or the wait the user asked for is cut short.
+    get streamIdleTimeoutMs() {
+      const budget = options.queueBudgetMs?.() ?? 0
+      return Math.max(QODER_STREAM_IDLE_TIMEOUT_MS, budget + 60_000)
+    },
+    // A hint above `maxDelayMs` makes the host skip the retry instead of
+    // waiting, so the ceiling must cover Qoder's own 30s.
+    retryPolicy: resolveRetryPolicy({
+      mode: 'normal',
+      backoff: { maxDelayMs: QODER_RETRY_MAX_DELAY_MS },
+    }, `dsh-qoder-connect:${providerId} retryPolicy`),
     configuredMaxTokens: new Map(),
-    // Required since 0.1.5-alpha.2; the live catalog only exposes models that
-    // probed successfully, so there is never a per-model failure to report.
+    // Required profile field; the live catalog only exposes models that probed
+    // successfully, so there is never a per-model failure to report.
     modelErrors: new Map(),
     ...REQUEST_IMAGE_BUDGETS,
     piProvider: provider,
@@ -302,20 +316,54 @@ export function createQoderAdapter(options: QoderAdapterOptions): QoderAdapter {
 }
 
 /**
+ * Keep a damaged tool call from executing with truncated arguments.
+ *
+ * pi-ai parses unparsable arguments as `{}` (the real text survives only in
+ * `argumentsError`, which this layer never receives), so a tool with optional fields
+ * would happily execute an empty or truncated payload. The raw bytes survive on the
+ * `tool-call-delta` stream, and `dsh-llm`'s `BlockAssembler` prefers the `block-end`
+ * block, so re-emitting the damaged text here makes the harness reject the call as
+ * invalid arguments and the model re-emits it. Complete calls are untouched.
+ *
+ * @internal Exported for tests; the adapter wrappers are the only callers.
+ */
+export async function* rejectDamagedToolArguments(inner: AsyncIterable<StreamChunk>): AsyncGenerator<StreamChunk> {
+  const accumulated = new Map<number, string>()
+  for await (const chunk of inner) {
+    if (chunk.type === 'tool-call-delta') {
+      accumulated.set(chunk.index, (accumulated.get(chunk.index) ?? '') + chunk.argumentsDelta)
+      yield chunk
+      continue
+    }
+    if (chunk.type === 'block-end' && chunk.block.type === 'tool-call') {
+      const raw = accumulated.get(chunk.index)
+      if (raw !== undefined && !isJsonObjectText(raw)) {
+        yield { ...chunk, block: { ...chunk.block, arguments: raw } }
+        continue
+      }
+    }
+    yield chunk
+  }
+}
+
+/** Whether the text parses as a JSON object, the only shape a tool call may carry. */
+function isJsonObjectText(text: string): boolean {
+  try {
+    const value: unknown = JSON.parse(text)
+    return typeof value === 'object' && value !== null && !Array.isArray(value)
+  } catch {
+    return false
+  }
+}
+
+/**
  * The Qoder variant route's adapter: `PiAiAdapter` with the billing rate folded
  * into the catalog answers it returns to the DSH model pickers.
  *
- * `PiAiAdapter.listModels()` and `.resolveModel()` build their answers straight
- * from the pi-ai descriptors, which carry no billing fact, so the rate is
- * layered on here by looking the model up in the live catalog. Both overrides
- * delegate to `super` and then rewrite only the display fields, so streaming,
- * capability resolution, and effort mapping stay exactly as `dsh-llm-pi-ai`
- * implements them.
- *
- * A model missing from the catalog (an id the shim would serve but the last
- * upstream refresh did not list) falls through with its name untouched rather
- * than being dropped: catalog membership is advisory, and the seam tolerates
- * serving an unlisted id.
+ * The pi-ai descriptors carry no billing fact, so the rate is layered on from the
+ * live catalog; both overrides delegate to `super` and rewrite display fields
+ * only. A model missing from the catalog keeps its name rather than being
+ * dropped: catalog membership is advisory.
  */
 class QoderPiAiAdapter extends PiAiAdapter {
   constructor(
@@ -344,5 +392,69 @@ class QoderPiAiAdapter extends PiAiAdapter {
     const info = this.infoFor(model)
     if (info === undefined) return resolved
     return { ...resolved, name: withCatalogDisplay(resolved.name, info) }
+  }
+
+  /**
+   * Restore `failure.providerRetryAfterMs`, which `dsh-llm-pi-ai` flattens away;
+   * the shim's `[retry-after=<n>s]` tag is the carrier.
+   *
+   * Both entry points are wrapped because the harness uses `prepareCall().stream`,
+   * which never calls `this.stream`. Only the field is rewritten, never the message.
+   */
+  override async *stream(options: GenerateOptions): AsyncGenerator<StreamChunk> {
+    yield* withQoderRequestPurpose(options.purpose,
+      rejectDamagedToolArguments(this.withRetryHint(super.stream(options))))
+  }
+
+  override async prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<PreparedAdapterCall> {
+    const prepared = await super.prepareCall(provider, model, signal)
+    return {
+      ...prepared,
+      model: normalizeReasoning(prepared.model),
+      stream: (options: GenerateOptions) => withQoderRequestPurpose(options.purpose,
+        rejectDamagedToolArguments(this.withRetryHint(prepared.stream(options)))),
+    }
+  }
+
+  /** Re-stamp `failure.providerRetryAfterMs` on every terminal failure chunk. */
+  private async *withRetryHint(inner: AsyncIterable<StreamChunk>): AsyncGenerator<StreamChunk> {
+    for await (const chunk of inner) {
+      if (chunk.type === 'finish') {
+        const { reason } = chunk
+        if ((reason.kind === 'error' || reason.kind === 'aborted')
+          && reason.failure.providerRetryAfterMs === undefined) {
+          const retryAfterMs = retryAfterFromMessage(reason.failure.message)
+          if (retryAfterMs !== undefined) {
+            yield {
+              ...chunk,
+              reason: { ...reason, failure: { ...reason.failure, providerRetryAfterMs: retryAfterMs } },
+            }
+            continue
+          }
+        }
+      }
+      yield chunk
+    }
+  }
+
+  /**
+   * Resolve the request-image projection target for one route.
+   *
+   * `dsh-llm` calls `imageRequestTarget()` unconditionally but resolved this
+   * plugin's peer `PiAiAdapter` may predate the method, so an inherited
+   * implementation is derived from the profile budgets instead. When the base
+   * implementation does exist, prefer it so this override never drifts.
+   */
+  imageRequestTarget(provider: string, model: string, image: ImageAttachmentRef): ImageRequestTarget {
+    const inherited = (Object.getPrototypeOf(QoderPiAiAdapter.prototype) as {
+      imageRequestTarget?: (provider: string, model: string, image: ImageAttachmentRef) => ImageRequestTarget
+    }).imageRequestTarget
+    if (typeof inherited === 'function') return inherited.call(this, provider, model, image)
+    const { width, height } = requestImageDimensions(
+      image.width,
+      image.height,
+      REQUEST_IMAGE_BUDGETS.requestImagePixelBudget,
+    )
+    return { width, height, maxBytes: REQUEST_IMAGE_BUDGETS.requestImageMaxBytes }
   }
 }

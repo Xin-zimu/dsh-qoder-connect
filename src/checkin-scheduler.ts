@@ -4,24 +4,23 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { QoderCheckInResult } from './qoder/transport/checkin.ts'
 import { qoderPluginDataDir } from './paths.ts'
+import { formatUtc8Date, utc8WallClock } from './utc8.ts'
 
 export interface VariantCheckInTarget {
   variantId: string
   /**
    * Claim today's benefit for this variant.
    *
-   * The variant's own transport owns credential resolution, so this takes no
-   * token: a missing or unusable credential surfaces as an `error` result
-   * rather than a throw, which keeps one signed-out variant from stopping the
-   * sweep for the other.
+   * The variant's transport owns credential resolution, so this takes no token; a
+   * missing credential surfaces as an `error` result rather than a throw, so one
+   * signed-out variant cannot stop the sweep for the other.
    */
   checkIn: (signal?: AbortSignal) => Promise<QoderCheckInResult>
   /**
    * The moment this variant checks in, as minutes past midnight in UTC+8.
    *
-   * A getter rather than a value: the user can retime it on the card, and the
-   * scheduler must observe the new value on its next pass without being
-   * rebuilt.
+   * A getter, not a value: the user can retime it on the card and the scheduler
+   * must see the new value on its next pass without being rebuilt.
    */
   minuteOfDay: () => number
   onClaimed?: () => void
@@ -31,7 +30,7 @@ export interface CheckInLogItem {
   id: string
   date: string
   timestamp: number
-  status: 'claimed' | 'already-claimed' | 'no-campaign' | 'error'
+  status: 'claimed' | 'already-claimed' | 'before-window' | 'no-campaign' | 'error'
   amount?: number | undefined
   campaignKey?: string | undefined
   message?: string | undefined
@@ -40,7 +39,7 @@ export interface CheckInLogItem {
 export interface CheckInRecord {
   lastDate: string
   lastAt: number
-  status: 'claimed' | 'already-claimed' | 'no-campaign' | 'error'
+  status: 'claimed' | 'already-claimed' | 'before-window' | 'no-campaign' | 'error'
   amount?: number | undefined
   message?: string | undefined
   logs?: CheckInLogItem[] | undefined
@@ -116,19 +115,6 @@ export class JsonFileCheckInStore implements CheckInStatusStore {
 }
 
 /**
- * Returns the current date in YYYY-MM-DD standardized on UTC+8 (Beijing Time).
- */
-export function getUtc8DateString(nowMs: number = Date.now()): string {
-  const d = new Date(nowMs)
-  // Shift by timezone offset to UTC, then +8 hours (480 mins)
-  const utc8 = new Date(d.getTime() + (d.getTimezoneOffset() + 480) * 60_000)
-  const y = utc8.getFullYear()
-  const m = String(utc8.getMonth() + 1).padStart(2, '0')
-  const day = String(utc8.getDate()).padStart(2, '0')
-  return `${y}-${m}-${day}`
-}
-
-/**
  * The moment a variant checks in, as minutes past midnight in UTC+8.
  *
  * 600 is 10:00, which is when the upstream resets the daily campaign; it is
@@ -137,12 +123,22 @@ export function getUtc8DateString(nowMs: number = Date.now()): string {
  */
 export const DEFAULT_CHECK_IN_MINUTE = 600
 
-/** Clamp any stored/typed value onto a real minute of the day. */
+/**
+ * The earliest moment a variant may be scheduled for: the window's opening.
+ *
+ * An earlier moment would read the *previous* window's status and settle a day
+ * that was never claimed. The settings schema refuses such a value; this is the
+ * floor a stored one is lifted to, so an old or hand-edited config still lands on
+ * something honourable.
+ */
+export const EARLIEST_CHECK_IN_MINUTE = DEFAULT_CHECK_IN_MINUTE
+
+/** Clamp any stored/typed value onto a minute the plugin can actually honour. */
 export function normalizeCheckInMinute(value: unknown): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_CHECK_IN_MINUTE
   const whole = Math.trunc(value)
   if (whole < 0 || whole > 1439) return DEFAULT_CHECK_IN_MINUTE
-  return whole
+  return Math.max(EARLIEST_CHECK_IN_MINUTE, whole)
 }
 
 /**
@@ -153,9 +149,8 @@ export function normalizeCheckInMinute(value: unknown): number {
  */
 export function msUntilNextCheckIn(minuteOfDay: number, nowMs: number = Date.now()): number {
   const minute = normalizeCheckInMinute(minuteOfDay)
-  const d = new Date(nowMs)
   // Calculate current UTC+8 wall clock
-  const utc8Time = new Date(d.getTime() + (d.getTimezoneOffset() + 480) * 60_000)
+  const utc8Time = utc8WallClock(nowMs)
   const targetUtc8 = new Date(utc8Time.getTime())
   targetUtc8.setHours(Math.floor(minute / 60), minute % 60, 5, 0)
 
@@ -173,8 +168,7 @@ export function msUntilNextCheckIn(minuteOfDay: number, nowMs: number = Date.now
  */
 export function isPastCheckInTime(minuteOfDay: number, nowMs: number = Date.now()): boolean {
   const minute = normalizeCheckInMinute(minuteOfDay)
-  const d = new Date(nowMs)
-  const utc8 = new Date(d.getTime() + (d.getTimezoneOffset() + 480) * 60_000)
+  const utc8 = utc8WallClock(nowMs)
   return utc8.getHours() * 60 + utc8.getMinutes() >= minute
 }
 
@@ -195,10 +189,7 @@ export class CheckInScheduler {
   /**
    * One timer per enabled variant, keyed by variant id.
    *
-   * Per-variant rather than one shared timer because the two products may be
-   * configured to different moments; a single timer would have to wake for the
-   * earliest and then decide who was due, which is the same bookkeeping with a
-   * worse failure mode.
+   * Per-variant because the two products may check in at different moments.
    */
   private readonly timers = new Map<string, NodeJS.Timeout>()
   /**
@@ -227,11 +218,9 @@ export class CheckInScheduler {
   /**
    * Re-run the startup catch-up once the toggles are actually readable.
    *
-   * `start()` runs while the plugin is still assembling, before the settings
-   * section that owns these toggles has handed over its stored values, so that
-   * first sweep sees the raw plugin config and skips the day. The host calls
-   * this again from the section's source callback; the sweep is idempotent, so
-   * a day already handled costs nothing.
+   * `start()` runs before the settings section hands over its stored values, so
+   * the first sweep may skip the day. The sweep is idempotent, so a day already
+   * handled costs nothing.
    */
   catchUp(): void {
     if (this.disposed) return
@@ -247,17 +236,12 @@ export class CheckInScheduler {
   /**
    * Re-place every variant's timer.
    *
-   * Called after each fire and whenever configuration lands or changes, so a
-   * user editing the time on the card does not have to restart DSH for it to
-   * take effect.
-   *
-   * A timer is placed for every target, including variants whose toggle is
-   * currently off. `start()` runs while the plugin is still assembling, when
-   * the stored toggles are not readable yet, so gating placement on
-   * `isEnabled` left a variant with NO timer at all — and nothing re-armed it
-   * afterwards, which is precisely how a configured 12:13 check-in never
-   * fired. Whether the work is due is decided inside the sweep, where the
-   * configuration is current; the timer only decides when to look.
+   * Called after each fire and whenever configuration lands, so a retimed card
+   * takes effect without a restart. A timer is placed for every target, including
+   * disabled variants: `start()` runs before the stored toggles are readable, and
+   * gating placement on `isEnabled` left the variant with no timer and nothing to
+   * re-arm it. Whether work is due is decided in the sweep; the timer only decides
+   * when to look.
    */
   rearm(): void {
     if (this.disposed) return
@@ -267,10 +251,9 @@ export class CheckInScheduler {
     const nowMs = this.now()
     for (const target of this.targets) {
       const delay = msUntilNextCheckIn(target.minuteOfDay(), nowMs)
-      // Published so the card can say when the next automatic run is due. That
-      // is the only way a user can tell a scheduled timer from a missing one:
-      // a day already claimed goes quiet by design, and silence looks
-      // identical to a broken scheduler.
+      // Published so the card can say when the next automatic run is due: a day
+      // already claimed goes quiet by design, and silence looks like a broken
+      // scheduler.
       this.nextRuns.set(target.variantId, nowMs + delay)
       const timer = setTimeout(() => {
         this.timers.delete(target.variantId)
@@ -289,15 +272,13 @@ export class CheckInScheduler {
   async sweepAll(isCatchUp: boolean, only?: string): Promise<void> {
     if (this.disposed) return
     const nowMs = this.now()
-    const today = getUtc8DateString(nowMs)
+    const today = formatUtc8Date(nowMs)
 
     for (const target of this.targets) {
       if (only !== undefined && target.variantId !== only) continue
       if (!this.isEnabled(target.variantId)) continue
-      // One variant is never swept twice at once. `start()` and the settings
-      // section's first catch-up are both in the air during assembly, and
-      // without this latch both claimed — the live log caught two rows five
-      // milliseconds apart for a single action.
+      // One variant is never swept twice at once: `start()` and the settings
+      // section's first catch-up can both be in the air during assembly.
       if (this.inFlight.has(target.variantId)) continue
       this.inFlight.add(target.variantId)
       try {
@@ -315,17 +296,13 @@ export class CheckInScheduler {
     today: string,
   ): Promise<void> {
     const record = this.store.read(target.variantId)
-    // Only an actually claimed day is settled. A day whose attempt ended in
-    // "no campaign" (the upstream had not released it yet) or in an error
-    // must stay retryable, otherwise one early failure burns the whole day —
-    // which is exactly what a wrong client identifier used to do.
+    // Only an actually claimed day is settled. "no campaign", "before window" and
+    // errors must stay retryable, otherwise one early failure burns the whole day.
     const settledToday = record?.lastDate === today
       && (record.status === 'claimed' || record.status === 'already-claimed')
     if (settledToday) {
-      // A scheduled run that finds the day already handled still leaves a row.
-      // The claim itself is correctly skipped (one benefit per day), but total
-      // silence is indistinguishable from a timer that never fired — which is
-      // exactly how a user concludes the scheduler is broken.
+      // A scheduled run that finds the day already handled still leaves a row:
+      // total silence is indistinguishable from a timer that never fired.
       if (!isCatchUp) {
         this.store.write(target.variantId, {
           lastDate: today,

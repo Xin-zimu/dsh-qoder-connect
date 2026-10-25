@@ -12,13 +12,10 @@ import type { QoderWebStatus } from '../src/status-paths.ts'
 import { resetQuotaStatusForTesting } from '../src/client/quota-settings-store.ts'
 
 /**
- * Card tests for the PAT flow and the three-tab body.
- *
- * The card's job changed with the upstream: there is no browser sign-in flow
- * anymore, so the sensitive surface is the PAT entry — what it sends, which
- * header authorizes it, and what each host answer renders. The probe section
- * keeps its old regression (only the pressed row may claim to be running)
- * because the fix lives in this component, not the route.
+ * Card tests for the PAT flow and the three-tab body. The sensitive surface is the
+ * PAT entry — what it sends, which header authorizes it, and what each host answer
+ * renders — and the probe section keeps its regression: only the pressed row may
+ * claim to be running.
  */
 
 const t = (key: keyof typeof en, params: Record<string, unknown> = {}): string =>
@@ -33,11 +30,9 @@ interface Posted {
 }
 
 /**
- * The shared status store is module state that outlives a test, and an
- * expanding card no longer re-reads a document that is still fresh — so each
- * test starts the clock well past the card's minute. A publish inside the
- * test then lands at the current time and stays fresh, which is what the
- * dedup assertions read.
+ * The shared status store outlives a test and a fresh document is not re-read,
+ * so each test starts the clock well past the card's minute; a publish then
+ * lands at the current time, which is what the dedup assertions read.
  */
 let clock = Date.parse('2024-05-01T00:00:00.000Z')
 
@@ -51,6 +46,9 @@ describe('Qoder plugin card', () => {
   /** Resolvers for held POSTs, so "in flight" is observable, not a race. */
   let releaseQueue: ((body: unknown) => void)[] = []
   let holdPosts = false
+  /** Held status GETs, so "the first read has not landed yet" is observable. */
+  let holdStatus = false
+  let releaseStatus: ((body: unknown) => void)[] = []
   const intervalHandles = new Map<number, () => void>()
   let nextHandle = 1
 
@@ -77,6 +75,8 @@ describe('Qoder plugin card', () => {
     signedIn()
     statusFails = false
     holdPosts = false
+    holdStatus = false
+    releaseStatus = []
     posts.length = 0
     releaseQueue = []
     intervalHandles.clear()
@@ -92,7 +92,10 @@ describe('Qoder plugin card', () => {
       }
       gets.push(String(input))
       if (statusFails) throw new Error('socket died')
-      return { ok: true, status: 200, json: async () => statusBody }
+      const body = holdStatus
+        ? await new Promise<unknown>(resolve => { releaseStatus.push(resolve) })
+        : statusBody
+      return { ok: true, status: 200, json: async () => body }
     }))
     vi.stubGlobal('window', {
       setInterval: (handler: () => void) => {
@@ -184,6 +187,22 @@ describe('Qoder plugin card', () => {
     expect(JSON.parse(String(posts[0]!.init.body))).toEqual({ action: 'save-pat', pat: 'pt-pasted' })
   })
 
+  it('sends an optional label when a second token is added', async () => {
+    await mount()
+    await press(en.patAdd)
+    expect(inputs()).toHaveLength(2)
+    await typePat('pt-second')
+    await act(async () => {
+      view!.root.findAllByType('input')[1]!.props.onChange({ target: { value: '  工作号  ' } })
+    })
+    await press(en.patSave)
+    expect(JSON.parse(String(posts[0]!.init.body))).toEqual({
+      action: 'save-pat',
+      pat: 'pt-second',
+      label: '工作号',
+    })
+  })
+
   it('reports the save lifecycle: busy label, then the signed-in body takes over', async () => {
     signedOut()
     holdPosts = true
@@ -198,7 +217,7 @@ describe('Qoder plugin card', () => {
     signedIn()
     await releasePosts({ ok: true, status: 'saved' })
     expect(inputs()).toHaveLength(0)
-    expect(buttonLabels()).toContain(en.patReplace)
+    expect(buttonLabels()).toContain(en.patAdd)
   })
 
   it('renders the stable refusal codes as the re-generate prompt, not raw wire text', async () => {
@@ -240,26 +259,86 @@ describe('Qoder plugin card', () => {
   // ---- signed-in arm: summary, replace, clear ------------------------------
 
   it('summarizes the credential in effect without ever spelling the token', async () => {
+    signedIn({ patProfiles: [{ id: 'id-one', patTail: 'abcd' }], activePatId: 'id-one' })
     await mount()
     const tree = JSON.stringify(view!.toJSON())
-    expect(tree).toContain(t('patTail', { tail: '****abcd' }))
+    expect(tree).toContain('****abcd')
     expect(tree).toContain(en.patSourceCard)
     expect(tree).not.toContain('pt-test')
-    expect(buttonLabels()).toContain(en.patReplace)
+    expect(buttonLabels()).toContain(en.patAdd)
     expect(buttonLabels()).toContain(en.patClear)
   })
 
-  it('Replace PAT opens a cancellable entry over the live document', async () => {
+  it('Add PAT opens a cancellable entry over the live document', async () => {
     await mount()
-    await press(en.patReplace)
-    expect(inputs()).toHaveLength(1)
+    await press(en.patAdd)
+    expect(inputs()).toHaveLength(2) // PAT + optional label
     await press(en.cancel)
     expect(inputs()).toHaveLength(0)
     // Canceling never touches the route: the stored PAT is still in effect.
     expect(posts).toEqual([])
   })
 
+  it('renders the saved-PAT select and switches accounts through the route', async () => {
+    const profiles = [
+      { id: 'id-two', label: '工作号', patTail: '2222', savedAtMs: 1_700_000_100_000 },
+      { id: 'id-one', patTail: '1111', savedAtMs: 1_700_000_000_000 },
+    ]
+    signedIn({
+      patProfiles: profiles,
+      activePatId: 'id-two',
+      pat: { id: 'id-two', label: '工作号', source: 'card', patTail: '2222', savedAtMs: 1_700_000_100_000 },
+    })
+    holdPosts = true
+    await mount()
+    const select = view!.root.findAllByType('select')[0]
+    expect(select).toBeDefined()
+    expect(view!.root.findAllByType('option')).toHaveLength(2)
+    const tree = JSON.stringify(view!.toJSON())
+    expect(tree).toContain('工作号')
+    expect(tree).toContain('****1111')
+
+    await act(async () => { select!.props.onChange({ target: { value: 'id-one' } }) })
+    expect(JSON.parse(String(posts[0]!.init.body))).toEqual({ action: 'activate', id: 'id-one' })
+    // No extra "switching" copy is rendered: the disabled select is the
+    // in-flight signal, so the toolbar cannot be pushed onto a second line.
+    expect(view!.root.findAllByType('select')[0]!.props.disabled).toBe(true)
+
+    // The host's post-switch document reports the other entry as active; the
+    // card re-reads it before the in-flight state clears.
+    signedIn({ patProfiles: profiles, activePatId: 'id-one' })
+    await releasePosts({ ok: true })
+    expect(view!.root.findAllByType('select')[0]!.props.value).toBe('id-one')
+  })
+
+  it('Remove current posts the remove action for the active entry', async () => {
+    signedIn({
+      patProfiles: [
+        { id: 'id-two', patTail: '2222' },
+        { id: 'id-one', patTail: '1111' },
+      ],
+      activePatId: 'id-one',
+    })
+    holdPosts = true
+    await mount()
+    await press(en.patRemove)
+    expect(JSON.parse(String(posts[0]!.init.body))).toEqual({ action: 'remove', id: 'id-one' })
+    expect(buttonLabels()).toContain(en.patRemoving)
+    signedIn()
+    await releasePosts({ ok: true })
+  })
+
+  it('shows the saved-PAT select even for a single token', async () => {
+    signedIn({ patProfiles: [{ id: 'id-one', patTail: 'abcd' }], activePatId: 'id-one' })
+    await mount()
+    const selects = view!.root.findAllByType('select')
+    expect(selects).toHaveLength(1)
+    expect(view!.root.findAllByType('option')).toHaveLength(1)
+    expect(selects[0]!.props.value).toBe('id-one')
+  })
+
   it('Clear PAT posts the clear action and re-reads to the signed-out entry', async () => {
+    signedIn({ patProfiles: [{ id: 'id-one', patTail: 'abcd' }], activePatId: 'id-one' })
     holdPosts = true
     await mount()
     await press(en.patClear)
@@ -295,6 +374,34 @@ describe('Qoder plugin card', () => {
 
   // ---- context tab: maximum-window preference -------------------------------
 
+  it('holds back the quota block until the first read, keeping the tab switcher', async () => {
+    holdStatus = true
+    // A ready settings scope: without one the quota block never renders, and the
+    // absence assertion below would pass for the wrong reason.
+    const scope = {
+      getSnapshot: () => ({ status: 'ready', writable: true, value: {} }),
+      subscribe: () => () => {},
+      set: () => {},
+    }
+    const props = { t, unified: true, scope } as unknown as Parameters<typeof QoderPluginCard>[0]
+    await act(async () => { view = create(createElement(QoderPluginCard, props)) })
+    await act(async () => { view!.root.findAllByType('button')[0]!.props.onClick() })
+    // The version switcher is part of the card's chrome and must survive an
+    // unknown status; the quota toggles would flash a refusal on their way in.
+    expect(view!.root.findAll(node => (node.props as { role?: string }).role === 'tablist').length).toBe(1)
+    expect(JSON.stringify(view!.toJSON())).not.toContain(en.quotaToggleCN)
+    await act(async () => { for (const release of releaseStatus) release(statusBody) })
+    vi.advanceTimersByTime(0)
+    await act(async () => {})
+    expect(JSON.stringify(view!.toJSON())).toContain(en.quotaToggleCN)
+  })
+
+  /** The max-window preference is a switch button, not an input, since the panel rewrite. */
+  const maxWindowSwitch = () => view!.root.findAll(node =>
+    (node.type as unknown) === 'button'
+    && (node.props as { role?: string }).role === 'switch'
+    && (node.props as { 'aria-label'?: string })['aria-label'] === en.useMaximumContextWindow)[0]
+
   it('offers the max-window preference on both cards, each a route write', async () => {
     statusBody = {
       status: 'signed-in',
@@ -305,9 +412,9 @@ describe('Qoder plugin card', () => {
     for (const variant of [undefined, QODER_GLOBAL_CARD]) {
       await mount(variant)
       await press(en.tabContext)
-      const checkbox = inputs().find(input => input.props.type === 'checkbox')
-      expect(checkbox).toBeDefined()
-      await act(async () => { checkbox!.props.onChange({ currentTarget: { checked: true } }) })
+      const toggle = maxWindowSwitch()
+      expect(toggle).toBeDefined()
+      await act(async () => { toggle!.props.onClick() })
       expect(posts).toHaveLength(1)
       expect(JSON.parse(String(posts[0]!.init.body))).toEqual({ action: 'set-maximum-context-window', enabled: true })
       await act(async () => view?.unmount())
@@ -364,6 +471,94 @@ describe('Qoder plugin card', () => {
     expect(tree).toContain(t('contextUpTo', { size: '1M' }))
   })
 
+  it('prints the used percentage beside a package label in the quota detail tab', async () => {
+    // The settings card's credit bar carries the same "(used N%)" suffix the sidebar
+    // prints, read from the same helper: 2,340 / 2,400 is "(已使用 3%)".
+    statusBody = {
+      status: 'signed-in',
+      probeKey: 'test-probe-key',
+      authKey: 'test-auth-key',
+      credits: {
+        total: 25,
+        accounts: [
+          { packageName: '个人额度', remain: 2000, size: 2000 },
+          { packageName: '赠送额度', remain: 2340, size: 2400 },
+        ],
+      },
+      models: [],
+    }
+    await mount()
+    await press(en.tabDetails)
+
+    const labels = view!.root
+      .findAll(node => node.type === 'span')
+      .map(node => node.children.filter((child): child is string => typeof child === 'string').join(''))
+      .filter(text => text.includes('个人额度') || text.includes('赠送额度'))
+    expect(labels).toEqual([
+      `个人额度${t('quotaPackageUsed', { percent: '0' })}`,
+      `赠送额度${t('quotaPackageUsed', { percent: '3' })}`,
+    ])
+  })
+
+  it('states the PAT authorization when the account has no cycle expiry', async () => {
+    // The year-9999 "never" sentinel is dropped by the transport, so the status tab
+    // names the one date the card knows — when this PAT was authorized.
+    statusBody = {
+      status: 'signed-in',
+      pat: { source: 'card', savedAtMs: Date.parse('2026-10-16T02:05:36.888Z'), patTail: 'd092' },
+      probeKey: 'test-probe-key',
+      authKey: 'test-auth-key',
+      credits: {
+        total: 0.01,
+        totalSize: 2100,
+        accounts: [
+          {
+            packageName: 'SOTA 专属积分',
+            packageNameI18n: { zh: 'SOTA 专属积分', en: 'SOTA Exclusive Credits' },
+            remain: 2000,
+            size: 2000,
+            packageEndTime: '2026-10-19T02:00:00.000Z',
+          },
+        ],
+      },
+      models: [],
+    }
+    await mount()
+    await press(en.tabDetails)
+    let tree = JSON.stringify(view!.toJSON())
+    // The grant renders under its own localized title, not the campaign code.
+    expect(tree).toContain('SOTA 专属积分')
+    expect(tree).not.toContain('act-20261014-129')
+
+    await press(en.tabStatus)
+    tree = JSON.stringify(view!.toJSON())
+    expect(tree).toContain('PAT authorized')
+    expect(tree).not.toContain(en.cycleResetAt.split('{time}')[0]!)
+    expect(tree).not.toContain('9999')
+  })
+
+  it('still states the real cycle deadline when the upstream reports one', async () => {
+    // The PAT line stands in for an absent expiry, never replaces a reported one.
+    statusBody = {
+      status: 'signed-in',
+      pat: { source: 'card', savedAtMs: Date.parse('2026-10-16T02:05:36.888Z'), patTail: 'd092' },
+      probeKey: 'test-probe-key',
+      authKey: 'test-auth-key',
+      credits: {
+        total: 12,
+        totalSize: 300,
+        accounts: [{ packageName: '个人额度', remain: 264, size: 300, packageEndTime: '2026-11-01T00:00:00.000Z' }],
+        cycleResetTime: '2026-11-01T00:00:00.000Z',
+      },
+      models: [],
+    }
+    await mount()
+    await press(en.tabStatus)
+    const tree = JSON.stringify(view!.toJSON())
+    expect(tree).toContain(en.cycleResetAt.split('{time}')[0]!)
+    expect(tree).not.toContain('PAT authorized')
+  })
+
   it('offers the max-window preference on the Global card, as a route write', async () => {
     statusBody = {
       status: 'signed-in',
@@ -373,9 +568,9 @@ describe('Qoder plugin card', () => {
     }
     await mount(QODER_GLOBAL_CARD)
     await press(en.tabContext)
-    const checkbox = inputs().find(input => input.props.type === 'checkbox')
-    expect(checkbox).toBeDefined()
-    await act(async () => { checkbox!.props.onChange({ currentTarget: { checked: true } }) })
+    const toggle = maxWindowSwitch()
+    expect(toggle).toBeDefined()
+    await act(async () => { toggle!.props.onClick() })
     expect(posts).toHaveLength(1)
     expect(posts[0]!.url).toBe(QODER_GLOBAL_CARD.probePath)
     expect(JSON.parse(String(posts[0]!.init.body))).toEqual({ action: 'set-maximum-context-window', enabled: true })
@@ -389,7 +584,7 @@ describe('Qoder plugin card', () => {
     await press(en.refresh)
     const tree = JSON.stringify(view!.toJSON())
     expect(tree).toContain(en.statusRefreshFailed.split('{message}')[0]!)
-    expect(tree).toContain(en.signedIn) // the document is still rendered
+    expect(tree).toContain(en.patAccounts) // the document is still rendered
   })
 
   it('turns an unreadable 200 into the error arm rather than dereferencing it', async () => {

@@ -10,17 +10,11 @@ import { normalizeQoderModels } from '../src/qoder/catalog.ts'
 import { modelInfoOf } from '../src/upstream.ts'
 
 /**
- * End-to-end tests for the observation/declaration merge, driven through the
- * real LLM seam rather than an internal helper
- * (`docs/reasoning-effort-probe-plan.md` 搂5).
- *
- * What must hold:
- * - with no observation, an undeclared model still exposes no control (the
- *   shipped behavior is unchanged for anyone who never opts in);
- * - a *validating* observation grants exactly the verified spellings;
- * - a *non-validating* observation grants nothing, because the upstream
- *   accepts values that cannot exist;
- * - a declared set is never overridden, and probing never confers `off`.
+ * End-to-end tests for the observation/declaration merge, driven through the real
+ * LLM seam: with no observation an undeclared model exposes no control; a
+ * *validating* observation grants exactly the verified spellings; a
+ * *non-validating* one grants nothing, because the upstream accepts values that
+ * cannot exist; a declared set is never overridden, and probing never confers `off`.
  */
 
 const CLEANUP: string[] = []
@@ -44,18 +38,9 @@ const PAT = 'pt-merge-0000000000000000000000mm'
 const ACCOUNT = Qoder.qoderCredentialIdentity({ pat: PAT })
 
 /**
- * The one temporary root every boot in this spec shares.
- *
- * The plugin keeps module-level per-identity records (`lastIdentities`,
- * `lastLiveFetchAt`) and a file-backed saved catalog, all designed so a
- * restart of the SAME account — a 0.1.7 settings-write fiber reload — neither
- * re-fetches what was just fetched nor drops the records the account owns.
- * A fresh root or a fresh PAT per boot would instead read as an account
- * switch: the saved catalog could not be read from the new root, the startup
- * fetch would be re-issued (or skipped without the file to fall back on), and
- * every observation would be cleared by `adoptIdentity`. Each case therefore
- * boots the same account in the same root, which is the sequence the module
- * state exists to serve.
+ * The one temporary root every boot shares: a fresh root or PAT per boot would
+ * read as an account switch and clear the observations these cases seed, so each
+ * case boots the same account in the same root.
  */
 let root: string
 
@@ -112,12 +97,9 @@ function credentialDocument(): string {
 }
 
 /**
- * Write a probe record for `model` before the plugin boots, then start it.
- *
- * A signed-in credential is required, not incidental: observations are bound to
- * the account that produced them, so a record with no account in effect is (by
- * design) never served. Signing in here is what makes the cases below exercise
- * the merge rather than the account check.
+ * Write a probe record for `model`, then boot. Signing in is not incidental:
+ * observations are account-bound, so a record with no account in effect is never
+ * served, and the cases would exercise the account check instead of the merge.
  */
 async function boot(options: {
   model?: string

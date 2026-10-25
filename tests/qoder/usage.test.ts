@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { QoderAuthService } from '../../src/qoder/transport/auth.ts'
 import { QoderLlmError } from '../../src/qoder/errors.ts'
 import { QoderUsageReader } from '../../src/qoder/transport/account-reader.ts'
+import { qoderIdeVersion } from '../../src/qoder/transport/wire/cosy.ts'
 
 test('QoderUsageReader reads subscriber profile and quota usage, and caches within TTL', async () => {
   let quotaCalls = 0
@@ -309,12 +310,120 @@ test('QoderUsageReader reads subscriber plan and user status with machine finger
   assert.equal(statusHeaders?.authorization, 'Bearer jt-plan-test')
   assert.equal(statusHeaders?.['Cosy-MachineToken'], 'umid-fingerprint-test')
   assert.equal(statusHeaders?.['Cosy-MachineType'], 'host')
-  assert.equal(planHeaders?.['user-agent'], 'qoder/1.1.47')
-  assert.equal(statusHeaders?.['user-agent'], 'qoder/1.1.47')
-  assert.equal(quotaHeaders?.['user-agent'], 'qoder/1.1.47')
+  assert.equal(planHeaders?.['user-agent'], `qoder/${qoderIdeVersion}`)
+  assert.equal(statusHeaders?.['user-agent'], `qoder/${qoderIdeVersion}`)
+  assert.equal(quotaHeaders?.['user-agent'], `qoder/${qoderIdeVersion}`)
   assert.equal(planHeaders?.['cosy-clienttype'], '5')
   assert.equal(statusHeaders?.['cosy-clienttype'], '5')
   assert.equal(quotaHeaders?.['cosy-clienttype'], '5')
+})
+
+test('QoderUsageReader reads dedicated campaign packages and drops the year-9999 "never" expiry', async () => {
+  // The upstream's real shape: `expiresAt` 253402214400000 is the year-9999
+  // "no expiry" sentinel, and the SOTA grant sits in `dedicatedResourcePackages`
+  // with its own epoch and its own labels.
+  let usageBody: Record<string, unknown> | undefined
+  const fetchMock = async (input: URL | Request): Promise<Response> => {
+    const url = String(input)
+    if (url.includes('/jobToken/exchange')) {
+      return new Response(JSON.stringify({ token: 'jt-dedicated', expires_in: 3_600_000 }))
+    }
+    if (url.includes('/userinfo')) {
+      return new Response(JSON.stringify({ id: 'user-ded', email: 'd@qoder.sh', name: 'Ded Case' }))
+    }
+    if (url.includes('/plan') || url.includes('/status')) {
+      return new Response(JSON.stringify({ error: 'not needed' }), { status: 503 })
+    }
+    if (url.includes('/quota/usage')) {
+      usageBody = {
+        userId: 'user-ded',
+        userType: 'personal_standard',
+        usageType: 'credits',
+        totalUsagePercentage: 0.01,
+        isQuotaExceeded: false,
+        expiresAt: 253402214400000,
+        userQuota: { total: 0, used: 0, remaining: 0, percentage: 0, unit: 'credits' },
+        addOnQuota: { total: 100, used: 5, remaining: 95, percentage: 0.06, unit: 'credits' },
+        dedicatedResourcePackages: [
+          {
+            id: '01a1426f',
+            name: 'act-20261014-129',
+            description: 'growth-campaign:act-20261014-129:grant:01a1426f',
+            total: 2000,
+            used: 0,
+            remaining: 2000,
+            percentage: 0,
+            unit: 'credits',
+            expiresAt: 1792375197331,
+            available: true,
+            status: 'QUOTA_DETAIL_STATUS_ACTIVE',
+            displayLabels: [
+              { dimension: 'description', value: 'sota model series description', valueI18n: { 'en-US': 'SOTA Exclusive Credits: used first.', 'zh-CN': 'SOTA 专属积分：优先抵扣。' } },
+              { dimension: 'title', value: 'sota model series', valueI18n: { 'en-US': 'SOTA Exclusive Credits', 'zh-CN': 'SOTA 专属积分' } },
+            ],
+          },
+          // A malformed entry the reader must survive rather than fail the answer over.
+          null,
+        ],
+      }
+      return new Response(JSON.stringify(usageBody), { status: 200 })
+    }
+    throw new Error(`unexpected URL: ${url}`)
+  }
+  const authService = new QoderAuthService({ fetch: fetchMock as typeof fetch, resolveMachineId: () => 'machine-ded' })
+  const reader = new QoderUsageReader({ authService, fetch: fetchMock as typeof fetch })
+
+  const account = await reader.readAccount('pt-ded')
+  // The sentinel is the absence of an expiry, not a date in the year 10000.
+  assert.equal(account.usage?.expiresAt, undefined)
+  assert.equal(account.usage?.addOnQuota?.remaining, 95)
+  const packs = account.usage?.dedicatedResourcePackages
+  assert.equal(packs?.length, 1)
+  assert.equal(packs?.[0]?.total, 2000)
+  assert.equal(packs?.[0]?.remaining, 2000)
+  assert.equal(packs?.[0]?.id, '01a1426f')
+  assert.equal(packs?.[0]?.name, 'act-20261014-129')
+  assert.equal(packs?.[0]?.status, 'QUOTA_DETAIL_STATUS_ACTIVE')
+  assert.equal(packs?.[0]?.available, true)
+  // The grant keeps its OWN expiry: the epoch ms the package carried, ISO'd.
+  assert.equal(packs?.[0]?.expiresAt, new Date(1792375197331).toISOString())
+  // The title comes from `displayLabels` at dimension `title`, keyed by the
+  // bare language — never the `act-…` code and never the description label.
+  assert.deepEqual(packs?.[0]?.title, { zh: 'SOTA 专属积分', en: 'SOTA Exclusive Credits' })
+  // The raw upstream array still rides through for anything unmapped.
+  assert.equal((account.usage?.raw as { dedicatedResourcePackages?: unknown[] }).dedicatedResourcePackages?.length, 2)
+})
+
+test('QoderUsageReader keeps a real plan expiry that merely looks far out', async () => {
+  // The drop keys on the year-9999 sentinel alone: a subscription ending in 2031 is a real date to print.
+  const fetchMock = async (input: URL | Request): Promise<Response> => {
+    const url = String(input)
+    if (url.includes('/jobToken/exchange')) return new Response(JSON.stringify({ token: 'jt-far', expires_in: 3_600_000 }))
+    if (url.includes('/userinfo')) return new Response(JSON.stringify({ id: 'user-far', name: 'Far Case' }))
+    if (url.includes('/user/plan')) {
+      return new Response(JSON.stringify({
+        user_type: 'pro',
+        plan_tier_name: 'Pro',
+        is_personal_version: true,
+        start_date: 1792000000000,
+        end_date: Date.parse('2031-01-01T00:00:00Z'),
+      }))
+    }
+    if (url.includes('/user/status')) return new Response(JSON.stringify({ featureSwitches: { allow_byok: 0 } }))
+    if (url.includes('/quota/usage')) {
+      return new Response(JSON.stringify({
+        userQuota: { total: 10, used: 1, remaining: 9, unit: 'credits' },
+        expiresAt: Date.parse('2031-01-01T00:00:00Z'),
+      }))
+    }
+    throw new Error(`unexpected URL: ${url}`)
+  }
+  const authService = new QoderAuthService({ fetch: fetchMock as typeof fetch, resolveMachineId: () => 'machine-far' })
+  const reader = new QoderUsageReader({ authService, fetch: fetchMock as typeof fetch })
+  const account = await reader.readAccount('pt-far')
+  assert.equal(account.usage?.expiresAt, '2031-01-01T00:00:00.000Z')
+  assert.equal(account.plan?.endDate, '2031-01-01T00:00:00.000Z')
+  assert.equal(account.usage?.dedicatedResourcePackages, undefined)
 })
 
 test('QoderUsageReader degrades gracefully when plan or status endpoint returns error', async () => {

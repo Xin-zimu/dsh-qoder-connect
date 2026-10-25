@@ -15,12 +15,9 @@ import {
 } from '../src/upstream.ts'
 
 /**
- * Offline unit tests for QoderUpstreamClient.
- *
- * The client speaks OpenAI on one side and the dsh-llm `StreamChunk` vocabulary
- * on the other, so every case here injects a scripted fake transport: no
- * network, no real account, and the exact chunk sequences (including the ones
- * the WorkBuddy-era client never had to answer for) are under test control.
+ * Offline unit tests for QoderUpstreamClient: OpenAI on one side, the dsh-llm
+ * `StreamChunk` vocabulary on the other. Every case injects a scripted fake
+ * transport, so no network and no real account are involved.
  */
 
 const createTransportMock = vi.hoisted(() => vi.fn())
@@ -178,7 +175,7 @@ describe('chatStream request translation', () => {
     expect(options.messages.map(message => message.role)).toEqual(['user', 'assistant', 'tool'])
     const assistant = options.messages[1]!
     expect(assistant.content.some(block => block.type === 'tool-call' && block.id === 'tc-1')).toBe(true)
-    // DSH 0.1.7 carries the tool result as one first-class tool-role message.
+    // The host carries a tool result as one first-class tool-role message.
     const toolResult = options.messages[2]!
     expect(toolResult.role).toBe('tool')
     if (toolResult.role === 'tool') {
@@ -288,9 +285,8 @@ describe('chatStream failure classification before the response exists', () => {
       expect(result.ok).toBe(false)
       if (!result.ok) {
         expect([result.status, result.kind]).toEqual([status, kind])
-        // A structured failure keeps its machine message; a plain thrown error
-        // is stringified whole, "Error: " prefix included — the shim's only
-        // unclassified path, deliberately loud rather than pretty.
+    // A structured failure keeps its machine message; a plain thrown error is
+    // stringified whole — the deliberately loud, unclassified path.
         const expectedMessage = error instanceof LlmError ? error.failure.message : String(error)
         expect(result.message).toBe(expectedMessage)
       }
@@ -308,6 +304,37 @@ describe('chatStream failure classification before the response exists', () => {
     // The iterator is released rather than left dangling.
     expect(fake.closed()).toBe(true)
   })
+
+  it('carries the provider retry hint out of a thrown transport failure', async () => {
+    // The hint must survive into the shim's result for the adapter to rebuild it.
+    const { client } = makeClient({
+      throwAt: 'stream',
+      error: new QoderLlmError('queue saturated', 'RATE_LIMIT', { status: 403, providerRetryAfterMs: 30000 }),
+    })
+    const result = await client.chatStream(USER_BODY)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.retryAfterMs).toBe(30000)
+  })
+
+  it('carries the provider retry hint out of a terminal first chunk', async () => {
+    const failure = { message: 'queue saturated', code: 'RATE_LIMIT', status: 403, providerRetryAfterMs: 30000 }
+    const { client } = makeClient({
+      chunks: [{ type: 'finish', reason: { kind: 'error', failure } }],
+    })
+    const result = await client.chatStream(USER_BODY)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.retryAfterMs).toBe(30000)
+  })
+
+  it('omits retryAfterMs when the failure carries no hint', async () => {
+    const { client } = makeClient({
+      throwAt: 'stream',
+      error: new QoderLlmError('upstream down', 'SERVER'),
+    })
+    const result = await client.chatStream(USER_BODY)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect('retryAfterMs' in result).toBe(false)
+  })
 })
 
 describe('kindFromQoderFailure and classifyUpstreamError', () => {
@@ -324,10 +351,8 @@ describe('kindFromQoderFailure and classifyUpstreamError', () => {
   })
 
   it('routes Qoder queue answers to soft_rate even with a 401/403 status', () => {
-    // The queue answer keeps the 401/403 status that used to claim the auth
-    // arm first: kind 'auth' made the shim answer 401 with type "auth", the
-    // harness rendered "API 密钥无效", and nothing retried it (observed
-    // 2026-09-26 23:30, after the transport-side heal was already fixed).
+    // A queue answer keeps its 401/403 status, so the auth arm must not claim it
+    // by status first: that renders as a dead credential and nothing retries it.
     expect(kindFromQoderFailure({ code: 'RATE_LIMIT', status: 403 })).toBe('soft_rate')
     expect(kindFromQoderFailure({ code: 'RATE_LIMIT', status: 401 })).toBe('soft_rate')
     expect(kindFromQoderFailure({ code: 'RATE_LIMIT' })).toBe('soft_rate')
@@ -336,10 +361,8 @@ describe('kindFromQoderFailure and classifyUpstreamError', () => {
   })
 
   it('routes a QUOTA code to quota_exceeded even with a 401/403 status', () => {
-    // The second half of #10. The transport now codes a documented quota answer
-    // QUOTA while keeping the upstream's 403, so the auth arm — which tests the
-    // status — would still claim it first and the shim would answer 401
-    // "auth": the same "API 密钥无效" the transport-side fix exists to remove.
+    // A QUOTA answer keeps the upstream's 403, so an auth arm that tests the
+    // status alone would still claim it and answer 401 with type "auth".
     expect(kindFromQoderFailure({ code: 'QUOTA', status: 403 })).toBe('quota_exceeded')
     expect(kindFromQoderFailure({ code: 'QUOTA', status: 401 })).toBe('quota_exceeded')
     expect(kindFromQoderFailure({ code: 'ACCOUNT_QUOTA', status: 403 })).toBe('quota_exceeded')
@@ -349,9 +372,8 @@ describe('kindFromQoderFailure and classifyUpstreamError', () => {
   })
 
   it('routes a request-family failure to client even with a 401/403 status', () => {
-    // The same trap as #10, one family over: the transport now codes a documented
-    // request/policy answer INVALID_REQUEST while keeping the upstream's 403, and
-    // the auth arm would still claim it by status.
+    // The same trap one family over: an INVALID_REQUEST keeps the 403, and the
+    // auth arm would still claim it by status.
     expect(kindFromQoderFailure({ code: 'INVALID_REQUEST', status: 403 })).toBe('client')
     expect(kindFromQoderFailure({ code: 'UNSUPPORTED_CONTENT', status: 403 })).toBe('client')
     // Quota still outranks the request arm.
@@ -362,8 +384,8 @@ describe('kindFromQoderFailure and classifyUpstreamError', () => {
   })
 
   it('keeps a transport timeout distinct from a server fault', () => {
-    // A timeout used to fall through to the server catch-all, so the shim answered
-    // 502 with kind "server" and pi-ai reported SERVER for a stalled request.
+    // A timeout must not fall through to the server catch-all: a 5xx makes pi-ai
+    // report SERVER for a stalled request.
     expect(kindFromQoderFailure({ code: 'TIMEOUT' })).toBe('timeout')
     expect(kindFromQoderFailure({ code: 'TIMEOUT', status: 408 })).toBe('timeout')
     expect(kindFromQoderFailure({ code: 'SERVER', status: 502 })).toBe('server')
@@ -381,7 +403,7 @@ describe('kindFromQoderFailure and classifyUpstreamError', () => {
   })
 
   it('reads a documented quota code out of the body ahead of the 401/403 status', () => {
-    // The issue-#10 answer verbatim: HTTP 403 whose body names code 110.
+    // The quota answer: HTTP 403 whose body names code 110.
     const body = '{"code":"110","message":"Billing daily count exceeded"}'
     expect(classifyUpstreamError(403, body)).toBe('quota_exceeded')
     expect(classifyUpstreamError(401, body)).toBe('quota_exceeded')
@@ -391,9 +413,8 @@ describe('kindFromQoderFailure and classifyUpstreamError', () => {
     // 105 is the one documented code in the auth family, and stays auth.
     expect(classifyUpstreamError(401, '{"code":"105","message":"token expired"}')).toBe('auth')
 
-    // Status-first is otherwise intact: a 403 whose body names no documented
-    // code is still an authorization failure, so a throttling answer that merely
-    // says "quota exceeded" is never parked as an exhausted balance.
+    // A 403 naming no documented code is still AUTH: prose mentioning "quota" never
+    // parks a balance as exhausted.
     expect(classifyUpstreamError(403, '{"message":"quota exhausted"}')).toBe('auth')
     expect(classifyUpstreamError(403, '{"code":403,"message":"quota exhausted"}')).toBe('auth')
   })
@@ -419,9 +440,8 @@ describe('kindFromQoderFailure and classifyUpstreamError', () => {
   })
 
   it('reads Qoder queue answers as soft_rate, not auth', () => {
-    // The verbatim 2026-09-26 window: a 401/403 whose body announces a
-    // saturated queue. Status alone said "auth", which parked a healthy
-    // account and blocked the retry that would have cleared it.
+    // A 401/403 announcing a saturated queue: status alone says "auth", which parks
+    // a healthy account and blocks the retry that would clear it.
     const queueBody = JSON.stringify({
       code: '10605',
       message: JSON.stringify({ isQueued: true, modelKey: 'qfmodel', queueCount: 8887, queueType: 'p3', retryAfterSeconds: 30, serviceAvailable: true, waitTime: 274 }),
@@ -452,9 +472,8 @@ describe('kindFromQoderFailure and classifyUpstreamError', () => {
 
 describe('chatStream OpenAI re-serialization', () => {
   it('replays a full multi-chunk sequence frame by frame', async () => {
-    // The regression this locks: chunks after the first MUST reach the encoder
-    // (a block-start emits no frames, so a loop that never re-pulls the
-    // iterator would end the stream at the role frame alone).
+    // Chunks after the first MUST reach the encoder: a block-start emits no frames,
+    // so a loop that never re-pulls the iterator ends the stream at the role frame.
     const chunks: StreamChunk[] = [
       { type: 'block-start', index: 0, blockType: 'reasoning' },
       { type: 'reasoning-delta', index: 0, text: 'th' },
@@ -543,9 +562,8 @@ describe('chatStream OpenAI re-serialization', () => {
   })
 
   it('omits prompt_tokens_details when the transport reported no cache counters', async () => {
-    // Backward-compat lock: a cold request that never saw cache fields keeps
-    // the exact pre-fix frame shape, so strict upstreams are not handed a
-    // details object full of zeroes.
+    // A cold request keeps the exact pre-fix frame shape, so strict upstreams are
+    // never handed a details object full of zeroes.
     const { client } = makeClient({
       chunks: [
         { type: 'usage', usage: { inputTokens: 10, outputTokens: 3 } },
@@ -558,9 +576,8 @@ describe('chatStream OpenAI re-serialization', () => {
   })
 
   it('carries a cache-read hit out as cached_tokens so the host can report it', async () => {
-    // Regression for issue #3: the transport read `prompt_tokens_details.cached_tokens`
-    // from Qoder but the re-serialized usage frame dropped it, so DSH's
-    // cache-hit statistic was pinned at 0% for every warm request.
+    // `prompt_tokens_details.cached_tokens` must ride back out, or DSH's cache-hit
+    // statistic pins at 0% for every warm request.
     const { client } = makeClient({
       chunks: [
         { type: 'usage', usage: { inputTokens: 40, cacheReadTokens: 960, outputTokens: 8 } },
@@ -674,9 +691,10 @@ describe('fetchModels: QoderCatalogModel -> QoderModelInfo', () => {
     expect(models[0]).toMatchObject({ billing: { credits: 'x1.6', free: false }, supportsImages: true })
     expect(models[1]).toMatchObject({ billing: { credits: 'x0', free: true }, supportsImages: false })
     expect(models[2]).toMatchObject({ billing: { free: false, rateUnknown: true } })
-    // Defaults: no declared capacity falls to the conservative window; no
-    // declared output cap falls to the transport's own; an empty name is the id.
-    expect(models[2]).toMatchObject({ contextWindow: 180_000, maxTokens: 32_768, name: 'Newcomer' })
+    // Defaults: no declared capacity falls to the conservative window; an undeclared
+    // output cap stays absent; an empty name is the id.
+    expect(models[2]).toMatchObject({ contextWindow: 180_000, name: 'Newcomer' })
+    expect(models[2]!.maxTokens).toBeUndefined()
     expect(models[0]!.source).toBe('system')
     expect(client.lastCatalog).toMatchObject({ source: 'qoder:discovery' })
   })
@@ -821,9 +839,8 @@ describe('probeEffort', () => {
   })
 
   it('attributes an effort the endpoint itself refused to the same code', async () => {
-    // Qoder's own answer to an impossible spelling: a 400 whose nested error
-    // names the offending parameter. Left under INVALID_REQUEST the sweep would
-    // read it as an unattributable failure and report "unknown" instead.
+    // An impossible spelling answers a 400 naming the offending parameter; left
+    // under INVALID_REQUEST the sweep reports "unknown" instead.
     const body = 'Qoder service returned upstream error status 400: '
       + '{"code":"provider_error","type":"provider_error","request_id":"898ef59e",'
       + '"details":"data: {\\"error\\":{\\"code\\":\\"invalid_parameter_error\\",'

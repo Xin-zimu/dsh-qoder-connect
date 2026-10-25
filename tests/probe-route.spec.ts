@@ -4,9 +4,8 @@ import { createProbeKey, qoderProbeHandler, type QoderProbeRouteOptions } from '
 
 /**
  * Offline tests for the probe control route, the plugin's only state-changing
- * endpoint. Two guards must both hold before anything happens: the loopback
- * Host/Origin check (drops DNS-rebinding pages) and the in-process key (proves
- * the caller was the same-origin card, since any local process can write
+ * endpoint. Two guards must both hold: the loopback Host/Origin check (drops
+ * DNS-rebinding pages) and the in-process key (any local process can write
  * `Host: 127.0.0.1`).
  */
 
@@ -53,8 +52,8 @@ async function post(
 }
 
 /**
- * POST with full control over the request headers, including `Host`, which
- * `fetch` refuses to set. Needed to exercise the rebinding guard.
+ * POST with full header control, `Host` included: `fetch` refuses to set it, so the
+ * rebinding guard has to be driven through raw HTTP.
  */
 async function postRaw(
   origin: string,

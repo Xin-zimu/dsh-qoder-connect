@@ -14,17 +14,32 @@ export interface QoderQuota {
   unit: string
 }
 
+/**
+ * A named grant of credits that expires on its own schedule, reported in the
+ * international upstream's `dedicatedResourcePackages`.
+ */
+export interface QoderDedicatedResourcePackage extends QoderQuota {
+  /** Upstream package id (`01a1426f-…`), when reported. */
+  id?: string | undefined
+  /** Raw upstream name — usually an opaque campaign code, not display copy. */
+  name?: string | undefined
+  /** Localized display title from `displayLabels`, when the upstream sends one. */
+  title?: { zh?: string | undefined; en?: string | undefined } | undefined
+  /** This package's own expiry, ISO; not the account's cycle-level date. */
+  expiresAt?: string | undefined
+  /** Whether the upstream says the package is currently usable. */
+  available?: boolean | undefined
+  /** Upstream lifecycle marker (`QUOTA_DETAIL_STATUS_ACTIVE`). */
+  status?: string | undefined
+}
+
 export interface QoderQuotaUsage {
   userQuota?: QoderQuota | undefined
   orgResourcePackage?: QoderQuota | undefined
-  /**
-   * Credits granted on top of the plan — the daily campaign's 100, for one.
-   *
-   * A separate bucket upstream reports beside `userQuota`; it carries its own
-   * total and remaining, so leaving it out made the card show fewer packages
-   * than the account actually holds (two on the web, one here).
-   */
+  /** Credits granted on top of the plan, with their own total and remaining. */
   addOnQuota?: QoderQuota | undefined
+  /** Campaign grants carrying their own expiry and display title. */
+  dedicatedResourcePackages?: readonly QoderDedicatedResourcePackage[] | undefined
   totalUsagePercentage?: number | undefined
   isQuotaExceeded?: boolean | undefined
   expiresAt?: string | undefined

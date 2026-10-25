@@ -1,19 +1,10 @@
 /**
  * The two Qoder products this one plugin serves.
  *
- * Both are the same upstream in different regions, and they differ by route
- * (endpoints per `src/qoder/transport/endpoints.ts`), file identity, and display
- * identity. Everything that varies between them is collected here as one
- * descriptor, so no module has to carry its own `if (international)` branch and
- * a third variant would be a data change rather than a refactor.
- *
- * Each variant holds its own Personal Access Token: a token minted on
- * qoder.com does not work against the China deployment and vice versa, and the
- * two files, routes, and catalogs never cross.
- *
- * This module is host-side (it names files and routes). The browser half takes
- * the same ids and routes from the Node-free `status-paths.ts`, which stays the
- * single source shared by both halves.
+ * Same upstream in different regions; everything that varies (routes, file and
+ * display identity) is one descriptor, so a third variant stays a data change.
+ * Each variant holds its own PAT: tokens and files never cross between regions.
+ * The browser half reads the same ids and routes from `status-paths.ts`.
  *
  * @module dsh-qoder-connect/variants
  */
@@ -47,10 +38,8 @@ export interface QoderVariant {
   probeFilename: string
   /**
    * Basename of the plugin-owned saved-catalog file under the data dir.
-   *
-   * One per variant, like the probe records: the two deployments disagree about
-   * rates, windows, and even which models exist for a shared id, so a catalog
-   * saved from one must never be served as the other's.
+   * One per variant: the deployments disagree about rates, windows, and models,
+   * so a catalog saved from one must never be served as the other's.
    */
   catalogFilename: string
   /** Same-origin status route consumed by this variant's card. */

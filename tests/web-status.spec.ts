@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { QoderCredentialStore, QODER_PAT_ENV_CN, QODER_PAT_ENV_GLOBAL } from '../src/auth.ts'
+import { qoderCredentialId, QoderCredentialStore, QODER_PAT_ENV_CN, QODER_PAT_ENV_GLOBAL } from '../src/auth.ts'
 import { type QoderModelInfo } from '../src/catalog.ts'
 import { qoderStatusHandler, qoderWebStatus, QODER_STATUS_PATH, type QoderStatusRouteOptions } from '../src/web-status.ts'
 import { CHINA_VARIANT } from '../src/variants.ts'
@@ -123,7 +123,15 @@ describe('signed-in document assembly', () => {
     expect(doc.status).toBe('signed-in')
     if (doc.status !== 'signed-in') return // narrowing for the asserts below
     expect(doc.region).toBe('china')
-    expect(doc.pat).toEqual({ source: 'card', savedAtMs: SAVED_AT, patTail: 'abcd' })
+    expect(doc.pat).toMatchObject({ source: 'card', savedAtMs: SAVED_AT, patTail: 'abcd' })
+    // The saved-token list (redacted) rides the same document: the card's
+    // account select is built from it.
+    expect(doc.activePatId).toBe(qoderCredentialId('pt-secret-abcd'))
+    expect(doc.patProfiles).toEqual([{
+      id: qoderCredentialId('pt-secret-abcd'),
+      patTail: 'abcd',
+      savedAtMs: SAVED_AT,
+    }])
     expect(doc.authKey).toBe('auth-key-1')
     expect(doc.credits).toMatchObject({ total: 42, totalSize: 100 })
     // The token material never crosses to the browser.
@@ -210,8 +218,7 @@ describe('signed-out document', () => {
 
 describe('model snapshot reporting', () => {
   /**
-   * The card needs every model's capacity and rate facts, verbatim and
-   * unfiltered: no rounding, no plugin-invented tiers, and no invented
+   * Capacity and rate facts ride verbatim: no rounding, no invented tiers, and no
    * numbers where the upstream was silent.
    */
   it('reports capacity, efforts, and price factor per row', async () => {

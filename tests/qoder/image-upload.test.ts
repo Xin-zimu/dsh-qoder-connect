@@ -235,8 +235,7 @@ test('degrades when the upload exceeds its deadline', async () => {
     })) as typeof fetch,
   })
 
-  // AbortSignal.timeout does not hold the event loop open, and the stalled
-  // fetch replacement has no socket to hold it either.
+  // AbortSignal.timeout holds nothing open, and the stalled fetch has no socket either.
   const keepAlive = setTimeout(() => {}, 1_000)
   try {
     const url = await uploader.resolveImageUrl(requestImage(), credentials)

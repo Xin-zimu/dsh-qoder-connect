@@ -17,43 +17,29 @@ MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDA8iMH5c02LilrsERw9t6Pv5Nc
 XcW+ML9FoCI6AOvOzwIDAQAB
 -----END PUBLIC KEY-----`
 
-export const qoderIdeVersion = '1.1.47'
+// Injected at build time from package.json's `qoderIdeVersion`; the fallback
+// string is what tests (running without the build define) and dev runs see.
+// Keep the fallback in sync with package.json — it is the single source of truth.
+declare const __QODER_IDE_VERSION__: string | undefined
+export const qoderIdeVersion: string =
+  typeof __QODER_IDE_VERSION__ === 'string' ? __QODER_IDE_VERSION__ : '1.1.77'
 export const qoderClientType = '5'
 /**
- * The desktop client identifier the campaign endpoints require.
- *
- * Measured against the live upstream: `/sash/api/v1/me/campaigns` answers
- * HTTP 200 with an EMPTY `campaigns` array when the caller presents the
- * generic {@link qoderClientType} (`5`), and returns the real list only when
- * it presents the desktop identifier `10`. A check-in built on the wrong
- * identifier looks healthy at the transport layer — status 200, no error —
- * while silently reporting "no campaign today" forever, so the campaign
- * paths must send this one explicitly.
+ * The desktop client identifier the campaign endpoints require; the generic
+ * {@link qoderClientType} yields 200 with an empty campaign list.
  */
 export const qoderDesktopClientType = '10'
-export const defaultUserAgent = `qoder/${qoderIdeVersion}`
+export const qoderUserAgent = `qoder/${qoderIdeVersion}`
 const qoderDataPolicy = 'disagree'
 const qoderLoginVersion = 'v2'
-/**
- * The `Cosy-Machineos` value for a platform/arch pair.
- *
- * `darwin` gets its own suffix: an earlier form only branched win32 vs. else,
- * so macOS — a primary Desktop-host platform — was reported upstream as
- * `x86_64_linux`/`aarch64_linux`. That value feeds the COSY signature headers,
- * so mislabeling the OS can trip upstream OS-based rollout or risk controls.
- */
-export function qoderMachineOsFor(platform: NodeJS.Platform, arch: string): string {
-  const machine = arch === 'arm64' ? 'aarch64' : 'x86_64'
-  switch (platform) {
-    case 'win32':
-      return `${machine}_windows`
-    case 'darwin':
-      return `${machine}_darwin`
-    default:
-      return `${machine}_linux`
-  }
-}
-const qoderMachineOs = qoderMachineOsFor(process.platform, process.arch)
+// Matches the official qodercli formula: <arch>_<platform>, where arch maps
+// arm64→aarch64, x64→x86_64, and platform is process.platform verbatim
+// (win32/darwin/linux). Verified against bundle h4e/uig assignments.
+const qoderMachineOs = `${
+  process.arch === 'arm64' ? 'aarch64'
+    : process.arch === 'x64' ? 'x86_64'
+      : process.arch
+}_${process.platform}`
 const qoderMachineTypeMagic = '5'
 
 export interface CosyCredentials {
@@ -109,6 +95,7 @@ export function buildAuthHeaders(
   body: Buffer | string | null,
   requestURL: string,
   creds: CosyCredentials,
+  correlation?: { requestId?: string, sessionId?: string },
 ): Record<string, string> {
   if (!creds.userID) {
     throw new Error('cosy: user id is empty')
@@ -153,9 +140,7 @@ export function buildAuthHeaders(
     .digest('hex')
   const bodyLen = body ? (Buffer.isBuffer(body) ? body.length : Buffer.from(body).length).toString() : '0'
 
-  // Only reached when a caller assembled credentials without an id: the
-  // default chain reads Qoder's own file and otherwise creates the plugin's
-  // seed inside its data directory — it no longer writes near $HOME.
+  // Reached only when a caller assembled credentials without an id.
   const machineID = creds.machineID || getMachineId()
 
   return {
@@ -177,6 +162,9 @@ export function buildAuthHeaders(
     'Cosy-Organization-Id': '',
     'Cosy-Organization-Tags': '',
     'Login-Version': qoderLoginVersion,
-    'X-Request-Id': crypto.randomUUID(),
+    // The upstream correlates a queue-status poll with its inference through
+    // these two headers; a poll passes the inference's ids, not fresh ones.
+    'X-Request-Id': correlation?.requestId ?? crypto.randomUUID(),
+    ...correlation?.sessionId === undefined ? {} : { 'X-Session-Id': correlation.sessionId },
   }
 }

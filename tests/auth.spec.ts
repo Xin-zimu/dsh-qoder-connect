@@ -1,10 +1,12 @@
 import { createHash } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   patTail,
+  qoderCredentialId,
   qoderCredentialIdentity,
   qoderOwnAuthPath,
   QoderCredentialStore,
@@ -14,6 +16,7 @@ import {
   type AuthLogger,
 } from '../src/auth.ts'
 import {
+  configurePluginPaths,
   qoderPluginDataDir,
   QODER_DATA_DIR_ENV,
   QODER_DATA_DIR_NAME,
@@ -21,15 +24,25 @@ import {
 import { CHINA_VARIANT, GLOBAL_VARIANT, type QoderVariant } from '../src/variants.ts'
 
 /**
- * The Qoder credential store: one Personal Access Token per variant, one small
- * JSON document on disk, and an environment fallback. There is no device flow,
- * no refresh, and no expiry — so the cases below are exactly those three
- * surfaces plus the stale-file refusal the WorkBuddy era leaves behind.
+ * The Qoder credential store: a list of PATs per variant, one active, one small
+ * JSON document on disk, and an environment fallback. No device flow, no refresh,
+ * no expiry — plus the stale-file refusal and the v2 → v3 migration.
  */
 
 const CLEANUP: (() => Promise<void>)[] = []
 
+/** The running copy's package root: what `paths.ts` compares a profile's installed copy against. */
+const REPO_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
+
+/** A directory link, in the only flavour an unprivileged Windows process can make. */
+async function linkDir(target: string, path: string): Promise<void> {
+  await symlink(target, path, process.platform === 'win32' ? 'junction' : 'dir')
+}
+
 afterEach(async () => {
+  // Path resolution is module state set by the plugin's `apply()`; clear it so a
+  // reported profile cannot leak into the next case.
+  configurePluginPaths({ profileDir: undefined })
   await Promise.all(CLEANUP.splice(0).map(clean => clean()))
   vi.unstubAllEnvs()
 })
@@ -73,13 +86,15 @@ describe('QoderCredentialStore: file reading', () => {
     const savedAt = 1_792_128_236_868
     await writeFile(own, authDocument('pt-file-abc', savedAt))
     const credential = await storeAt(own).current()
-    expect(credential).toEqual({ pat: 'pt-file-abc', region: 'china', savedAtMs: savedAt, source: 'card' })
+    expect(credential).toMatchObject({ pat: 'pt-file-abc', region: 'china', savedAtMs: savedAt, source: 'card' })
+    // A v2 file is read as a one-entry list under a deterministic id.
+    expect(credential?.id).toBe(qoderCredentialId('pt-file-abc'))
   })
 
   it('drops a non-finite or absent savedAt rather than inventing one', async () => {
     const own = join(await tempDir(), 'own.json')
     await writeFile(own, JSON.stringify({ version: 2, pat: 'pt-x', region: 'china', savedAt: 'tomorrow' }))
-    await expect(storeAt(own).current()).resolves.toEqual({ pat: 'pt-x', region: 'china', source: 'card' })
+    await expect(storeAt(own).current()).resolves.toMatchObject({ pat: 'pt-x', region: 'china', source: 'card' })
   })
 
   it('falls back to the variant region when the file names none valid', async () => {
@@ -213,16 +228,22 @@ describe('QoderCredentialStore: environment fallback', () => {
 })
 
 describe('QoderCredentialStore: save, clear, and the on-disk layout', () => {
-  it('writes the v2 document and reads it back', async () => {
+  it('writes the v3 document and reads it back', async () => {
     const dir = await tempDir()
     const own = join(dir, 'own.json')
     const before = Date.now()
     const credential = await storeAt(own).save('  pt-saved-99  ')
     const document = JSON.parse(await readFile(own, 'utf8')) as Record<string, unknown>
-    expect(Object.keys(document).sort()).toEqual(['pat', 'region', 'savedAt', 'version'])
-    expect(document).toMatchObject({ version: 2, pat: 'pt-saved-99', region: 'china' })
-    expect(typeof document.savedAt).toBe('number')
-    expect(document.savedAt as number).toBeGreaterThanOrEqual(before)
+    expect(Object.keys(document).sort()).toEqual(['activeId', 'credentials', 'version'])
+    expect(document).toMatchObject({ version: 3 })
+    expect(document['activeId']).toBe(qoderCredentialId('pt-saved-99'))
+    expect(document['credentials']).toEqual([{
+      id: qoderCredentialId('pt-saved-99'),
+      pat: 'pt-saved-99',
+      region: 'china',
+      savedAt: expect.any(Number),
+    }])
+    expect((document['credentials'] as { savedAt: number }[])[0]!.savedAt).toBeGreaterThanOrEqual(before)
     expect(credential).toMatchObject({ pat: 'pt-saved-99', source: 'card' })
     await expect(storeAt(own).current()).resolves.toMatchObject({ pat: 'pt-saved-99' })
   })
@@ -267,6 +288,80 @@ describe('QoderCredentialStore: save, clear, and the on-disk layout', () => {
   })
 })
 
+describe('QoderCredentialStore: multiple saved PATs', () => {
+  it('saves several tokens, keeps the newest active, and never lists a token', async () => {
+    const own = join(await tempDir(), 'own.json')
+    const store = storeAt(own)
+    const first = await store.add('pt-first-1111')
+    const second = await store.add('pt-second-2222')
+    expect(await store.entries()).toHaveLength(2)
+    await expect(store.current()).resolves.toMatchObject({ pat: 'pt-second-2222' })
+    const status = await store.status()
+    expect(status.activeId).toBe(second.id)
+    expect(status.profiles).toHaveLength(2)
+    expect(status.profiles?.map(profile => profile.patTail).sort()).toEqual(['1111', '2222'])
+    // The redacted document is what the browser receives; no full token in it.
+    expect(JSON.stringify(status)).not.toContain('pt-first-1111')
+    expect(JSON.stringify(status)).not.toContain('pt-second-2222')
+    expect(first.id).not.toBe(second.id)
+  })
+
+  it('activates another saved token without touching the others', async () => {
+    const own = join(await tempDir(), 'own.json')
+    const store = storeAt(own)
+    const first = await store.add('pt-first-1111')
+    await store.add('pt-second-2222')
+    await store.activate(first.id)
+    await expect(store.current()).resolves.toMatchObject({ pat: 'pt-first-1111' })
+    expect(await store.entries()).toHaveLength(2)
+    // A dangling pointer is not an error either: the first entry answers.
+    await expect(store.activate('no-such-id')).resolves.toBeUndefined()
+    await expect(store.current()).resolves.toMatchObject({ pat: 'pt-first-1111' })
+  })
+
+  it('re-saving the same token updates one entry instead of duplicating it', async () => {
+    const own = join(await tempDir(), 'own.json')
+    const store = storeAt(own)
+    const first = await store.add('pt-same-1234', '工作号')
+    const again = await store.add('pt-same-1234')
+    expect(again.id).toBe(first.id)
+    expect(await store.entries()).toHaveLength(1)
+    const status = await store.status()
+    // The label survives a token re-save that supplies none.
+    expect(status.profiles?.[0]?.label).toBe('工作号')
+    expect(status.profiles?.[0]?.patTail).toBe('1234')
+  })
+
+  it('remove drops one entry, moves the pointer, and deletes the file with the last one', async () => {
+    const dir = await tempDir()
+    const own = join(dir, 'own.json')
+    const store = storeAt(own)
+    const first = await store.add('pt-first-1111')
+    const second = await store.add('pt-second-2222')
+    await expect(store.remove(second.id)).resolves.toMatchObject({ pat: 'pt-second-2222' })
+    await expect(store.current()).resolves.toMatchObject({ pat: 'pt-first-1111' })
+    await expect(store.remove('no-such-id')).resolves.toBeUndefined()
+    await store.remove(first.id)
+    await expect(store.current()).resolves.toBeUndefined()
+    // No entries is "signed out": the file itself is gone, so the environment
+    // fallback is visible again.
+    expect(await readdir(dir)).toEqual([])
+  })
+
+  it('rewrites a v2 file as a list on the first mutation, keeping the token', async () => {
+    const own = join(await tempDir(), 'own.json')
+    await writeFile(own, authDocument('pt-legacy-0001'))
+    const store = storeAt(own)
+    const added = await store.add('pt-new-0002')
+    const document = JSON.parse(await readFile(own, 'utf8')) as Record<string, unknown>
+    expect(document['version']).toBe(3)
+    expect(document['activeId']).toBe(added.id)
+    const credentials = document['credentials'] as { pat: string }[]
+    expect(credentials.map(entry => entry.pat).sort()).toEqual(['pt-legacy-0001', 'pt-new-0002'])
+    await expect(store.current()).resolves.toMatchObject({ pat: 'pt-new-0002' })
+  })
+})
+
 describe('QoderCredentialStore: redacted status', () => {
   it('summarizes a stored token without ever carrying it', async () => {
     const dir = await tempDir()
@@ -278,7 +373,18 @@ describe('QoderCredentialStore: redacted status', () => {
       state: 'configured',
       region: 'china',
       filePath: own,
-      pat: { source: 'card', savedAtMs: expect.any(Number), patTail: 'abcd' },
+      pat: {
+        id: qoderCredentialId('pt-secret-abcd'),
+        source: 'card',
+        savedAtMs: expect.any(Number),
+        patTail: 'abcd',
+      },
+      activeId: qoderCredentialId('pt-secret-abcd'),
+      profiles: [{
+        id: qoderCredentialId('pt-secret-abcd'),
+        patTail: 'abcd',
+        savedAtMs: expect.any(Number),
+      }],
     })
     expect(JSON.stringify(status)).not.toContain('pt-secret-abcd')
   })
@@ -351,6 +457,28 @@ describe('plugin data directory', () => {
     expect(qoderPluginDataDir()).toBe(join(home, 'profiles', 'web', QODER_DATA_DIR_NAME))
   })
 
+  it('refuses a lone declaring profile that links its whole node_modules', async () => {
+    // The single-candidate branch skips the link test, so it must refuse a residual
+    // directory on its own.
+    const home = await tempDir()
+    const residual = join(home, 'profiles', 'residual')
+    await mkdir(join(home, 'profiles', 'other', 'node_modules'), { recursive: true })
+    await mkdir(residual, { recursive: true })
+    await writeFile(
+      join(residual, 'package.json'),
+      JSON.stringify({ dependencies: { 'dsh-qoder-connect': `link:${REPO_ROOT}` } }),
+    )
+    await linkDir(join(home, 'profiles', 'other', 'node_modules'), join(residual, 'node_modules'))
+
+    vi.stubEnv(QODER_DATA_DIR_ENV, '')
+    vi.stubEnv('DSH_HOME', home)
+    const warn = vi.fn()
+    configurePluginPaths({ profileDir: undefined, diagnostics: { warn } })
+    expect(qoderPluginDataDir()).toBe(join(home, QODER_DATA_DIR_NAME))
+    expect(warn).toHaveBeenCalledOnce()
+    expect(warn.mock.calls[0]![0]).toContain(residual)
+  })
+
   it('does not guess between two profiles that both declare it', async () => {
     const home = await tempDir()
     for (const name of ['web', 'desktop']) {
@@ -362,9 +490,97 @@ describe('plugin data directory', () => {
     }
     vi.stubEnv(QODER_DATA_DIR_ENV, '')
     vi.stubEnv('DSH_HOME', home)
-    // Neither profile's installed copy resolves to this package, so writing a
-    // credential into a guess would be worse than the documented fallback.
+    const warn = vi.fn()
+    configurePluginPaths({ profileDir: undefined, diagnostics: { warn } })
+    // Neither profile resolves to this package, so a guess would be worse than the fallback.
     expect(qoderPluginDataDir()).toBe(join(home, QODER_DATA_DIR_NAME))
+    // The fallback is otherwise invisible: the user reads an empty status and concludes
+    // their credentials are gone, so say which profiles were considered.
+    expect(warn).toHaveBeenCalledOnce()
+    expect(warn.mock.calls[0]![0]).toContain(join(home, 'profiles', 'web'))
+    expect(warn.mock.calls[0]![0]).toContain(join(home, 'profiles', 'desktop'))
+  })
+
+  it('follows the profile the host reports, even one that declares nothing', async () => {
+    const home = await tempDir()
+    const reported = join(home, 'profiles', 'desktop')
+    await mkdir(reported, { recursive: true })
+    // A candidate discovery WOULD find, to prove the host's answer is not
+    // merely a tie-break among discovered profiles.
+    await mkdir(join(home, 'profiles', 'web'), { recursive: true })
+    await writeFile(
+      join(home, 'profiles', 'web', 'package.json'),
+      JSON.stringify({ dependencies: { 'dsh-qoder-connect': 'link:E:/elsewhere' } }),
+    )
+
+    vi.stubEnv(QODER_DATA_DIR_ENV, '')
+    vi.stubEnv('DSH_HOME', home)
+    configurePluginPaths({ profileDir: reported })
+    expect(qoderPluginDataDir()).toBe(join(reported, QODER_DATA_DIR_NAME))
+  })
+
+  it('ignores a host report that names no directory', async () => {
+    const home = await tempDir()
+    await mkdir(join(home, 'profiles', 'web'), { recursive: true })
+    await writeFile(
+      join(home, 'profiles', 'web', 'package.json'),
+      JSON.stringify({ dependencies: { 'dsh-qoder-connect': 'link:E:/elsewhere' } }),
+    )
+    vi.stubEnv(QODER_DATA_DIR_ENV, '')
+    vi.stubEnv('DSH_HOME', home)
+    // An empty string is not a directory: taking it would resolve the data dir
+    // into the process's working directory.
+    configurePluginPaths({ profileDir: '   ' })
+    expect(qoderPluginDataDir()).toBe(join(home, 'profiles', 'web', QODER_DATA_DIR_NAME))
+  })
+
+  it('prefers a real install over a residual profile that links its whole node_modules', async () => {
+    // Two profiles can declare the plugin and realpath-resolve to this package, so the
+    // winner must not be readdir order: the residual name here sorts FIRST.
+    const home = await tempDir()
+    const residual = join(home, 'profiles', 'aaa-residual')
+    const real = join(home, 'profiles', 'desktop')
+    await mkdir(join(real, 'node_modules'), { recursive: true })
+    await mkdir(residual, { recursive: true })
+    for (const dir of [residual, real]) {
+      await writeFile(
+        join(dir, 'package.json'),
+        JSON.stringify({ dependencies: { 'dsh-qoder-connect': `link:${REPO_ROOT}` } }),
+      )
+    }
+    await linkDir(REPO_ROOT, join(real, 'node_modules', 'dsh-qoder-connect'))
+    await linkDir(join(real, 'node_modules'), join(residual, 'node_modules'))
+
+    vi.stubEnv(QODER_DATA_DIR_ENV, '')
+    vi.stubEnv('DSH_HOME', home)
+    configurePluginPaths({ profileDir: undefined })
+    expect(qoderPluginDataDir()).toBe(join(real, QODER_DATA_DIR_NAME))
+  })
+
+  it('reports an unbreakable tie instead of deciding it by directory order', async () => {
+    const home = await tempDir()
+    const names = ['desktop', 'web']
+    for (const name of names) {
+      const dir = join(home, 'profiles', name)
+      await mkdir(join(dir, 'node_modules'), { recursive: true })
+      await writeFile(
+        join(dir, 'package.json'),
+        JSON.stringify({ dependencies: { 'dsh-qoder-connect': `link:${REPO_ROOT}` } }),
+      )
+      await linkDir(REPO_ROOT, join(dir, 'node_modules', 'dsh-qoder-connect'))
+    }
+    vi.stubEnv(QODER_DATA_DIR_ENV, '')
+    vi.stubEnv('DSH_HOME', home)
+    const warn = vi.fn()
+    configurePluginPaths({ profileDir: undefined, diagnostics: { warn } })
+
+    const resolved = qoderPluginDataDir()
+    // Which one wins is order-dependent by construction; what must NOT happen is
+    // that it happens silently.
+    expect(names.map(name => join(home, 'profiles', name, QODER_DATA_DIR_NAME))).toContain(resolved)
+    expect(warn).toHaveBeenCalledOnce()
+    expect(warn.mock.calls[0]![0]).toContain(join(home, 'profiles', 'web'))
+    expect(warn.mock.calls[0]![0]).toContain(join(home, 'profiles', 'desktop'))
   })
 
   it('falls back under the Harness home when no profile can be discovered', () => {

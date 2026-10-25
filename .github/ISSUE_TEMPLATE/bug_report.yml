@@ -1,0 +1,88 @@
+name: "🐛 Bug 报告"
+description: 仅受理可复现的 bug；使用咨询、求教、风险评估类问题不予回复
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        本仓库只处理**可复现的 bug**。安装、PAT 配置、额度/签到用法、账号风险评估等，请自行阅读 README 与 Releases；这类内容不作答。
+
+        **请勿粘贴 PAT、cookie 或其他凭证**，日志中的 token 请先打码。
+
+  - type: checkboxes
+    id: prerequisites
+    attributes:
+      label: 提交前确认（必须全部勾选，否则无法提交）
+      options:
+        - label: 我已阅读 README 与最新 Releases，确认这不是已有说明的行为或已修复的问题
+          required: true
+        - label: 我提交的是可复现的 bug，而不是使用咨询或风险评估
+          required: true
+
+  - type: input
+    id: plugin-version
+    attributes:
+      label: 插件版本
+      placeholder: 例如 0.2.9-alpha.2（在设置卡片或 package.json 中查看）
+    validations:
+      required: true
+
+  - type: input
+    id: dsh-version
+    attributes:
+      label: DSH 版本
+      placeholder: 例如 0.2.1-rc.1
+    validations:
+      required: true
+
+  - type: input
+    id: dsh-profile
+    attributes:
+      label: DSH profile
+      description: 插件数据按 profile 独立存放（web / desktop / tui 各一份），请填实际使用的那个
+      placeholder: 例如 web / desktop / tui
+    validations:
+      required: true
+
+  - type: dropdown
+    id: variant
+    attributes:
+      label: 涉及的变体
+      options:
+        - 国内版（qoder）
+        - 国际版（qoder-global）
+        - 两者都涉及
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: 操作系统
+      placeholder: 例如 Windows 11 / macOS 15 / Ubuntu 24.04
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 发生了什么
+      description: 期望行为 vs 实际行为；能稳定复现的，写清复现步骤
+      placeholder: |
+        1. 打开 …
+        2. 点击 …
+        3. 期望 …，实际 …
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 报错 / 日志
+      description: 粘贴明文日志（不要只发截图），敏感信息请先打码
+      render: shell
+      placeholder: 粘贴日志…
+    validations:
+      required: false

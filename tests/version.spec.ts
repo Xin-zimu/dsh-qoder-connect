@@ -3,12 +3,9 @@ import { describe, expect, it } from 'vitest'
 import { QODER_CONNECT_VERSION } from '../src/version.ts'
 
 /**
- * Guard the single-source-of-truth version contract:
- * - the build-time define (`__DSH_QODER_VERSION__`, see tsdown.config.ts)
- *   injects package.json's version into src/version.ts;
- * - if that define is ever dropped, version.ts falls back to '0.0.0-dev' and
- *   this test goes red, flagging the regression (and the drift it would cause
- *   in heartbeat / CLI output).
+ * Guard the single-source-of-truth version contract: the build-time define
+ * (`__DSH_QODER_VERSION__`) injects package.json's version into src/version.ts, and
+ * dropping it makes version.ts fall back to '0.0.0-dev' — which this test refuses.
  */
 describe('package version sync', () => {
   it('QODER_CONNECT_VERSION matches package.json', () => {
@@ -23,16 +20,10 @@ describe('package version sync', () => {
   })
 
   /**
-   * The define reads package.json at BUILD time, so a release that bumps the
-   * version after building ships artifacts reporting the old one. Skipped on
-   * a fresh clone before the first build.
-   *
-   * The version literal may land in `index.js` or in a shared chunk beside it
-   * (rollup decides which, and the chunk's hashed filename changes with the
-   * module graph), so every emitted `.js` is scanned rather than one guessed
-   * filename. Searching all of them is what keeps this guard meaningful: the
-   * assertion is "the shipped artifacts carry this version", not "the bundle
-   * was laid out this way".
+   * The define reads package.json at BUILD time, so bumping the version after a
+   * build ships artifacts reporting the old one. The literal may land in `index.js`
+   * or a shared chunk beside it, so every emitted `.js` is scanned rather than one
+   * guessed filename; skipped on a fresh clone before the first build.
    */
   it('built lib/ artifacts carry the current version when present', () => {
     const libDir = new URL('../lib/', import.meta.url)

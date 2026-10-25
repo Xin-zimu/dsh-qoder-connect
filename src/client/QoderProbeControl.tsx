@@ -1,21 +1,12 @@
 /**
  * Per-model reasoning-effort entry beside the Composer's model selector.
  *
- * Interaction follows the Fast Mode control `dsh-codex-connect` ships in this
- * same seat, which is the established shape for composer chrome here:
- *
- * - a **static inline label** next to the icon names the feature ("Reasoning
- *   levels"), set smaller and dimmer than the surrounding chrome so it reads as
- *   an annotation on the icon. It never carries state: the verified levels
- *   already appear in the model dropdown (the adapter exposes them as
- *   selectable efforts), so repeating them here would duplicate the real answer
- *   and make the label's width jump as results change.
- * - a **hover/focus tooltip** carries the state and the click's purpose, the way
- *   Fast Mode's tooltip explains its current speed.
- * - the **confirmation** is a small bubble anchored to the control, not a
- *   `window.confirm`. Probing spends real credit, so a confirmation stays — but
- *   it belongs next to the thing it acts on, sized to one line plus two small
- *   buttons.
+ * Interaction follows the Fast Mode control `dsh-codex-connect` ships in this same
+ * seat: a static inline label names the feature and never carries state (the
+ * verified levels already appear in the model dropdown), a hover/focus tooltip
+ * carries the state and the click's purpose, and the confirmation is a bubble
+ * anchored to the control rather than a `window.confirm` — probing spends credit,
+ * so a confirmation stays, sized to one line plus two small buttons.
  *
  * @module dsh-qoder-connect/client/probe-control
  */
@@ -33,11 +24,8 @@ export interface QoderProbeControlProps extends QoderPluginCardInjected {
 }
 
 /**
- * The card (and therefore the routes) a selected provider belongs to.
- *
- * The control serves both Qoder providers from one seat, so the provider id
- * is what selects the status and probe endpoints. Returning `undefined` for any
- * other provider is what keeps the icon off every non-Qoder model.
+ * The card (and therefore the routes) a selected provider belongs to; `undefined`
+ * for any other provider is what keeps the icon off every non-Qoder model.
  */
 export function cardVariantFor(provider: string): QoderCardVariant | undefined {
   return QODER_CARD_VARIANTS.find(card => card.id === provider)
@@ -47,9 +35,9 @@ export function cardVariantFor(provider: string): QoderCardVariant | undefined {
 const RECONCILE_MS = 60_000
 
 
-// The host slot's baseline sits a touch high and leaves a full inter-control gap
-// before the model picker. Nudge only this annotation down and inward so it
-// reads as part of the selected model rather than a separate toolbar item.
+// The host slot's baseline sits slightly high with a full inter-control gap before
+// the model picker; nudge this annotation down and inward so it reads as part of
+// the selected model.
 const wrapperStyle: CSSProperties = {
   display: 'inline-flex',
   position: 'relative',
@@ -75,11 +63,7 @@ const buttonStyle: CSSProperties = {
   cursor: 'pointer',
 }
 
-/**
- * The inline label. Smaller and dimmer than the surrounding chrome on purpose:
- * it names the feature, so it should read as an annotation attached to the icon
- * rather than compete with the adjacent model selector.
- */
+/** The inline label: smaller and dimmer, an annotation on the icon, not a peer of the selector. */
 const labelStyle: CSSProperties = {
   fontSize: 11,
   lineHeight: '16px',
@@ -135,13 +119,9 @@ const confirmButtonStyle: CSSProperties = {
   cursor: 'pointer',
 }
 /**
- * Primary action inside the confirmation bubble.
- *
- * The fill and its text colour must come as a pair: `brand-primary` resolves to
- * a light accent in this theme, so hardcoding `color: #fff` on top of it renders
- * white-on-white. `button-primary-fill` + `label-primary-foreground` is the
- * theme's own pair for exactly this, and is what `dsh-codex-connect` uses for
- * the same job.
+ * Primary action inside the confirmation bubble. Fill and text colour must come as
+ * a pair: `brand-primary` is a light accent, so hardcoding `#fff` renders
+ * white-on-white.
  */
 const primaryButtonStyle: CSSProperties = {
   ...confirmButtonStyle,
@@ -151,10 +131,8 @@ const primaryButtonStyle: CSSProperties = {
 }
 
 /**
- * Result note: a single line + a dismiss button, anchored to the control's
- * right side. Smaller than the confirmation bubble because it carries an
- * *outcome*, not a *decision* — the work is done, the user only has to read
- * and dismiss.
+ * Result note: one line plus a dismiss button, smaller than the confirmation —
+ * it carries an OUTCOME, not a decision.
  */
 const noteStyle: CSSProperties = {
   position: 'absolute',
@@ -175,9 +153,8 @@ const noteStyle: CSSProperties = {
   whiteSpace: 'nowrap',
 }
 /**
- * The note's dismiss action. Outlined rather than bare text: inside an already
- * bordered bubble, an unbordered word does not read as something you can click.
- * Matches the outlined pill convention the plugin's other secondary actions use.
+ * The note's dismiss action: outlined, not bare text — inside an already bordered
+ * bubble an unbordered word does not read as clickable.
  */
 const noteDismissStyle: CSSProperties = {
   padding: '2px 8px',
@@ -191,10 +168,7 @@ const noteDismissStyle: CSSProperties = {
   cursor: 'pointer',
 }
 
-/**
- * The feature's static inline label. Deliberately not a state readout — see the
- * module comment.
- */
+/** The feature's static inline label — deliberately not a state readout (see the module comment). */
 function useLabel(t: QoderPluginCardInjected['t']): string {
   return t('probeLabel')
 }
@@ -206,15 +180,11 @@ function resultFor(status: QoderWebStatus, model: string): QoderWebProbeModel | 
 }
 
 /**
- * The one-line tooltip: current state first, then what a click does — the same
- * two-part shape Fast Mode uses.
+ * The one-line tooltip: current state first, then what a click does.
  *
- * A recorded result outranks a remembered failure. `failed` only means "the last
- * run from this control did not complete"; the host can record a result for the
- * same model at any time (a detection started from the settings card, another
- * conversation, or a finished sweep), and the levels the user paid for are the
- * more useful answer than the stale failure. Failure copy is what remains when
- * there is no result to report.
+ * A recorded result outranks a remembered failure: `failed` only means "the last
+ * run from this control did not complete", while the host may have recorded a
+ * result for the same model at any time.
  */
 function tooltipText(
   t: QoderPluginCardInjected['t'],
@@ -238,15 +208,12 @@ function tooltipText(
 export function QoderProbeControl({ directory, t }: QoderProbeControlProps) {
   const subscribe = useCallback((listener: () => void) => directory.subscribe(listener), [directory])
   const snapshot = useCallback(() => directory.getSnapshot(), [directory])
-  // `current` is `ModelSelection | null` (the directory contract), so the guard
-  // must cover null too — `=== undefined` let a null selection through and the
-  // `.provider` read crashed the seat on every load ("slot entry crashed in
-  // 'conversation.input.right'").
+  // `current` is `ModelSelection | null`, so the guard must cover null too:
+  // `=== undefined` let a null selection through and `.provider` crashed the seat.
   const selection = useSyncExternalStore(subscribe, snapshot, snapshot).current
   const card = selection == null ? undefined : cardVariantFor(selection.provider)
-  // `card` identifies both the variant and its routes: a selection under either
-  // provider resolves to exactly one card's status/probe pair, so the control
-  // can never read one variant's state while probing the other.
+  // `card` identifies both the variant and its routes, so the control can never
+  // read one variant's state while probing the other.
   const key = card === undefined || selection == null ? undefined : `${card.id}:${selection.model}`
   // A new selection gets fresh state; a late response cannot target the new model.
   return card === undefined || selection == null || key === undefined
@@ -264,8 +231,8 @@ function ModelProbe({ model, card, label, t }: {
   const [confirming, setConfirming] = useState(false)
   const [tooltipVisible, setTooltipVisible] = useState(false)
   const [failed, setFailed] = useState(false)
-  // Only an explicit detection response opens a note. Background reads and
-  // remounts never replay stored results; no persisted "seen" marks are needed.
+  // Only an explicit detection response opens a note; background reads and
+  // remounts never replay stored results.
   const [note, setNote] = useState<QoderWebProbeModel>()
   const inFlight = useRef(false)
   const mounted = useRef(false)
@@ -281,11 +248,9 @@ function ModelProbe({ model, card, label, t }: {
     })
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
     /*
-     * A 200 does not promise a status document: the body may be empty, literal
-     * `null`, or a non-JSON page. Storing that unchecked would put a value in
-     * state that `resultFor` dereferences on the next render, so it is validated
-     * here with the same predicate the settings card uses. A rejection is left to
-     * the callers below, which already degrade quietly.
+     * A 200 does not promise a status document: the body may be empty, `null`, or a
+     * non-JSON page. Validate it with the same predicate the settings card uses, so
+     * `resultFor` never dereferences garbage.
      */
     const value: unknown = await response.json().catch(() => undefined)
     if (!isQoderWebStatus(value)) throw new Error(t('statusResponseInvalid'))
@@ -314,8 +279,8 @@ function ModelProbe({ model, card, label, t }: {
   const key = status?.status === 'signed-in' ? status.probeKey : undefined
   const result = status === undefined ? undefined : resultFor(status, model)
   const eligible = probe?.candidates.includes(model) === true
-  // Once a model has been detected it leaves the candidate list, so keep the
-  // entry visible for it: that is the case the tooltip reports a result in.
+  // A detected model leaves the candidate list, so keep its entry visible: that
+  // is the case the tooltip reports a result in.
   const visible = eligible || result !== undefined
 
   // A recorded result answers the question a remembered failure was about, so
@@ -349,9 +314,8 @@ function ModelProbe({ model, card, label, t }: {
         || !Array.isArray(body.efforts) || !body.efforts.every(effort => typeof effort === 'string')) {
         throw new Error('probe failed')
       }
-      // This response belongs to the explicit click, even when the host reused
-      // an older cached result. Do not wait for /status (which fetches credit),
-      // or infer completion from wall-clock timestamps and background polls.
+      // This response belongs to the explicit click, even when the host reused a
+      // cached result: no status poll, no wall-clock inference.
       if (mounted.current) {
         const completed: QoderWebProbeModel = {
           id: model, name: model, validation: body.validation,
@@ -372,10 +336,8 @@ function ModelProbe({ model, card, label, t }: {
 
   const text = tooltipText(t, model, { busy, result, failed })
   const disabled = busy || probe?.running === true || key === undefined
-  // Both bubbles and the tooltip anchor to the same spot above the control, so
-  // only one may be open at a time. The confirmation and the result note both
-  // suppress the tooltip: leaving it visible would overlap them, and the note
-  // already states the same outcome the tooltip would.
+  // Both bubbles and the tooltip anchor above the control, so only one may be open:
+  // the confirmation and the note both suppress the tooltip.
   const showTooltip = tooltipVisible && !confirming && note === undefined
 
   return (

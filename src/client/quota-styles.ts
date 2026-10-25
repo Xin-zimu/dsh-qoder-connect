@@ -1,15 +1,11 @@
 /**
  * Stylesheet for the Qoder quota surfaces (the sidebar footer card and the
- * dashboard it opens) — a direct translation of commandcode's panel stylesheet
- * (src/client/panel-styles.ts), which the user held up as the reference look.
- * Classes are `qdp-` prefixed to stay clear of commandcode's `ccp-` set: both
- * plugins inject GLOBAL CSS into the same document, so the prefixes must not
- * collide.
+ * dashboard it opens). Classes are `qdp-` prefixed: other plugins inject global
+ * CSS into the same document, so prefixes must not collide.
  *
- * Same contract as the original: returned as a string (no DOM side effects at
- * import time), installed once by the client entry keyed by `data-plugin-css`,
- * and removed when the plugin's fiber unwinds. Every colour comes from a
- * harness theme alias with a neutral fallback.
+ * Returned as a string (no DOM side effects at import time), installed once by
+ * the client entry keyed by `data-plugin-css`, and removed when the plugin's
+ * fiber unwinds. Every colour comes from a harness theme alias.
  */
 
 /** Stylesheet id (the `data-plugin-css` value that makes injection idempotent). */
@@ -34,19 +30,10 @@ export const QUOTA_CSS = `
 /* ------------------------------------------------- sidebar footer card */
 /* The shell's foot area renders this list ABOVE the Settings seat. The shell
    supplies no chrome: the entry is the button. Deliberately quiet — a surface
-   beside Settings should read as part of the column — one hover step and a
-   hairline border, exactly like commandcode's card.
-
-   The shell's container is a flex ROW whose occupants each declare a
-   full-width line, so as a row it overflows the column. The fix is the same
-   load-bearing anchored rule commandcode ships (their issue #48): force the
-   sidebar's footer-action container into a column, anchored to "_footArea"
-   because "footerActions" is also used by the ask-user-question dialog — an
-   unanchored rule would stack THAT dialog's buttons too. Anchoring keeps the
-   fix scoped to the sidebar; the descendant combinator survives a wrapper
-   appearing between the two. The rule is idempotent when commandcode is also
-   installed (same selector, same declaration) and makes this plugin
-   self-sufficient when it is not. */
+   The shell lays the sidebar footer as a flex row, so it overflows the column.
+   Force a column, anchored to "_footArea" because "footerActions" is also used
+   by the ask-user-question dialog; same rule commandcode ships, idempotent when
+   both are installed. */
 [class*="_footArea"] [class*="_footerActions"]{flex-direction:column}
 .qdp-foot{box-sizing:border-box;flex:0 0 auto;width:100%;min-width:0;font:inherit;color:var(--dsw-alias-label-secondary);text-align:left;cursor:pointer;background:0 0;border:1px solid transparent;border-radius:10px;flex-direction:column;gap:6px;margin:0 0 4px;padding:8px;display:flex}
 .qdp-foot:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover);border-color:var(--dsw-alias-border-l2)}
@@ -69,7 +56,9 @@ export const QUOTA_CSS = `
 .qdp-footBar{display:block;background:var(--dsw-alias-bg-layer-2);border-radius:999px;height:5px;overflow:hidden}
 .qdp-footFill{display:block;background:var(--dsw-alias-brand-primary);border-radius:999px;height:100%;transition:width .3s ease}
 .qdp-footFillWarn{background:var(--dsw-alias-state-error-primary)}
-.qdp-footPct{flex:none;width:34px;color:var(--dsw-alias-label-secondary);text-align:right;font-size:11px;line-height:16px;font-variant-numeric:tabular-nums}
+/* 38px, not 34px: two-decimal copy is wider, and "99.61%" measures 36px in this
+   font. nowrap keeps a long value from wrapping the row into a second line. */
+.qdp-footPct{flex:none;width:38px;color:var(--dsw-alias-label-secondary);text-align:right;font-size:11px;line-height:16px;font-variant-numeric:tabular-nums;white-space:nowrap}
 
 /* The 56px rail: one icon button on the shell's own rail geometry (36px cell),
    so the collapsed column keeps a single glyph like its siblings. */

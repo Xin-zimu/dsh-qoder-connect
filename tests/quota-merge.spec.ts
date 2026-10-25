@@ -1,25 +1,20 @@
 import { describe, expect, it } from 'vitest'
-import { clampPercent, mergeCreditAccounts, sortPackageRows, visibleQuotaGroups } from '../src/client/quota-merge.ts'
+import { accountDisplayName, clampPercent, currentLanguage, formatExpiryText, formatPercentText, mergeCreditAccounts, setActiveLanguage, sortPackageRows, usedPercentText, visibleQuotaGroups } from '../src/client/quota-merge.ts'
 import type { QuotaGroup } from '../src/client/quota-merge.ts'
 import type { QoderWebCreditAccount } from '../src/status-paths.ts'
 
 /**
- * The sidebar card's merge layer over the Qoder credit answer. The upstream
- * reports one entry per purchased package (and Qoder stacks repeated purchases
- * of the same package name), so the overview row groups by NAME alone while
- * the itemised table keeps every row and only re-orders it. These cases pin the
- * rules the user ruled on: missing figures count as 0, unlimited is sticky, the
- * earliest expiry travels with the group, and first-seen package order is never
- * reshuffled by the merge.
+ * The sidebar card's merge layer over the Qoder credit answer: the upstream
+ * reports one entry per purchased package and stacks repeated purchases, so the
+ * overview row groups by NAME alone while the itemised table keeps every row and
+ * only re-orders it. Missing figures count as 0, unlimited is sticky, the earliest
+ * expiry travels with the group, and first-seen order is never reshuffled.
  *
- * Quota semantics this layer is written against (from `QoderWebCredits` in
- * `src/status-paths.ts`): `total` is the percentage of the cycle ALREADY USED
- * (`userQuota.percentage`), the card's headline — it is not a denominator, so
- * nothing here touches it; `totalSize` is the summed per-package total the
- * dashboard divides by; a single bar's share comes only from its own
- * `remain / size` through {@link clampPercent}. `cycleResetTime` is the cycle
- * deadline printed beside these rows, carried verbatim; a group's own expiry is
- * the earliest member `packageEndTime`, never a recomputed date.
+ * Quota semantics (`QoderWebCredits` in `src/status-paths.ts`): `total` is the
+ * percentage ALREADY USED — a headline, not a denominator; `totalSize` is the
+ * summed package total; a bar's share comes from its own `remain / size` through
+ * `clampPercent`; `cycleResetTime` is carried verbatim, and a group's expiry is
+ * the earliest member `packageEndTime`.
  */
 const acct = (
   packageName: string,
@@ -195,5 +190,106 @@ describe('clampPercent', () => {
     expect(clampPercent(150, 100)).toBe(100)
     expect(clampPercent(-10, 100)).toBe(0)
     expect(clampPercent(50, 100)).toBe(50)
+  })
+})
+
+describe('usedPercentText', () => {
+  it('reads the same ratio as usage, matching Qoder desktop', () => {
+    // The desktop's own panel: "0 / 2,000 (已使用 0%)" and "60 / 2,400 (已使用 3%)".
+    expect(usedPercentText(2000, 2000)).toBe('0')
+    expect(usedPercentText(2340, 2400)).toBe('3')
+  })
+  it('states nothing when there is no ratio to state', () => {
+    expect(usedPercentText(50, 0)).toBeUndefined()
+    expect(usedPercentText(Number.POSITIVE_INFINITY, 1)).toBeUndefined()
+  })
+  it('never states a negative or over-100 usage', () => {
+    expect(usedPercentText(150, 100)).toBe('0')
+    expect(usedPercentText(-10, 100)).toBe('100')
+  })
+  it('stays whole percent even though the ratio column carries decimals', () => {
+    // The suffix rides inside the package label, where two decimals would push
+    // the sidebar's label past the room its row has and ellipsize it.
+    expect(usedPercentText(2291, 2300)).toBe('0')
+  })
+})
+
+describe('formatPercentText', () => {
+  it('keeps two decimals — the figure the two surfaces disagreed on', () => {
+    // The sidebar said "100%" while the settings card said "99.6%".
+    expect(formatPercentText(99.6087)).toBe('99.61')
+  })
+  it('leaves a whole value whole instead of padding it with zeros', () => {
+    expect(formatPercentText(100)).toBe('100')
+    expect(formatPercentText(0)).toBe('0')
+  })
+})
+
+describe('accountDisplayName', () => {
+  // A campaign grant's localized title must be identical on the two surfaces that
+  // print it, so the choice lives here rather than in either card.
+  const grant = acct('SOTA 专属积分', 2000, 2000, {
+    packageNameI18n: { zh: 'SOTA 专属积分', en: 'SOTA Exclusive Credits' },
+    packageCode: 'act-20261014-129',
+  })
+
+  it('uses the requested language when the upstream sent a title map', () => {
+    expect(accountDisplayName(grant, 'zh')).toBe('SOTA 专属积分')
+    expect(accountDisplayName(grant, 'en')).toBe('SOTA Exclusive Credits')
+  })
+
+  it('falls back to the other language when the active one is missing', () => {
+    expect(accountDisplayName(acct('包', 1, 1, { packageNameI18n: { zh: '包' } }), 'en')).toBe('包')
+    expect(accountDisplayName(acct('Pack', 1, 1, { packageNameI18n: { en: 'Pack' } }), 'zh')).toBe('Pack')
+  })
+
+  it('keeps the plain name for a package with no title map', () => {
+    expect(accountDisplayName(acct('个人额度', 0, 0), 'en')).toBe('个人额度')
+  })
+
+  it('reads the active language when none is passed', () => {
+    const previous = currentLanguage()
+    try {
+      setActiveLanguage('en')
+      expect(currentLanguage()).toBe('en')
+      expect(accountDisplayName(grant)).toBe('SOTA Exclusive Credits')
+      setActiveLanguage('zh-CN')
+      expect(accountDisplayName(grant)).toBe('SOTA 专属积分')
+      // Anything not English selects Chinese: the plugin's own copy is
+      // Chinese-first, so a third language must not leave the row unnamed.
+      setActiveLanguage('fr')
+      expect(accountDisplayName(grant)).toBe('SOTA 专属积分')
+    } finally {
+      setActiveLanguage(previous)
+    }
+  })
+})
+
+describe('formatExpiryText', () => {
+  it('localizes an ISO instant instead of printing it verbatim', () => {
+    // A raw ISO instant is unreadable and in UTC; the panel localizes it instead.
+    const text = formatExpiryText('2026-10-19T02:00:00.000Z')!
+    expect(text).toContain('2026')
+    expect(text).not.toContain('T02:00:00.000Z')
+  })
+
+  it('leaves an unparseable value verbatim rather than inventing a date', () => {
+    expect(formatExpiryText('not a date')).toBe('not a date')
+  })
+
+  it('states nothing about a package with no expiry', () => {
+    expect(formatExpiryText(undefined)).toBeUndefined()
+  })
+})
+
+describe('mergeCreditAccounts with titles', () => {
+  it('carries the first member title map onto the group', () => {
+    const groups = mergeCreditAccounts([
+      acct('SOTA 专属积分', 2000, 2000, { packageNameI18n: { zh: 'SOTA 专属积分', en: 'SOTA Exclusive Credits' } }),
+      acct('SOTA 专属积分', 500, 500, { packageNameI18n: { zh: 'SOTA 专属积分', en: 'SOTA Exclusive Credits' } }),
+    ])
+    expect(groups).toHaveLength(1)
+    expect(groups[0]?.remain).toBe(2500)
+    expect(accountDisplayName(groups[0]!, 'en')).toBe('SOTA Exclusive Credits')
   })
 })

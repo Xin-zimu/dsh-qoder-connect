@@ -5,29 +5,16 @@ import { dirname, join } from 'node:path'
 import { qoderMachineIdPath } from '../../paths.ts'
 
 /**
- * The machine id Qoder's own desktop CLI keeps at
- * `$HOME/.qoder/.auth/machine_id`.
- *
- * Strictly a read source for this plugin: when the official client generated
- * one, the transport reuses it so the same device presents one stable
- * identity upstream. The plugin never writes there — that tree belongs to
- * the official CLI.
+ * The machine id Qoder's own CLI keeps at `$HOME/.qoder/.auth/machine_id`, read
+ * only: the transport reuses it and never writes into that tree.
  */
 function officialMachineIdPath(): string {
   return join(homedir(), '.qoder', '.auth', 'machine_id')
 }
 
 /**
- * The trusted locations consulted when a caller nominates no chain: the
- * official Qoder CLI's id first, this plugin's own seed second.
- *
- * A freshly created id is saved ONLY at the end of the chain, which is now
- * always inside the plugin's data directory. An earlier default ended the
- * chain at `~/.dsh/qoder/machine_id`, derived from `os.homedir()` rather
- * than the resolved harness home, so any host with `DSH_HOME` pointed at
- * another location got a device credential scattered into the wrong `$HOME`
- * — outside every profile, with no owner deleting it. That fallback is
- * gone.
+ * Read chain when the caller nominates none: the official CLI's id first, this
+ * plugin's seed last — the only location a new id is ever saved to.
  */
 function defaultMachineIdPaths(): string[] {
   return [officialMachineIdPath(), qoderMachineIdPath()]
@@ -35,10 +22,8 @@ function defaultMachineIdPaths(): string[] {
 
 /**
  * Read Qoder's machine id, or create this plugin's seed at the chain's end.
- *
- * `paths` is the read chain; its last entry doubles as the create point.
- * Passing no chain defaults to {@link defaultMachineIdPaths}; passing an
- * empty array nominates no save location, which keeps the id process-local.
+ * `paths` is the read chain; its last entry doubles as the create point, and an
+ * empty array keeps the id process-local.
  */
 export function getMachineId(paths: readonly string[] = defaultMachineIdPaths()): string {
   for (const path of paths) {

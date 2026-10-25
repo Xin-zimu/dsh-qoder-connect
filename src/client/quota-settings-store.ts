@@ -1,24 +1,14 @@
 /**
  * Shared live flags for the quota cards, mirrored from the settings document.
  *
- * The settings scope lives in one place (the quota-settings card binds it),
- * but three surfaces read the derived values: the settings card itself, and
- * the two sidebar quota cards. This module is the meeting point — plain
- * mutable module state plus a revision counter, so React components can
- * subscribe through useSyncExternalStore and re-render when a saved toggle
- * flips, without prop-drilling through slot injections.
+ * The settings scope lives in one place (the quota-settings card binds it) but
+ * three surfaces read the derived values, so they meet here: plain mutable module
+ * state plus a revision counter that React subscribes to through
+ * useSyncExternalStore — no prop-drilling through slot injections.
  *
- * Sign-in state: every surface that polls a status route (the settings card's
- * own lightweight probe, the sidebar cards, the dashboard) reports what it
- * saw through {@link noteQuotaSignIn}. The settings card polls on its own
- * because it must gate its toggles even while both sidebar cards are OFF —
- * the sidebar cards' polls do not run then.
- *
- * Status reads live here too (see "shared status polling" below): every
- * surface that shows a variant ACQUIRES it, ONE ticker reads each live
- * variant, and the result is published once for every subscriber. The read
- * sequence guard keeps the document whose read started last, whichever
- * surface started it, so a late answer can never roll a newer one back.
+ * Status documents are shared too: every surface ACQUIRES the variant it shows,
+ * ONE ticker reads each live variant, and a sequence guard keeps whichever read
+ * started last.
  */
 
 import type { QoderVariantId, QoderWebStatus } from '../status-paths.ts'
@@ -90,6 +80,14 @@ export function quotaSignInState(): QuotaSignInState {
   return signInSnapshot
 }
 
+/**
+ * Note that the label language changed and wake every subscribed surface: a
+ * package title is re-read at render, so without a bump the old language lingers.
+ */
+export function noteQuotaLanguage(): void {
+  bump()
+}
+
 /** Subscribe to any flag change; returns the disposer. */
 export function onQuotaSettingsChange(listener: () => void): () => void {
   listeners.add(listener)
@@ -111,17 +109,12 @@ export function variantOfStatusPath(statusPath: string): QoderVariantId {
 /* ---- shared status documents ---- */
 
 /**
- * The last status document per variant, shared by EVERY quota surface.
+ * The last status document per variant, shared by EVERY quota surface, so one
+ * refresh updates the sidebar card and the dashboard together instead of each
+ * showing its own read.
  *
- * The sidebar cards and the dashboard each used to fetch independently, so a
- * dashboard refresh updated the panel while the sidebar card kept showing its
- * previous read until its own next tick — two different numbers for one
- * account on one screen. One store, one write path
- * ({@link noteQuotaStatus}), and every subscriber re-renders through the
- * same revision: whatever surface refreshed last, all of them show it.
- *
- * Documents are kept by identity (never mutated), so reference comparisons
- * in useSyncExternalStore selectors stay cheap and stable.
+ * Documents are kept by identity (never mutated), so reference comparisons in
+ * useSyncExternalStore selectors stay stable.
  */
 const statusDocuments: { cn: QoderWebStatus | undefined; global: QoderWebStatus | undefined } = { cn: undefined, global: undefined }
 
@@ -145,10 +138,9 @@ function storeStatus(variantId: string, status: QoderWebStatus): void {
 }
 
 /**
- * Publish one variant's document as an AUTHORITATIVE fact: the host just
- * answered a write, or a surface synthesized the outcome (clearing a PAT).
- * It supersedes every read that started before it, so a response predating
- * the write cannot roll the screen back.
+ * Publish one variant's document as an AUTHORITATIVE fact: the host answered a
+ * write, or a surface synthesized the outcome (clearing a PAT). It supersedes
+ * every read that started before it.
  */
 export function noteQuotaStatus(variantId: string, status: QoderWebStatus): void {
   storeStatus(variantId, status)
@@ -171,15 +163,10 @@ export function quotaStatusFetchedAt(variantId: QoderVariantId): number | undefi
 }
 
 /**
- * Whether ONE variant's shared document is fresh enough to skip a fetch:
- * the user's rule — a click/mount/interval tick within the configured
- * interval of the last successful read reuses the cached document, and only
- * a variant with NO result yet (or a failed read that never landed one)
- * forces the upstream call. The interval is a cache lifetime, not a metronome.
- *
- * A `maxAgeMs` of the poll interval comes from the settings document; a
- * failed last read is NOT tracked here (callers gate failures themselves),
- * because "the last read failed" still means "no usable result".
+ * Whether ONE variant's shared document is fresh enough to skip a fetch: a
+ * click/mount/tick within the configured interval reuses the cached document,
+ * and only a variant with NO result yet forces the upstream call. The interval
+ * is a cache lifetime, not a metronome.
  *
  * @param variantId - which variant's freshness to test.
  * @param maxAgeMs - the configured poll interval (cache lifetime).
@@ -195,14 +182,14 @@ export function quotaStatusIsFresh(variantId: QoderVariantId, maxAgeMs: number):
 /* ---- shared status polling ---- */
 
 /**
- * One read's outcome as every surface reports it: the freshly published
- * document, or the failure that replaced it. `invalid` is a 200 whose body is
- * not a status document; `transport` carries the raw reason (an HTTP status
- * or the transport's message), which each surface renders through its own
- * copy.
+ * One read's outcome as every surface reports it: `invalid` is a 200 whose body
+ * is not a status document; `transport` carries the raw reason, which each
+ * surface renders through its own copy. `status` is the HTTP status when the
+ * server answered at all — a 404 means this route does not exist, which is how
+ * a surface recognizes that the plugin never registered its host half.
  */
 export type QuotaReadFailure =
-  | { kind: 'transport'; message: string }
+  | { kind: 'transport'; message: string; status?: number }
   | { kind: 'invalid' }
 
 /** The last read failure per variant, cleared by the next successful read. */
@@ -230,10 +217,9 @@ const STATUS_ROUTES: Record<QoderVariantId, string> = {
 
 /**
  * Who needs a variant live. A `card` holder (an expanded settings card) reads
- * every minute; a `surface` holder (an enabled sidebar card, an open quota
- * panel) reads at the settings interval. A variant with any holder is read at
- * the TIGHTEST cadence its holders ask for — an expanded card beside an
- * enabled sidebar card costs ONE request a minute between them, not two.
+ * every minute; a `surface` holder (an enabled sidebar card, an open quota panel)
+ * reads at the settings interval. A variant is read at the TIGHTEST cadence its
+ * holders ask for, so overlapping holders cost one request, not two.
  */
 const demand: Record<QoderVariantId, { cards: number; surfaces: number }> = {
   qoder: { cards: 0, surfaces: 0 },
@@ -244,11 +230,9 @@ const demand: Record<QoderVariantId, { cards: number; surfaces: number }> = {
 let ticker: number | undefined
 
 /**
- * Read-start sequences per variant, and the sequence of the last PUBLISHED
- * read. A read publishes only when no later-started read has published yet,
- * so a response that predates a newer one can never roll the screen back —
- * the guard the per-card `readSeq` used to provide, now shared across every
- * surface of the variant.
+ * Read-start sequences per variant, and the sequence of the last PUBLISHED read.
+ * A read publishes only when no later-started read has published yet, so a stale
+ * answer can never roll the screen back.
  */
 const readSeq: Record<QoderVariantId, number> = { qoder: 0, 'qoder-global': 0 }
 const publishedSeq: Record<QoderVariantId, number> = { qoder: 0, 'qoder-global': 0 }
@@ -258,12 +242,7 @@ function pageHidden(): boolean {
   return typeof document !== 'undefined' && document.hidden === true
 }
 
-/**
- * Publish one read's outcome under the sequence guard: a read publishes only
- * when no read that started later has published yet, so a response that
- * predates a newer one — whichever surface started it — can never roll the
- * screen back.
- */
+/** Publish one read's outcome under the sequence guard (see `readSeq`). */
 function publishRead(variantId: QoderVariantId, seq: number, outcome: { doc: QoderWebStatus } | { failure: QuotaReadFailure }): void {
   if (seq <= publishedSeq[variantId]) return
   if ('doc' in outcome) {
@@ -280,7 +259,9 @@ function publishReadFailure(variantId: QoderVariantId, failure: QuotaReadFailure
   const previous = readFailures[variantId]
   if (previous === failure) return
   if (previous !== undefined && failure !== undefined && previous.kind === failure.kind
-    && (previous.kind !== 'transport' || failure.kind !== 'transport' || previous.message === failure.message)) return
+    && (previous.kind !== 'transport'
+      || failure.kind !== 'transport'
+      || (previous.message === failure.message && previous.status === failure.status))) return
   readFailures[variantId] = failure
   bump()
 }
@@ -288,11 +269,18 @@ function publishReadFailure(variantId: QoderVariantId, failure: QuotaReadFailure
 /** A 200 whose body is not a status document — reported as `invalid`, not as a transport failure. */
 class InvalidStatusDocumentError extends Error {}
 
+/** A non-2xx answer; carries the status so surfaces can tell "missing route" from "server down". */
+class HttpStatusError extends Error {
+  constructor(readonly status: number) {
+    super(`HTTP ${status}`)
+    this.name = 'HttpStatusError'
+  }
+}
+
 /**
- * Fetch one variant's status document and publish it (or its failure) for
- * every surface. The request is never shared with another read: a tick reads
- * each live variant once, and an explicit read must be able to postdate a
- * write, so it starts its own request.
+ * Fetch one variant's status document and publish it (or its failure) for every
+ * surface. The request is never shared: a tick reads each live variant once, and
+ * an explicit read must be able to postdate a write.
  *
  * @returns the published document, or undefined when the read failed.
  */
@@ -304,7 +292,7 @@ async function readVariant(variantId: QoderVariantId): Promise<QoderWebStatus | 
       credentials: 'same-origin',
     })
     const body: unknown = await response.json().catch(() => undefined)
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    if (!response.ok) throw new HttpStatusError(response.status)
     if (!isQoderWebStatus(body)) throw new InvalidStatusDocumentError()
     publishRead(variantId, seq, { doc: body })
     return body
@@ -312,7 +300,9 @@ async function readVariant(variantId: QoderVariantId): Promise<QoderWebStatus | 
     publishRead(variantId, seq, {
       failure: error instanceof InvalidStatusDocumentError
         ? { kind: 'invalid' }
-        : { kind: 'transport', message: error instanceof Error ? error.message : 'request failed' },
+        : error instanceof HttpStatusError
+          ? { kind: 'transport', message: error.message, status: error.status }
+          : { kind: 'transport', message: error instanceof Error ? error.message : 'request failed' },
     })
     return undefined
   }
@@ -322,9 +312,8 @@ async function readVariant(variantId: QoderVariantId): Promise<QoderWebStatus | 
 function dueForRead(variantId: QoderVariantId): boolean {
   const holders = demand[variantId]
   if (holders.cards === 0 && holders.surfaces === 0) return false
-  // A signed-out variant with only cards holding it parks: nothing changes
-  // without a PAT, so the cards' poll stops (the rule the per-card interval
-  // had). A surface holder keeps its interval whatever the sign-in state.
+  // A signed-out variant held only by cards parks: nothing changes without a
+  // PAT, so their poll stops. A surface holder keeps its interval regardless.
   if (holders.cards > 0 && holders.surfaces === 0 && quotaStatus(variantId)?.status === 'signed-out') return false
   if (holders.cards > 0) return true
   return !quotaStatusIsFresh(variantId, Math.max(CARD_POLL_MS, pollIntervalMs))
@@ -409,11 +398,9 @@ export function refreshQuotaStatus(variantId: QoderVariantId): Promise<boolean> 
 }
 
 /**
- * Test support: drop every piece of shared read state — documents, fetch
- * times, failures, read sequences, and demand — leaving the toggles, sign-in
- * facts and poll interval alone. Production code never calls this: the store
- * is module state that outlives a test, and without this a card under test
- * would inherit the previous test's document instead of reading its own.
+ * Test support: drop every piece of shared read state, leaving toggles, sign-in
+ * facts and the poll interval alone. Without it a card under test would inherit
+ * the previous test's document. Production code never calls this.
  */
 export function resetQuotaStatusForTesting(): void {
   statusDocuments.cn = undefined

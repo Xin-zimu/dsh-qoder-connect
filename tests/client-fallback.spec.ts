@@ -8,24 +8,14 @@ import {
 } from '../src/status-paths.ts'
 
 /**
- * The client entry degrades a slot-API breaking change (the rc.6→rc.7
- * `id`→`key` rename that caused the red "Failed to load plugins" banner)
- * to a console.error, so the host provider keeps working without a banner.
+ * The client entry degrades a slot-API breaking change (the `id`→`key` rename) to a
+ * console.error, so the host provider keeps working without a red banner.
  *
- * We cannot import the real client entry (it pulls browser-only DSH client
- * packages, and its dashboard internals need the DOM); instead we replicate the
- * try/catch shape from `src/client/index.tsx` and assert it swallows a
- * simulated throw at each guarded boundary.
- *
- * DRIFT WARNING: the `apply()` below is a manual mirror of the real `apply()`
- * in `src/client/index.tsx` (see the NOTE on that function). It is NOT the
- * product code, so these tests prove the fallback boundaries work — they cannot
- * by themselves detect a regression in the real entry. The final case closes
- * that gap mechanically: it reads the entry off disk and requires every
- * `console.error` message, every `ctx.effect` label, and the locale namespace
- * it registers to appear VERBATIM in this file's own source. Change the real
- * entry's guarded body or one of those literals without updating the mirror,
- * and that case fails.
+ * The real entry cannot be imported (browser-only packages, DOM internals), so the
+ * `apply()` below is a manual MIRROR of `src/client/index.tsx`: these tests prove
+ * the fallback boundaries work, not that the real entry is intact. The final case
+ * closes that gap — it reads the entry off disk and requires every `console.error`
+ * message, `ctx.effect` label and the locale namespace to appear VERBATIM here.
  */
 
 /** The variant ids, mirroring `QODER_CARD_VARIANTS` in QoderPluginCard.tsx. */
@@ -38,11 +28,8 @@ const VARIANT_STATUS: Record<string, string> = {
 }
 
 /**
- * The configuration-face constants, mirroring src/client/index.tsx.
- *
- * The `SHARED_*` group is the 《插件设置》 block the three connect plugins
- * rendezvous on: the container slot, its id and order, the child slot, this
- * plugin's entry id, and the block's title.
+ * The configuration-face constants, mirroring src/client/index.tsx. The `SHARED_*`
+ * group is the 《插件设置》 block the three connect plugins rendezvous on.
  */
 const SHARED_SECTION_SLOT = 'settings.section'
 const SHARED_SECTION_ID = 'plugin-settings'
@@ -69,12 +56,9 @@ const stubQuotaScope = {
 const Component = (): null => null
 
 /**
- * Mirror of src/client/index.tsx apply() body.
- *
- * Not mirrored: the dashboard's mount-time internals (its cached snapshot, its
- * polling, `fetchStatusDocument`, and the mount wrapper's JSX) — they need the
- * DOM and only run once the panel is open. They are replaced by no-op
- * stand-ins so the guarded registration sequence above them stays verbatim.
+ * Mirror of src/client/index.tsx's apply() body. The dashboard's mount-time
+ * internals need the DOM, so no-op stand-ins replace them and the guarded
+ * registration sequence stays verbatim.
  */
 function apply(ctx: any): void {
   try {
@@ -82,9 +66,23 @@ function apply(ctx: any): void {
     ctx.effect(() => ctx.locale.register(namespace, { zh: {}, en: {} }), 'dsh-qoder-connect: settings copy')
     const t = ctx.locale.bind(namespace)
 
-    // 1. Shared quota-settings card, registered first so it sits above the two
-    // variant cards (统一设置 (50) → CN (60) → Global (70); the band starts at
-    // 50 so the sibling connect plugin's 10/20/30 cards never interleave these).
+    // Read once, then kept current by the locale/change subscription; the store bump
+    // is a no-op stand-in, so the guarded sequence around it stays verbatim.
+    const applyLanguage = (localeId: string): void => {
+      void localeIds.push(localeId)
+    }
+    applyLanguage(ctx.locale.getLocale().active)
+    ctx.effect(() => {
+      const dispose = ctx.on('locale/change', (snapshot: { active: string }) => {
+        applyLanguage(snapshot.active)
+      })
+      return () => {
+        dispose()
+      }
+    }, 'dsh-qoder-connect: package title language')
+
+    // 1. Shared quota-settings card first, so it sits above the variant cards
+    // (统一设置 50 → CN 60 → Global 70; the band starts at 50 so siblings' 10/20/30 never interleave).
     const quotaSettingsInjected = { t, signedIn: () => ({ cn: false, global: false }) }
     let quotaScope: any
     const adoptQuotaScope = (scope: any): void => {
@@ -96,13 +94,8 @@ function apply(ctx: any): void {
       applySnapshot()
       scope.subscribe(applySnapshot)
     }
-    // Unified Qoder plugin configuration card: merges sidebar quota settings,
-    // China variant, and Global variant into one single card titled "Qoder".
-    // The shared 《插件设置》 block dispatches its `list` entries by id
-    // (ascending order); the card rank is fixed across the three connect
-    // plugins: the first sibling takes 10, the second 20, this one 30. The
-    // same face is reused on this bundle's plugin-manager page below, opened
-    // expanded there.
+    // One card titled "Qoder" merging the quota settings, China and Global variants;
+    // the block dispatches `list` by ascending id, so this bundle's rank is fixed at 30.
     const unifiedCardInject = (defaultOpen = false): any => ({
       t,
       scope: quotaScope,
@@ -138,16 +131,13 @@ function apply(ctx: any): void {
       })
     }
 
-    // 插件自有配置（`<profile>/.dsh-qoder-connect/settings.json`）：读写走宿主半
-    // 的 settings face。镜像用 stub scope 顶替（真实实现见
-    // src/client/http-settings-scope.ts），adopt 与 joinSharedSettingsBlock
-    // 无条件进行。
+    // 插件自有配置（`<profile>/.dsh-qoder-connect/settings.json`）走宿主 settings
+    // face；镜像用 stub scope 顶替（真实实现见 src/client/http-settings-scope.ts）。
     adoptQuotaScope(stubQuotaScope)
     joinSharedSettingsBlock()
 
-    // The same unified card on this bundle's page in the sidebar's Plugins
-    // panel: `ctx.slots.inject` defers until the Host's plugin manager
-    // declares the seat, so a deployment without it never throws.
+    // The same card on the bundle's page: `inject` defers until the Host's plugin
+    // manager declares the seat, so a deployment without it never throws.
     const joinPluginManagerBlock = (): void => {
       try {
         ctx.slots.inject(PLUGIN_MANAGER_SLOT, () => ctx.slots.register({
@@ -258,6 +248,9 @@ function apply(ctx: any): void {
   }
 }
 
+/** Language arguments the mirror's `apply` recorded, oldest first (stand-in for the store bump). */
+const localeIds: string[] = []
+
 interface FakeContext {
   readonly ctx: any
   readonly injections: string[]
@@ -265,13 +258,9 @@ interface FakeContext {
 }
 
 /**
- * A stand-in for the DSH client context. `throwOn` names the service call that
- * must fail, which is how each test moves a different guarded boundary.
- *
- * `containerRace` pre-registers a sibling's shared block before this plugin's
- * factory runs, which is how the "attach to the winner" path is exercised; the
- * mid-call race (register throws after the probe saw nothing) is driven by the
- * test itself wrapping `ctx.slots.register`.
+ * A stand-in for the DSH client context. `throwOn` names the service call that must
+ * fail, which is how each test moves a different guarded boundary; `containerRace`
+ * pre-registers a sibling's shared block before this plugin's factory runs.
  */
 function fakeContext(
   throwOn: { slot?: string; containerRace?: boolean } = {},
@@ -312,7 +301,8 @@ function fakeContext(
   const layout = { selectPanel: () => {} }
   const ctx: any = {
     effect: (fn: () => unknown) => { fn() },
-    locale: { register: () => () => {}, bind: () => (key: string) => key },
+    locale: { register: () => () => {}, bind: () => (key: string) => key, getLocale: () => ({ active: 'zh' }) },
+    on: () => () => true,
     slots,
     get: (name: string) => (name === 'layout' ? layout : undefined),
     inject: (deps: string[], cb: (scope: any) => void) => {
@@ -506,9 +496,8 @@ describe('mirror stays verbatim with src/client/index.tsx', () => {
 
   it('every console.error message in the entry is mirrored word for word', () => {
     const messages = [...entrySource.matchAll(/console\.error\(\s*'([^']+)'/g)].map(match => match[1]!)
-    // Guard the guard: the real entry must actually carry the six boundaries
-    // this spec mirrors (outer catch + the lost container race, the dashboard,
-    // the sidebar footer, the panel close, and the plugin manager page).
+    // Guard the guard: the real entry must carry the six boundaries this spec mirrors
+    // (outer catch + lost container race, dashboard, sidebar footer, panel close, manager page).
     expect(messages).toHaveLength(6)
     for (const message of messages) {
       expect(mirrorSource).toContain(message)
@@ -517,8 +506,13 @@ describe('mirror stays verbatim with src/client/index.tsx', () => {
 
   it('every effect label and locale namespace in the entry is mirrored', () => {
     const labels = [...entrySource.matchAll(/,\s*'(dsh-qoder-connect: [^']+)'/g)].map(match => match[1]!)
-    expect(labels).toEqual(['dsh-qoder-connect: settings copy', 'dsh-qoder-connect: quota styles'])
+    expect(labels).toEqual(['dsh-qoder-connect: settings copy', 'dsh-qoder-connect: package title language', 'dsh-qoder-connect: quota styles'])
     for (const label of labels) expect(mirrorSource).toContain(label)
+    // The mirror must read the active locale once at bind time: that is why a package
+    // title has a language at all before the first locale switch.
+    localeIds.length = 0
+    apply(fakeContext().ctx)
+    expect(localeIds).toEqual(['zh'])
     // The two locale namespaces and the settings namespace the scope binds.
     expect(entrySource).toContain("'settings.qoder'")
     expect(entrySource).toContain("'panel.qoder-quota'")
@@ -534,9 +528,8 @@ describe('mirror stays verbatim with src/client/index.tsx', () => {
   })
 
   it('every seat this plugin claims in the entry is claimed by the mirror too', () => {
-    // The registration identity of the plugin: slot names plus the keys/ids it
-    // contributes. A rename on one side and not the other is exactly the drift
-    // the mirror obligation warns about.
+    // The registration identity: slot names plus the keys/ids it contributes. A rename
+    // on one side only is exactly the drift the mirror obligation warns about.
     const seats = [
       'conversation.input.right', 'sidebar.footer.action',
       'qoder-global-quota', 'qoder-quota-panel', 'qoder-probe',

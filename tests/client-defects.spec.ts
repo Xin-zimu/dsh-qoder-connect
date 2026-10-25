@@ -9,15 +9,10 @@ import { resetQuotaStatusForTesting } from '../src/client/quota-settings-store.t
 import { QODER_CN_CARD, QODER_GLOBAL_CARD } from '../src/client/QoderPluginCard.tsx'
 
 /**
- * Regression tests for the browser-half defect list, carried over from the
- * WorkBuddy era and re-pinned against the Qoder components. Each case names a
- * behaviour that was once broken and must never break again: unreadable bodies
- * never enter state, a failed read annotates the document instead of erasing
- * it, the poll parks only on a real sign-out, and the composer control reports
- * what the host knows rather than what the last click happened to see.
- *
- * Driven through react-test-renderer with an in-process fetch; no request
- * leaves the process.
+ * Regression tests for the browser-half defect list, re-pinned against the Qoder
+ * components: unreadable bodies never enter state, a failed read annotates the
+ * document instead of erasing it, the poll parks only on a real sign-out, and the
+ * composer control reports what the host knows. No request leaves the process.
  */
 
 const t = (key: keyof typeof en, params: Record<string, unknown> = {}): string =>
@@ -120,11 +115,9 @@ function doc(overrides: Record<string, unknown> = {}): Record<string, unknown> {
 let view: ReactTestRenderer | undefined
 
 /**
- * The shared status store is module state that outlives a test, and an
- * expanding card no longer re-reads a document that is still fresh — so each
- * test starts the clock well past the card's minute. A publish inside the
- * test then lands at the current time and stays fresh, which is what the
- * dedup assertions read.
+ * The shared status store outlives a test and a fresh document is not re-read,
+ * so each test starts the clock well past the card's minute; a publish then
+ * lands at the current time, which is what the dedup assertions read.
  */
 let clock = Date.parse('2024-05-01T00:00:00.000Z')
 
@@ -188,7 +181,7 @@ describe('QoderPluginCard', () => {
       statusReply = { ok: true, body: null }
       await pressCard(en.refresh)
       const tree = JSON.stringify(view!.toJSON())
-      expect(tree).toContain(en.signedIn)
+      expect(tree).toContain(en.patAccounts)
       expect(tree).toContain(NOTICE)
       expect(tree).toContain(en.statusResponseInvalid)
     })
@@ -202,7 +195,7 @@ describe('QoderPluginCard', () => {
       await act(async () => { [...intervals.values()][0]!() }) // the 60s poll fires
       const after = JSON.stringify(view!.toJSON())
       expect(after).toContain(NOTICE)
-      expect(after).toContain(en.signedIn)
+      expect(after).toContain(en.patAccounts)
       expect(before).toContain('wxyz') // the PAT tail was on screen before…
       expect(after).toContain('wxyz') // …and is still on screen after
     })
@@ -286,45 +279,41 @@ describe('QoderPluginCard', () => {
       const live = view!.root.findAll(node => (node.props as { role?: string }).role === 'status')[0]
       expect(live!.props['aria-busy']).toBe(true)
       await release(0, { ok: true, body: doc() })
-      expect(JSON.stringify(view!.toJSON())).toContain(en.signedIn)
+      expect(JSON.stringify(view!.toJSON())).toContain(en.patAccounts)
     })
   })
 
   describe('#6 no sequence guard on reads', () => {
     it('keeps the document whose read started last, even when it settles first', async () => {
-      // Read #1 (mount) settles; read #2 (manual refresh) is held; read #3
-      // (poll) settles first with a newer answer; releasing #2 must not roll
-      // the card back to its older document.
-      plan = (_url, _init, index) => index === 1 ? { hang: true } : { ok: true, body: doc({
-        credits: { total: index === 2 ? 7 : 77, accounts: [] },
+      // Read #1 (mount) settles; the manual refresh now sends its catalog POST first
+      // (index 1) and then read #2 (index 2), which is held; read #3 (poll) settles
+      // first with a newer answer, which must not be rolled back when #2 is released.
+      plan = (_url, _init, index) => index === 2 ? { hang: true } : { ok: true, body: doc({
+        credits: { total: index === 3 ? 7 : 77, accounts: [] },
       }) }
       await mountCard()
-      await pressCard(en.refresh) // read #2, held
+      await pressCard(en.refresh) // POST #1, then read #2 held
       await act(async () => { [...intervals.values()][0]!() }) // read #3, lands first
       expect(JSON.stringify(view!.toJSON())).toContain(t('creditsUsed', { percent: '7' }))
-      await release(1, { ok: true, body: doc({ credits: { total: 77, accounts: [] } }) })
+      await release(2, { ok: true, body: doc({ credits: { total: 77, accounts: [] } }) })
       expect(JSON.stringify(view!.toJSON())).toContain(t('creditsUsed', { percent: '7' }))
     })
 
     it('drops a superseded failure silently instead of blanking the card', async () => {
-      plan = (_url, _init, index) => index === 1 ? { hang: true } : { ok: true, body: doc() }
+      plan = (_url, _init, index) => index === 2 ? { hang: true } : { ok: true, body: doc() }
       await mountCard()
-      await pressCard(en.refresh) // read #2, held
+      await pressCard(en.refresh) // POST #1, then read #2 held
       await act(async () => { [...intervals.values()][0]!() }) // read #3 supersedes it
       // The late answer is a failure (an unreadable body); the sequence guard
       // must swallow it without a notice and without touching the document.
-      await release(1, { ok: true, body: null })
+      await release(2, { ok: true, body: null })
       expect(JSON.stringify(view!.toJSON())).not.toContain(NOTICE)
-      expect(JSON.stringify(view!.toJSON())).toContain(en.signedIn)
+      expect(JSON.stringify(view!.toJSON())).toContain(en.patAccounts)
     })
   })
 
   describe('#11 a failed write reports beside the document', () => {
-    /**
-     * Mount with the Global variant so the context-window preference write
-     * exists, and with a model that declares a larger alternative so the
-     * preference checkbox renders.
-     */
+    /** Global variant plus a model declaring a larger alternative: the preference checkbox renders. */
     async function mountGlobal(): Promise<void> {
       statusReply = { ok: true, body: doc({
         models: [{ id: 'm1', name: 'M1', contextWindow: 200_000, supportedContextWindows: [200_000, 1_000_000] }],
@@ -334,10 +323,13 @@ describe('QoderPluginCard', () => {
       await act(async () => { view!.root.findAllByType('button')[0]!.props.onClick() })
       await pressCard(en.tabContext)
     }
-    /** Fire the preference checkbox, the smallest write the card offers. */
+    /** Fire the preference switch, the smallest write the card offers. */
     async function firePreferenceWrite(): Promise<void> {
-      const checkbox = view!.root.findAllByType('input').find(node => node.props.type === 'checkbox')!
-      await act(async () => { checkbox.props.onChange({ currentTarget: { checked: true } }) })
+      const toggle = view!.root.findAll(node =>
+        (node.type as unknown) === 'button'
+        && (node.props as { role?: string }).role === 'switch'
+        && (node.props as { 'aria-label'?: string })['aria-label'] === en.useMaximumContextWindow)[0]!
+      await act(async () => { toggle.props.onClick() })
     }
 
     it('keeps the account and credits on screen when the write is rejected', async () => {
@@ -346,7 +338,7 @@ describe('QoderPluginCard', () => {
       await firePreferenceWrite()
       const tree = JSON.stringify(view!.toJSON())
       expect(tree).toContain(NOTICE)
-      expect(tree).toContain(en.signedIn)
+      expect(tree).toContain(en.patAccounts)
       expect(tree).toContain('invalid-auth-key') // the reason survives the round trip
     })
 
@@ -493,7 +485,6 @@ describe('#8 fallback catalog identity', () => {
     for (const model of FALLBACK_QODER_MODELS) {
       expect(model.name.length).toBeGreaterThan(0)
       expect(model.contextWindow).toBeGreaterThan(0)
-      expect(model.maxTokens).toBeGreaterThan(0)
     }
     // The routes both cards call match the compiled-in roster's ids exactly —
     // a model id in the card but not the roster would 400 on the first chat.

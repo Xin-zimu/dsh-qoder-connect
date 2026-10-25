@@ -7,15 +7,11 @@ import type { QoderModelInfo } from '../src/catalog.ts'
 import { QoderCatalogStore, qoderCatalogPath } from '../src/catalog-store.ts'
 
 /**
- * The saved catalog is the middle rung of the plan's degradation order (§4):
- * live fetch → this account's last successful fetch → the built-in roster.
- *
- * It is an optimization for the restart and offline cases, so the tests that
- * matter are the ones proving it can never make things worse: a corrupt file
- * reads as empty, a foreign account's catalog is never served, and no secret
- * is written. In the Qoder shape the account key is
- * `qoderCredentialIdentity({pat})` — `pat:` plus the first 16 hex of the
- * SHA-256 — never a uid/domain pair.
+ * The saved catalog: the middle rung of the degradation order (§4) — live fetch →
+ * this account's last successful fetch → the built-in roster. The tests that
+ * matter prove it can never make things worse: a corrupt file reads as empty, a
+ * foreign account's catalog is never served, and no secret is written. The account
+ * key is `qoderCredentialIdentity({pat})` — `pat:` plus the first 16 hex of SHA-256.
  */
 
 const CLEANUP: string[] = []
@@ -125,11 +121,9 @@ describe('QoderCatalogStore', () => {
   it('survives an unwritable path without throwing', () => {
     const dir = mkdtempSync(join(tmpdir(), 'qoder-catalog-ro-'))
     CLEANUP.push(dir)
-    // A NUL byte makes every filesystem call on this path fail, on any
-    // platform, without leaving anything behind for the store to clean up.
+    // A NUL byte fails every filesystem call on this path, on any platform.
     const store = new QoderCatalogStore({ path: join(dir, 'bad\u0000catalog.json') })
-    // Saving is best-effort: the plugin has already served these models, and a
-    // failed write must not surface as a crash.
+    // Saving is best-effort: the models are already served, and a failed write must not crash.
     expect(() => store.set(ACCOUNT_A, { source: 's', fetchedAtMs: 1, models: [model('a')] })).not.toThrow()
     expect(() => store.get(ACCOUNT_A)).not.toThrow()
   })

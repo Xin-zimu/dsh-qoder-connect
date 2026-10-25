@@ -178,6 +178,17 @@ describe('QoderProbeStore', () => {
     store.clear()
     expect(store.all()).toEqual({})
   })
+
+  it('clears one account without touching another saved account', () => {
+    const { store } = tempStore()
+    store.set(BASE.id, store.record(fingerprintModel(BASE), 'validating', ['low'], 'acct-a'))
+    store.set(DECLARED.id, store.record(fingerprintModel(DECLARED), 'validating', ['low'], 'acct-b'))
+    store.clearFor('acct-a')
+    expect(store.get(BASE.id, fingerprintModel(BASE), 'acct-a')).toBeUndefined()
+    // The other saved account's observation survives: removing one PAT must
+    // not erase the data of the accounts the user still has.
+    expect(store.get(DECLARED.id, fingerprintModel(DECLARED), 'acct-b')).toBeDefined()
+  })
 })
 
 describe('QoderProbeService precedence', () => {
@@ -220,8 +231,7 @@ describe('QoderProbeService precedence', () => {
 
 describe('newestFirst', () => {
   it('puts the most recent observation first', () => {
-    // The store appends, so a just-run detection would otherwise land below
-    // every earlier one — the exact complaint this helper exists to fix.
+    // The store appends, so a just-run detection would land below every earlier one.
     const ordered = newestFirst([
       { probedAt: 100, id: 'oldest' },
       { probedAt: 300, id: 'newest' },
@@ -238,11 +248,7 @@ describe('newestFirst', () => {
 })
 
 describe('recordFor: the single judgement the card and adapter share', () => {
-  /**
-   * The card used to read raw records while the adapter read fingerprint- and
-   * TTL-checked ones, so the card could show levels the model picker no longer
-   * offered. Both now go through `recordFor`, and these pin what it refuses.
-   */
+  /** Both the card and the adapter now go through `recordFor`; these pin what it refuses. */
   function serviceFor(store: QoderProbeStore): QoderProbeService {
     return new QoderProbeService({
       store,

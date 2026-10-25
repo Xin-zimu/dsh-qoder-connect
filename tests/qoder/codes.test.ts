@@ -3,9 +3,8 @@ import assert from 'node:assert/strict'
 import { QODER_RESULT_CODES, qoderResultCode } from '../../src/qoder/codes.ts'
 
 test('QODER_RESULT_CODES carries the documented Qoder result-code table', () => {
-  // The table is the official reference (docs.qoder.com/cli/sdk/errors), split
-  // by the family that decides routing: quota answers must never be read as a
-  // dead credential, and 105 is the one genuine auth code in the group.
+  // The official table (docs.qoder.com/cli/sdk/errors), split by the family that
+  // decides routing: a quota answer must never read as a dead credential.
   const byFamily = (family: string): string[] => QODER_RESULT_CODES
     .filter(entry => entry.family === family)
     .map(entry => entry.code)
@@ -22,14 +21,14 @@ test('QODER_RESULT_CODES carries the documented Qoder result-code table', () => 
 })
 
 test('qoderResultCode reads the documented code out of any nesting depth', () => {
-  // The issue-#10 body verbatim.
+  // An exhausted daily billing counter: HTTP 403 whose body names code 110.
   assert.deepEqual(
     qoderResultCode('{"code":"110","message":"Billing daily count exceeded"}'),
     { code: '110', name: 'Daily usage limit reached', family: 'quota' },
   )
 
-  // Qoder double-encodes: the outer code's message field carries escaped JSON.
-  // Detection must survive the escaping, exactly like qoderQueueSignal does.
+  // Qoder double-encodes: the outer code's message field carries escaped JSON,
+  // and detection must survive the escaping, exactly like qoderQueueSignal.
   const nested = JSON.stringify({
     code: '10605',
     message: JSON.stringify({ isQueued: true, modelKey: 'qfmodel', retryAfterSeconds: 30 }),
@@ -41,9 +40,8 @@ test('qoderResultCode reads the documented code out of any nesting depth', () =>
 })
 
 test('qoderResultCode never guesses an undocumented code', () => {
-  // 403/429 are HTTP statuses Qoder also mirrors into a `code` field; neither is
-  // a documented result code, so the reader must stay silent and leave the
-  // caller's status-based routing intact.
+  // 403/429 are HTTP statuses mirrored into `code`; neither is documented, so the
+  // reader stays silent and leaves the caller's status routing intact.
   assert.equal(qoderResultCode('{"code":403,"message":"quota exhausted"}'), undefined)
   assert.equal(qoderResultCode('{"code":"429","message":"rate limit"}'), undefined)
   assert.equal(qoderResultCode('{"message":"quota exhausted"}'), undefined)

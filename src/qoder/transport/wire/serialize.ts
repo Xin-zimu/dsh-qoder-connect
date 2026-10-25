@@ -23,7 +23,7 @@ function stableChatRecordId(
   model: string,
   messages: readonly QoderWireMessage[],
   tools: readonly QoderWireTool[],
-  maxTokens: number,
+  maxTokens: number | undefined,
 ): string {
   const hash = crypto.createHash('sha256')
   hash.update('qoder-record')
@@ -34,16 +34,13 @@ function stableChatRecordId(
   hash.update('\0')
   hash.update(JSON.stringify(tools))
   hash.update('\0')
-  hash.update(`mt=${maxTokens}`)
+  hash.update(`mt=${maxTokens ?? 'none'}`)
   return hash.digest('hex').slice(0, 16)
 }
 
 /**
- * Reject an unusable request before any credential resolution or provider I/O.
- *
- * Image publication needs credentials, so message translation now runs after
- * authentication. This static pass preserves the guarantee that a request the
- * provider cannot serve never reaches the network.
+ * Reject an unusable request before any credential resolution or provider I/O,
+ * so a request the provider cannot serve never reaches the network.
  */
 export function validateQoderRequestShape(
   options: GenerateOptions,
@@ -51,14 +48,8 @@ export function validateQoderRequestShape(
 ): void {
   if (options.reasoningEffort !== undefined) {
     const effort = String(options.reasoningEffort)
-    // Only a declaration can justify a local refusal. A row that declares no
-    // efforts at all is not evidence that the model supports none: the upstream
-    // accepts spellings its discovery catalog never lists, so refusing them here
-    // misreports a supported value as unsupported. It also made detection
-    // impossible — every probe candidate, sentinel included, was rejected before
-    // the wire, which is why an undeclared model could only ever come back as
-    // "validating with no levels". An undeclared row therefore goes to the
-    // upstream for the answer; a declared set stays enforced exactly as before.
+    // Only a declared level set may justify a local refusal: an undeclared row is
+    // not evidence the model supports none, so it goes upstream for the answer.
     const declared = model?.reasoningEfforts
     if (declared !== undefined && declared.length > 0 && !declared.some(candidate => candidate.id === effort)) {
       throw new QoderLlmError(
@@ -110,14 +101,18 @@ export async function buildQoderRequestBody(
   translatedMessages?: QoderWireMessage[],
   model?: QoderCatalogModel,
   attachments?: QoderImageAttachments,
+  region?: string,
 ): Promise<QoderWireRequest> {
   if (!userId) {
     throw new QoderLlmError('Qoder request identity is missing.', 'AUTH')
   }
   const modelKey = options.model || 'cmodel'
   const messages = translatedMessages ?? await validateQoderRequest(options, model, attachments)
-  const modelMaxTokens = model?.maxTokens ?? 32_768
-  const maxTokens = Math.min(options.maxTokens ?? modelMaxTokens, modelMaxTokens)
+  // Only a declared cap or an explicit caller request becomes a wire limit.
+  const declaredMaxTokens = model?.maxTokensDeclared === true ? model.maxTokens : undefined
+  const maxTokens = declaredMaxTokens === undefined
+    ? options.maxTokens
+    : Math.min(options.maxTokens ?? declaredMaxTokens, declaredMaxTokens)
   const isReasoning = options.reasoningEffort !== undefined || (model?.isReasoning ?? false)
   const tools = translateTools(options.tools)
   // Ambiguous defaults stay in discovery metadata, but must not select a request tier.
@@ -150,12 +145,16 @@ export async function buildQoderRequestBody(
   const sessionId = options.sessionId === undefined
     ? `${stablePart}-${crypto.randomUUID()}`
     : `${stablePart}-${String(options.sessionId)}`
-  const recordId = stableChatRecordId(modelKey, messages, tools, maxTokens)
+  // One attempt id and one queue key per call. The queue entry is keyed by
+  // request_set_id and must survive a replay, so it cannot derive from content:
+  // two identical asks would otherwise share (and overwrite) one entry.
+  const requestId = crypto.randomUUID()
+  const requestSetId = crypto.randomUUID()
 
   return {
-    request_id: crypto.randomUUID(),
-    request_set_id: recordId,
-    chat_record_id: recordId,
+    request_id: requestId,
+    request_set_id: requestSetId,
+    chat_record_id: requestId,
     session_id: sessionId,
     stream: true,
     chat_task: 'FREE_INPUT',
@@ -163,7 +162,7 @@ export async function buildQoderRequestBody(
     is_retry: false,
     source: 1,
     version: '3',
-    session_type: 'qodercli',
+    session_type: region === 'china' ? 'qoderclicn' : 'qodercli',
     agent_id: 'agent_common',
     task_id: 'common',
     code_language: '',
@@ -174,7 +173,7 @@ export async function buildQoderRequestBody(
     messages,
     tools,
     parameters: {
-      max_tokens: maxTokens,
+      ...maxTokens === undefined ? {} : { max_tokens: maxTokens },
       ...options.reasoningEffort === undefined
         ? {}
         : { reasoning_effort: String(options.reasoningEffort) },
@@ -204,7 +203,7 @@ export async function buildQoderRequestBody(
     model_config: {
       key: modelKey,
       is_reasoning: isReasoning,
-      max_output_tokens: maxTokens,
+      ...maxTokens === undefined ? {} : { max_output_tokens: maxTokens },
       source: model?.source || 'system',
       ...contextConfig === undefined ? {} : { context_config: contextConfig },
     },
@@ -213,7 +212,8 @@ export async function buildQoderRequestBody(
       version: '1.0.0',
       type: 'agent',
       stage: 'start',
-      id: crypto.randomUUID(),
+      // The upstream ties a queue entry's business id to its request_set_id.
+      id: requestSetId,
       name: lastUserText.substring(0, 30),
       begin_at: Date.now(),
     },

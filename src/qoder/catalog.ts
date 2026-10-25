@@ -8,7 +8,10 @@ export interface QoderCatalogModel {
   contextWindow?: number
   /** Largest known capacity, independent of the effective input budget. */
   maxContextWindow?: number
+  /** Output budget hint for the harness; may be the built-in reserve, not a provider limit. */
   maxTokens?: number
+  /** True only when the provider declared `max_output_tokens`. */
+  maxTokensDeclared?: boolean
   source?: string
   isReasoning?: boolean
   supportsEffort?: boolean
@@ -154,12 +157,14 @@ export function normalizeQoderModels(
     const priceFactor = typeof raw.price_factor === 'number' && Number.isFinite(raw.price_factor) && raw.price_factor >= 0
       ? raw.price_factor : undefined
     const reasoning = reasoningEffortsOf(raw.thinking_config)
+    const declaredMaxTokens = positiveNumber(raw.max_output_tokens)
     models.push({
       id,
       name: typeof raw.display_name === 'string' && raw.display_name.trim() ? raw.display_name.trim() : id,
       contextWindow,
       maxContextWindow,
-      maxTokens: positiveNumber(raw.max_output_tokens) ?? 32_768,
+      ...declaredMaxTokens === undefined ? {} : { maxTokens: declaredMaxTokens },
+      ...declaredMaxTokens === undefined ? {} : { maxTokensDeclared: true },
       source: typeof raw.source === 'string' && raw.source.trim() ? raw.source.trim() : 'system',
       isReasoning,
       supportsEffort: reasoning.efforts !== undefined,
@@ -186,6 +191,11 @@ export function mergeQoderDiscoveryMetadata(
     if (advertised.contextWindow !== undefined) {
       merged.contextWindow = Math.min(model.contextWindow ?? advertised.contextWindow, advertised.contextWindow)
     }
+    // Only a declared cap replaces the built-in reserve; an undeclared one never overwrites.
+    if (advertised.maxTokensDeclared === true && advertised.maxTokens !== undefined) {
+      merged.maxTokens = advertised.maxTokens
+      merged.maxTokensDeclared = true
+    }
     for (const key of discoveredMetadataKeys) delete merged[key]
     for (const key of discoveredMetadataKeys) {
       if (advertised[key] !== undefined) Object.assign(merged, { [key]: advertised[key] })
@@ -200,13 +210,13 @@ export function hasSameQoderDiscoveryMetadata(
 ): boolean {
   return left?.length === right.length && left.every((model, index) => {
     const candidate = right[index]
-    return candidate?.id === model.id && candidate.contextWindow === model.contextWindow && discoveredMetadataKeys.every(key => (
-      JSON.stringify(model[key]) === JSON.stringify(candidate[key])
-    ))
+    return candidate?.id === model.id && candidate.contextWindow === model.contextWindow
+      && candidate.maxTokens === model.maxTokens && candidate.maxTokensDeclared === model.maxTokensDeclared
+      && discoveredMetadataKeys.every(key => (
+        JSON.stringify(model[key]) === JSON.stringify(candidate[key])
+      ))
   })
 }
-
-export const defaultMaxTokens = 32_768
 
 export const defaultModels: QoderCatalogModel[] = [
   {
@@ -214,7 +224,6 @@ export const defaultModels: QoderCatalogModel[] = [
     name: 'Cantus (Qoder)',
     description: 'Default Global Qoder subscription model for quick validation',
     contextWindow: 1_000_000,
-    maxTokens: defaultMaxTokens,
     supportsImages: true,
   },
   {
@@ -222,7 +231,6 @@ export const defaultModels: QoderCatalogModel[] = [
     name: 'Qoder Auto',
     description: 'Server-routed Global Qoder model pool',
     contextWindow: 180_000,
-    maxTokens: defaultMaxTokens,
     supportsImages: true,
   },
   {
@@ -230,7 +238,6 @@ export const defaultModels: QoderCatalogModel[] = [
     name: 'Qoder Ultimate',
     description: 'Highest-capability Global Qoder model pool',
     contextWindow: 1_000_000,
-    maxTokens: defaultMaxTokens,
     supportsImages: true,
   },
   {
@@ -238,7 +245,6 @@ export const defaultModels: QoderCatalogModel[] = [
     name: 'Qoder Performance',
     description: 'Performance-oriented Global Qoder model pool',
     contextWindow: 1_000_000,
-    maxTokens: defaultMaxTokens,
     supportsImages: true,
   },
   {
@@ -246,7 +252,6 @@ export const defaultModels: QoderCatalogModel[] = [
     name: 'Qoder Efficient',
     description: 'Efficiency-oriented Global Qoder model pool',
     contextWindow: 180_000,
-    maxTokens: defaultMaxTokens,
     supportsImages: true,
   },
   {
@@ -254,6 +259,5 @@ export const defaultModels: QoderCatalogModel[] = [
     name: 'Qoder Lite',
     description: 'Basic Global Qoder model pool',
     contextWindow: 180_000,
-    maxTokens: defaultMaxTokens,
   },
 ]

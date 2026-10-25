@@ -1,17 +1,11 @@
 /**
  * Plugin-owned settings scope over the Host's settings face.
  *
- * The configuration this plugin edits used to be written through the host's
- * settings service (`settingsScope` on 0.1.5, `configForms` on 0.1.7). On 0.1.7
- * every such write persists through the profile patch
- * (`configEditor.edit`), which reconciles the whole loader tree and hot-reloads
- * the plugin's fiber (~1–1.5 s) and refreshes every client mirror — so each
- * toggle of a sidebar-quota switch paid a full tree recompose.
- *
- * The host half now serves this plugin's configuration from its own settings
- * file over a loopback route; this module is the browser half of that contract,
- * implementing the same {@link QuotaSettingsScope} surface the card was written
- * against, so the card needs no change at all.
+ * The host half serves this plugin's configuration from its own settings file
+ * over a loopback route (writing through the host's config editor would
+ * recompose the whole loader tree on every toggle); this module is the browser
+ * half, implementing the same {@link QuotaSettingsScope} surface the card was
+ * written against.
  */
 
 import type { QuotaSection, QuotaSettingsScope, QuotaSettingsSnapshot } from './QuotaSettingsCard.tsx'
@@ -66,6 +60,8 @@ export class OwnQuotaSettingsScope implements QuotaSettingsScope<QuotaSection> {
   private document: SettingsFaceDocument | undefined
   private readonly listeners = new Set<() => void>()
   private snapshot: QuotaSettingsSnapshot<QuotaSection> = { status: 'loading', value: undefined, writable: true }
+  private writeChain: Promise<unknown> = Promise.resolve()
+  private lastWriteFailed = false
 
   /**
    * Load the current document. Call once before the card binds; repeated calls
@@ -114,24 +110,32 @@ export class OwnQuotaSettingsScope implements QuotaSettingsScope<QuotaSection> {
     return this.patch({ [field]: null })
   }
 
-  /** Send one patch and adopt the host's answer. */
+  /** Send one patch and adopt the host's answer, serialized via writeChain. */
   private async patch(patch: Record<string, unknown>): Promise<boolean> {
     const key = this.document?.key
     if (key === undefined) return false
-    try {
-      this.document = await request({
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Qoder-Settings-Key': key,
-        },
-        body: JSON.stringify(patch),
-      })
-      this.publish()
-      return true
-    } catch {
-      return false
+    const task = async (): Promise<boolean> => {
+      try {
+        this.document = await request({
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Qoder-Settings-Key': key,
+          },
+          body: JSON.stringify(patch),
+        })
+        this.lastWriteFailed = false
+        this.publish()
+        return true
+      } catch {
+        this.lastWriteFailed = true
+        this.publish()
+        return false
+      }
     }
+    const resultPromise = this.writeChain.then(task, task)
+    this.writeChain = resultPromise.catch(() => {})
+    return resultPromise
   }
 
   /** Rebuild the cached snapshot and notify the subscribers. */
@@ -139,7 +143,7 @@ export class OwnQuotaSettingsScope implements QuotaSettingsScope<QuotaSection> {
     this.snapshot = {
       status: this.document === undefined ? 'loading' : 'ready',
       value: this.document?.value,
-      writable: true,
+      writable: !this.lastWriteFailed,
     }
     for (const listener of this.listeners) listener()
   }

@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { getEventListeners } from 'node:events'
 import { createUserMessage, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { QoderLlmError } from '../../src/qoder/errors.ts'
 import { createQoderTransport } from '../../src/qoder/transport/index.ts'
@@ -417,9 +418,8 @@ test('QoderTransport surfaces the auth failure when the re-auth retry is rejecte
   assert.equal(exchanges, 3)
 })
 
-// The verbatim body Qoder answered with on 2026-09-26 22:32-22:36, for both
-// regions: a saturated per-model queue announced with HTTP 403 (or a 200 SSE
-// envelope carrying statusCodeValue 403).
+// The queue body, for both regions: a saturated per-model queue announced with
+// HTTP 403, or a 200 SSE envelope carrying statusCodeValue 403.
 const qoderQueueBody = JSON.stringify({
   code: '10605',
   message: JSON.stringify({
@@ -434,11 +434,8 @@ const qoderQueueBody = JSON.stringify({
 })
 
 test('QoderTransport does not exchange a job token when the upstream answer is a queue', async () => {
-  // Coding that 403 as AUTH made the self-heal exchange fresh tokens against a
-  // queue no token can jump — three exchanges and a 4-second delay per chat,
-  // every chat, for the whole window — and, because the host retries
-  // RATE_LIMIT but deliberately never AUTH, it also suppressed the automatic
-  // retry that would have ridden out the 30-second window.
+  // Coding that 403 as AUTH made the self-heal exchange tokens against a queue no
+  // token can jump, and muted the retry that would ride out the 30-second window.
   let exchanges = 0
   let chatCalls = 0
   const refreshed: number[] = []
@@ -525,12 +522,267 @@ test('QoderTransport reads a queued HTTP 403 from the chat error body', async ()
   assert.equal(exchanges, 1)
 })
 
+test('QoderTransport polls the pending queue entry and replays the same chat body', async () => {
+  // Poll the pending entry and replay the same body; a fresh request would join
+  // the queue at the tail again.
+  let chatCalls = 0
+  const bodies: string[] = []
+  let polls = 0
+  const waits: { attempt: number, waitMs: number, cleared?: boolean, queueCount?: number }[] = []
+  const transport = createQoderTransport({
+    region: 'global',
+    resolvePat: () => Promise.resolve('pt-queue-poll'),
+    resolveMachineId: () => 'machine-test',
+    // Small budget: after the replay is rejected again the wait must run out
+    // rather than sit on a real 30-second poll interval.
+    queueWaitBudgetMs: () => 60,
+    onQueueWait: info => {
+      waits.push({
+        attempt: info.attempt,
+        waitMs: info.waitMs,
+        ...info.cleared === true ? { cleared: true } : {},
+        ...info.queueCount === undefined ? {} : { queueCount: info.queueCount },
+      })
+    },
+    fetch: (async (input: URL | Request, init?: RequestInit): Promise<Response> => {
+      const url = String(input)
+      if (url.includes('/jobToken/exchange')) return new Response(JSON.stringify({ token: 'jt-queue-poll' }))
+      if (url.includes('/userinfo')) return new Response(JSON.stringify({ id: 'user-queue-poll' }))
+      if (url.includes('/ask/queue/status')) {
+        polls++
+        // First poll clears the entry; the ones after the rejected replay keep
+        // it queued, so the budget is what ends the wait.
+        if (polls === 1) {
+          return new Response(JSON.stringify({
+            isQueued: false,
+            queueCount: 0,
+            waitTime: 0,
+            retryAfterSeconds: 2,
+            serviceAvailable: true,
+          }))
+        }
+        return new Response(JSON.stringify({
+          isQueued: true,
+          queueCount: 900,
+          waitTime: 120,
+          retryAfterSeconds: 2,
+          serviceAvailable: true,
+        }))
+      }
+      if (url.includes('/agent_chat_generation')) {
+        chatCalls++
+        bodies.push(Buffer.from(init?.body as Uint8Array).toString('base64'))
+        return new Response(qoderQueueBody, { status: 403 })
+      }
+      throw new Error(`unexpected URL: ${url}`)
+    }) as typeof fetch,
+  })
+  const request: GenerateOptions = {
+    provider: 'qoder-official',
+    model: 'cmodel',
+    messages: [createUserMessage({ content: [{ type: 'text', text: 'Hello' }], source: { kind: 'user' } })],
+  }
+
+  await assert.rejects(async () => {
+    for await (const _chunk of transport.stream(request)) continue
+  }, (error: Error) => error instanceof QoderLlmError && error.code === 'RATE_LIMIT')
+
+  assert.equal(chatCalls, 2)
+  assert.ok(polls >= 1)
+  // The replay rotates request_id/chat_record_id (the queue key, request_set_id,
+  // stays), so the encoded body differs.
+  assert.notEqual(bodies[0], bodies[1])
+  // The clearing round is the grant, not a wait: it carries no round number, so
+  // the row's numbering never skips one, and it is flagged so the caller can
+  // close the row instead of leaving it open for the next wait.
+  assert.equal(waits[0]?.cleared, true)
+  assert.equal(waits[0]?.attempt, 0)
+})
+
+test('QoderTransport completes the turn when the queue clears before the replay', async () => {
+  let chatCalls = 0
+  let polls = 0
+  const okChunk = JSON.stringify({
+    id: 'chat-1',
+    model: 'cmodel',
+    choices: [{ index: 0, delta: { role: 'assistant', content: 'hi' }, finish_reason: null }],
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+  })
+  const okBody = `data: ${JSON.stringify({ statusCodeValue: 200, body: okChunk })}\n\ndata: [DONE]\n\n`
+  const transport = createQoderTransport({
+    region: 'global',
+    resolvePat: () => Promise.resolve('pt-queue-ok'),
+    resolveMachineId: () => 'machine-test',
+    fetch: (async (input: URL | Request): Promise<Response> => {
+      const url = String(input)
+      if (url.includes('/jobToken/exchange')) return new Response(JSON.stringify({ token: 'jt-queue-ok' }))
+      if (url.includes('/userinfo')) return new Response(JSON.stringify({ id: 'user-queue-ok' }))
+      if (url.includes('/ask/queue/status')) {
+        polls++
+        return new Response(JSON.stringify({
+          isQueued: false,
+          queueCount: 0,
+          waitTime: 0,
+          retryAfterSeconds: 2,
+          serviceAvailable: true,
+        }))
+      }
+      if (url.includes('/agent_chat_generation')) {
+        chatCalls++
+        if (chatCalls === 1) return new Response(qoderQueueBody, { status: 403 })
+        return new Response(okBody, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+      }
+      throw new Error(`unexpected URL: ${url}`)
+    }) as typeof fetch,
+  })
+  const request: GenerateOptions = {
+    provider: 'qoder-official',
+    model: 'cmodel',
+    messages: [createUserMessage({ content: [{ type: 'text', text: 'Hello' }], source: { kind: 'user' } })],
+  }
+
+  const chunks = []
+  for await (const chunk of transport.stream(request)) chunks.push(chunk)
+  assert.equal(polls, 1)
+  assert.equal(chatCalls, 2)
+  const finish = chunks.find(chunk => chunk.type === 'finish')
+  assert.equal(finish?.type === 'finish' ? finish.reason.kind : undefined, 'stop')
+})
+
+test('QoderTransport gives up when the queue does not clear inside the budget', async () => {
+  let polls = 0
+  const transport = createQoderTransport({
+    region: 'global',
+    resolvePat: () => Promise.resolve('pt-queue-budget'),
+    resolveMachineId: () => 'machine-test',
+    queueWaitBudgetMs: () => 40,
+    fetch: (async (input: URL | Request): Promise<Response> => {
+      const url = String(input)
+      if (url.includes('/jobToken/exchange')) return new Response(JSON.stringify({ token: 'jt-queue-budget' }))
+      if (url.includes('/userinfo')) return new Response(JSON.stringify({ id: 'user-queue-budget' }))
+      if (url.includes('/ask/queue/status')) {
+        polls++
+        return new Response(JSON.stringify({
+          isQueued: true,
+          queueCount: 500,
+          waitTime: 120,
+          retryAfterSeconds: 2,
+          serviceAvailable: true,
+        }))
+      }
+      if (url.includes('/agent_chat_generation')) return new Response(qoderQueueBody, { status: 403 })
+      throw new Error(`unexpected URL: ${url}`)
+    }) as typeof fetch,
+  })
+  const request: GenerateOptions = {
+    provider: 'qoder-official',
+    model: 'cmodel',
+    messages: [createUserMessage({ content: [{ type: 'text', text: 'Hello' }], source: { kind: 'user' } })],
+  }
+
+  await assert.rejects(async () => {
+    for await (const _chunk of transport.stream(request)) continue
+  }, (error: Error) => error instanceof QoderLlmError && error.code === 'RATE_LIMIT')
+  // One poll answers immediately, one runs after the single budget-sized sleep;
+  // neither clears the entry, so the failure is handed to the host.
+  assert.equal(polls, 2)
+})
+
+test('QoderTransport polls when the queue answer arrives inside the SSE envelope', async () => {
+  // The queue answer can arrive as HTTP 200 + statusCodeValue 403, which throws
+  // from the SSE parser.
+  let chatCalls = 0
+  let polls = 0
+  const queueEnvelope = `data: ${JSON.stringify({ statusCodeValue: 403, body: qoderQueueBody })}\n\n`
+  const okChunk = JSON.stringify({
+    id: 'chat-envelope',
+    model: 'cmodel',
+    choices: [{ index: 0, delta: { role: 'assistant', content: 'hi' }, finish_reason: null }],
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+  })
+  const okBody = `data: ${JSON.stringify({ statusCodeValue: 200, body: okChunk })}\n\ndata: [DONE]\n\n`
+  const transport = createQoderTransport({
+    region: 'global',
+    resolvePat: () => Promise.resolve('pt-envelope-queue'),
+    resolveMachineId: () => 'machine-test',
+    fetch: (async (input: URL | Request): Promise<Response> => {
+      const url = String(input)
+      if (url.includes('/jobToken/exchange')) return new Response(JSON.stringify({ token: 'jt-envelope-queue' }))
+      if (url.includes('/userinfo')) return new Response(JSON.stringify({ id: 'user-envelope-queue' }))
+      if (url.includes('/ask/queue/status')) {
+        polls++
+        return new Response(JSON.stringify({
+          isQueued: false,
+          queueCount: 0,
+          waitTime: 0,
+          retryAfterSeconds: 2,
+          serviceAvailable: true,
+        }))
+      }
+      if (url.includes('/agent_chat_generation')) {
+        chatCalls++
+        const body = chatCalls === 1 ? queueEnvelope : okBody
+        return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+      }
+      throw new Error(`unexpected URL: ${url}`)
+    }) as typeof fetch,
+  })
+  const request: GenerateOptions = {
+    provider: 'qoder-official',
+    model: 'cmodel',
+    messages: [createUserMessage({ content: [{ type: 'text', text: 'Hello' }], source: { kind: 'user' } })],
+  }
+
+  const chunks = []
+  for await (const chunk of transport.stream(request)) chunks.push(chunk)
+  assert.equal(polls, 1)
+  assert.equal(chatCalls, 2)
+  const finish = chunks.find(chunk => chunk.type === 'finish')
+  assert.equal(finish?.type === 'finish' ? finish.reason.kind : undefined, 'stop')
+})
+
+test('QoderTransport stops a queue wait as soon as the caller aborts', async () => {
+  const controller = new AbortController()
+  let polls = 0
+  const transport = createQoderTransport({
+    region: 'global',
+    resolvePat: () => Promise.resolve('pt-queue-abort'),
+    resolveMachineId: () => 'machine-test',
+    onQueueWait: () => controller.abort(),
+    fetch: (async (input: URL | Request): Promise<Response> => {
+      const url = String(input)
+      if (url.includes('/jobToken/exchange')) return new Response(JSON.stringify({ token: 'jt-queue-abort' }))
+      if (url.includes('/userinfo')) return new Response(JSON.stringify({ id: 'user-queue-abort' }))
+      if (url.includes('/ask/queue/status')) {
+        polls++
+        return new Response(JSON.stringify({
+          isQueued: true,
+          queueCount: 900,
+          waitTime: 300,
+          retryAfterSeconds: 30,
+          serviceAvailable: true,
+        }))
+      }
+      if (url.includes('/agent_chat_generation')) return new Response(qoderQueueBody, { status: 403 })
+      throw new Error(`unexpected URL: ${url}`)
+    }) as typeof fetch,
+  })
+  const request: GenerateOptions = {
+    provider: 'qoder-official',
+    model: 'cmodel',
+    signal: controller.signal,
+    messages: [createUserMessage({ content: [{ type: 'text', text: 'Hello' }], source: { kind: 'user' } })],
+  }
+
+  await assert.rejects(async () => {
+    for await (const _chunk of transport.stream(request)) continue
+  }, (error: Error) => error instanceof QoderLlmError && error.code === 'ABORTED')
+  assert.equal(polls, 1)
+})
+
 test('QoderTransport reads the daily-limit 403 as QUOTA and does not re-auth', async () => {
-  // dsh-qoder-connect#10, end to end: the upstream answers inside its SSE
-  // envelope with statusCodeValue 403 and the daily billing counter's own body.
-  // Coded AUTH this reached dsh-llm-pi-ai as AUTH, so the UI said "API 密钥无效"
-  // and the user regenerated a PAT that was never the problem — while the counter
-  // simply resets the next day.
+  // End to end: the SSE envelope carries statusCodeValue 403 with the daily
+  // billing counter's body — QUOTA, never AUTH, since no fresh PAT fixes it.
   let chatCalls = 0
   let exchanges = 0
   const refreshFailures: number[] = []
@@ -584,10 +836,8 @@ test('QoderTransport reads the daily-limit 403 as QUOTA and does not re-auth', a
 })
 
 test('QoderTransport reports an exhausted self-heal once, not once per host retry', async () => {
-  // The observed outage: one upstream rejection that no fresh token could
-  // clear, retried 59 times by the host across 75 steps. The transport
-  // re-heals inside every one of those, so the notice needs a latch or the
-  // conversation fills with identical rows.
+  // One rejection no fresh token can clear, retried by the host across many steps:
+  // the transport re-heals inside every one, so the notice needs a latch.
   let exchanges = 0
   let chatCalls = 0
   const failures: Array<{ at: number; status?: number }> = []
@@ -690,10 +940,8 @@ test('QoderTransport re-arms the failed-heal notice after a chat is accepted', a
 })
 
 test('QoderTransport does not print a stale success notice after a failed heal', async () => {
-  // The observed defect: a heal at 16:56 whose own retry was also rejected
-  // left its success notice pending. A chat accepted 51 minutes later flushed
-  // it, printing "jobToken 已自动刷新（16:56:13）" next to a 17:47 message —
-  // directly contradicting the failure row already shown for the same heal.
+  // A heal whose own retry was rejected leaves its notice pending; a chat accepted
+  // much later must not flush it over the failure row already shown.
   let exchanges = 0
   let chatCalls = 0
   let acceptNext = false
@@ -888,4 +1136,325 @@ test('QoderUsageReader retries a 401 usage read once with a fresh job token', as
   assert.equal(exchanges, 2)
   assert.equal(account.usage?.userQuota?.total, 300)
 })
+
+test('QoderTransport replays when the entry clears even without capacity', async () => {
+  // The official client treats isQueued:false as the grant; serviceAvailable is
+  // not part of that decision.
+  let polls = 0
+  let chatCalls = 0
+  const transport = createQoderTransport({
+    region: 'global',
+    resolvePat: () => Promise.resolve('pt-queue-capacity'),
+    resolveMachineId: () => 'machine-test',
+    queueWaitBudgetMs: () => 80,
+    fetch: (async (input: URL | Request): Promise<Response> => {
+      const url = String(input)
+      if (url.includes('/jobToken/exchange')) return new Response(JSON.stringify({ token: 'jt-queue-capacity' }))
+      if (url.includes('/userinfo')) return new Response(JSON.stringify({ id: 'user-queue-capacity' }))
+      if (url.includes('/ask/queue/status')) {
+        polls++
+        return new Response(JSON.stringify({
+          isQueued: false,
+          serviceAvailable: false,
+          queueCount: 0,
+          waitTime: 0,
+          retryAfterSeconds: 2,
+        }))
+      }
+      if (url.includes('/agent_chat_generation')) {
+        chatCalls++
+        return new Response(qoderQueueBody, { status: 403 })
+      }
+      throw new Error(`unexpected URL: ${url}`)
+    }) as typeof fetch,
+  })
+  const request: GenerateOptions = {
+    provider: 'qoder-official',
+    model: 'cmodel',
+    messages: [createUserMessage({ content: [{ type: 'text', text: 'Hello' }], source: { kind: 'user' } })],
+  }
+
+  await assert.rejects(async () => {
+    for await (const _chunk of transport.stream(request)) continue
+  }, (error: Error) => error instanceof QoderLlmError && error.code === 'RATE_LIMIT')
+  assert.ok(polls >= 1)
+  // Replayed once: the cleared entry is a grant.
+  assert.equal(chatCalls, 2)
+})
+
+test('QoderTransport hands the queue answer to the host when the wait is off', async () => {
+  let polls = 0
+  let chatCalls = 0
+  const transport = createQoderTransport({
+    region: 'global',
+    resolvePat: () => Promise.resolve('pt-queue-off'),
+    resolveMachineId: () => 'machine-test',
+    queueWait: () => false,
+    fetch: (async (input: URL | Request): Promise<Response> => {
+      const url = String(input)
+      if (url.includes('/jobToken/exchange')) return new Response(JSON.stringify({ token: 'jt-queue-off' }))
+      if (url.includes('/userinfo')) return new Response(JSON.stringify({ id: 'user-queue-off' }))
+      if (url.includes('/ask/queue/status')) {
+        polls++
+        return new Response(JSON.stringify({ isQueued: false, queueCount: 0, waitTime: 0, retryAfterSeconds: 2 }))
+      }
+      if (url.includes('/agent_chat_generation')) {
+        chatCalls++
+        return new Response(qoderQueueBody, { status: 403 })
+      }
+      throw new Error(`unexpected URL: ${url}`)
+    }) as typeof fetch,
+  })
+  const request: GenerateOptions = {
+    provider: 'qoder-official',
+    model: 'cmodel',
+    messages: [createUserMessage({ content: [{ type: 'text', text: 'Hello' }], source: { kind: 'user' } })],
+  }
+
+  await assert.rejects(async () => {
+    for await (const _chunk of transport.stream(request)) continue
+  }, (error: Error) => error instanceof QoderLlmError && error.code === 'RATE_LIMIT')
+  // No poll, no replay: the failure keeps its hint for the host.
+  assert.equal(polls, 0)
+  assert.equal(chatCalls, 1)
+})
+
+test('QoderTransport removes abort listener and cleans up on re-auth backoff abort', async () => {
+  let exchanges = 0
+  let chatCalls = 0
+  const transport = createQoderTransport({
+    region: 'global',
+    resolvePat: () => Promise.resolve('pt-backoff-abort'),
+    resolveMachineId: () => 'machine-test',
+    fetch: (async (input: URL | Request): Promise<Response> => {
+      const url = String(input)
+      if (url.includes('/jobToken/exchange')) {
+        exchanges++
+        return new Response(JSON.stringify({ token: `jt-${exchanges}` }))
+      }
+      if (url.includes('/userinfo')) return new Response(JSON.stringify({ id: `user-${exchanges}` }))
+      if (url.includes('/agent_chat_generation')) {
+        chatCalls++
+        return new Response('', { status: 401 })
+      }
+      throw new Error(`unexpected URL: ${url}`)
+    }) as typeof fetch,
+  })
+
+  const controller = new AbortController()
+  const request: GenerateOptions = {
+    provider: 'qoder-official',
+    model: 'cmodel',
+    messages: [createUserMessage({ content: [{ type: 'text', text: 'Hello' }], source: { kind: 'user' } })],
+    signal: controller.signal,
+  }
+
+  // Abort during the 2s backoff after the first fresh token is rejected
+  setTimeout(() => controller.abort(), 100)
+
+  await assert.rejects(async () => {
+    for await (const _chunk of transport.stream(request)) continue
+  }, (error: Error) => error instanceof QoderLlmError && error.code === 'ABORTED')
+
+  assert.equal(chatCalls, 2)
+  assert.equal(getEventListeners(controller.signal, 'abort').length, 0)
+})
+
+test('QoderTransport routes sessionId through onJobTokenRefreshed and onJobTokenRefreshFailed', async () => {
+  let refreshedSessionId: string | undefined
+  let failedSessionId: string | undefined
+  let shouldFail = false
+  let chatCalls = 0
+
+  const transport = createQoderTransport({
+    region: 'global',
+    resolvePat: () => Promise.resolve('pt-session-route'),
+    resolveMachineId: () => 'machine-test',
+    onJobTokenRefreshed: info => {
+      refreshedSessionId = info.sessionId
+    },
+    onJobTokenRefreshFailed: info => {
+      failedSessionId = info.sessionId
+    },
+    fetch: (async (input: URL | Request): Promise<Response> => {
+      const url = String(input)
+      if (url.includes('/jobToken/exchange')) return new Response(JSON.stringify({ token: 'jt-sess' }))
+      if (url.includes('/userinfo')) return new Response(JSON.stringify({ id: 'user-sess' }))
+      if (url.includes('/agent_chat_generation')) {
+        chatCalls++
+        if (shouldFail) return new Response('', { status: 401 })
+        return chatCalls === 1 ? new Response('', { status: 401 }) : new Response('data: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } })
+      }
+      throw new Error(`unexpected URL: ${url}`)
+    }) as typeof fetch,
+  })
+
+  // Test successful heal routing
+  const reqSuccess: GenerateOptions = {
+    provider: 'qoder-official',
+    model: 'cmodel',
+    messages: [createUserMessage({ content: [{ type: 'text', text: 'Hello' }], source: { kind: 'user' } })],
+    sessionId: 'session-alpha-123' as unknown as GenerateOptions['sessionId'],
+  }
+  for await (const _chunk of transport.stream(reqSuccess)) continue
+  assert.equal(refreshedSessionId, 'session-alpha-123')
+
+  // Test failed heal routing
+  shouldFail = true
+  const reqFail: GenerateOptions = {
+    provider: 'qoder-official',
+    model: 'cmodel',
+    messages: [createUserMessage({ content: [{ type: 'text', text: 'Hello' }], source: { kind: 'user' } })],
+    sessionId: 'session-beta-456' as unknown as GenerateOptions['sessionId'],
+  }
+  await assert.rejects(async () => {
+    for await (const _chunk of transport.stream(reqFail)) continue
+  }, (error: unknown) => (error as { failure?: { status?: number } })?.failure?.status === 401)
+  assert.equal(failedSessionId, 'session-beta-456')
+})
+
+test('QoderTransport reports a healed job token however long the retry waited', async () => {
+  // The notice used to be dropped when it was stamped over five minutes before
+  // acceptance — i.e. whenever the healed retry waited in queue. The clock jumps
+  // only while that response is in flight and is restored inside the callback.
+  let refreshed: { at: number, sessionId?: string } | undefined
+  let chatCalls = 0
+  let stamp = Date.now()
+  const realNow = Date.now
+  try {
+    const transport = createQoderTransport({
+      region: 'global',
+      resolvePat: () => Promise.resolve('pt-long-wait'),
+      resolveMachineId: () => 'machine-test',
+      onJobTokenRefreshed: info => {
+        Date.now = realNow
+        refreshed = {
+          at: info.at,
+          ...(info.sessionId === undefined ? {} : { sessionId: info.sessionId }),
+        }
+      },
+      fetch: (async (input: URL | Request): Promise<Response> => {
+        const url = String(input)
+        if (url.includes('/jobToken/exchange')) return new Response(JSON.stringify({ token: 'jt-long' }))
+        if (url.includes('/userinfo')) return new Response(JSON.stringify({ id: 'user-long' }))
+        if (url.includes('/agent_chat_generation')) {
+          chatCalls++
+          if (chatCalls === 1) return new Response('', { status: 401 })
+          // The healed retry sits in the upstream queue: minutes pass before its
+          // first byte arrives.
+          stamp = realNow()
+          Date.now = () => stamp + 6 * 60 * 1000
+          return new Response('data: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } })
+        }
+        throw new Error(`unexpected URL: ${url}`)
+      }) as typeof fetch,
+    })
+
+    const request: GenerateOptions = {
+      provider: 'qoder-official',
+      model: 'cmodel',
+      messages: [createUserMessage({ content: [{ type: 'text', text: 'Hello' }], source: { kind: 'user' } })],
+      sessionId: 'session-long-wait' as unknown as GenerateOptions['sessionId'],
+    }
+    for await (const _chunk of transport.stream(request)) continue
+
+    assert.equal(chatCalls, 2)
+    assert.equal(refreshed?.sessionId, 'session-long-wait')
+    // The row still names the rotation (it happened before the wait), not the
+    // acceptance, and the jump does not move that timestamp.
+    assert.ok((refreshed?.at ?? Infinity) <= stamp)
+  } finally {
+    Date.now = realNow
+  }
+})
+
+test('QoderTransport removes abort listener on re-auth backoff timer resolve', async () => {
+  let exchanges = 0
+  let chatCalls = 0
+  const transport = createQoderTransport({
+    region: 'global',
+    resolvePat: () => Promise.resolve('pt-backoff-resolve'),
+    resolveMachineId: () => 'machine-test',
+    fetch: (async (input: URL | Request): Promise<Response> => {
+      const url = String(input)
+      if (url.includes('/jobToken/exchange')) {
+        exchanges++
+        return new Response(JSON.stringify({ token: `jt-${exchanges}` }))
+      }
+      if (url.includes('/userinfo')) return new Response(JSON.stringify({ id: `user-${exchanges}` }))
+      if (url.includes('/agent_chat_generation')) {
+        chatCalls++
+        return chatCalls < 3
+          ? new Response('', { status: 401 })
+          : new Response('data: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } })
+      }
+      throw new Error(`unexpected URL: ${url}`)
+    }) as typeof fetch,
+  })
+
+  const controller = new AbortController()
+  const request: GenerateOptions = {
+    provider: 'qoder-official',
+    model: 'cmodel',
+    messages: [createUserMessage({ content: [{ type: 'text', text: 'Hello' }], source: { kind: 'user' } })],
+    signal: controller.signal,
+  }
+
+  // Backoff timer expires and resolves normally without aborting
+  for await (const _chunk of transport.stream(request)) continue
+
+  assert.equal(chatCalls, 3)
+  assert.equal(getEventListeners(controller.signal, 'abort').length, 0)
+})
+
+test('QoderTransport never replays a stream that already produced chunks before an error', async () => {
+  let chatCalls = 0
+  const transport = createQoderTransport({
+    region: 'global',
+    resolvePat: () => Promise.resolve('pt-no-replay'),
+    resolveMachineId: () => 'machine-test',
+    fetch: (async (input: URL | Request): Promise<Response> => {
+      const url = String(input)
+      if (url.includes('/jobToken/exchange')) return new Response(JSON.stringify({ token: 'jt-replay' }))
+      if (url.includes('/userinfo')) return new Response(JSON.stringify({ id: 'user-replay' }))
+      if (url.includes('/agent_chat_generation')) {
+        chatCalls++
+        // Stream that emits a valid reasoning chunk, then a 401 envelope mid-stream.
+        // Without the `produced` guard this would trigger a full request replay.
+        const okInner = JSON.stringify({ choices: [{ delta: { reasoning_content: 'thinking...' } }] })
+        const okEnvelope = JSON.stringify({ statusCodeValue: 200, body: okInner })
+        const errEnvelope = JSON.stringify({ statusCodeValue: 401, body: 'unauthorized' })
+        const stream = new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(`data: ${okEnvelope}\n\n`))
+            controller.enqueue(new TextEncoder().encode(`data: ${errEnvelope}\n\n`))
+            controller.close()
+          },
+        })
+        return new Response(stream, { headers: { 'content-type': 'text/event-stream' } })
+      }
+      throw new Error(`unexpected URL: ${url}`)
+    }) as typeof fetch,
+  })
+
+  const request: GenerateOptions = {
+    provider: 'qoder-official',
+    model: 'cmodel',
+    messages: [createUserMessage({ content: [{ type: 'text', text: 'Hello' }], source: { kind: 'user' } })],
+  }
+
+  const collected: StreamChunk[] = []
+  await assert.rejects(async () => {
+    for await (const chunk of transport.stream(request)) {
+      collected.push(chunk)
+    }
+  }, (error: Error) => error instanceof QoderLlmError && error.failure?.status === 401)
+
+  // Produced content must NOT cause a replay: chat was called only once, chunks were emitted
+  assert.equal(chatCalls, 1)
+  assert.ok(collected.length > 0)
+  assert.equal(collected[0]?.type, 'block-start')
+})
+
+
 

@@ -1,21 +1,9 @@
 /**
  * The last catalog that actually loaded, kept per variant and per account.
  *
- * Both the plan (§4 "降级顺序为同账号的最近成功目录 → 本版内置保守目录")
- * and the README promise this fallback, and without it a restart always drops
- * the user to the built-in roster even when a good catalog was fetched minutes
- * earlier. The built-in roster is a snapshot taken once; a fetched catalog is
- * what the upstream actually serves to this account.
- *
- * What it deliberately is *not*:
- *
- * - not a cache with a freshness policy — it never prevents a fetch, it only
- *   answers when a fetch cannot;
- * - not shared across accounts (a different account can see a different roster),
- *   nor across variants (the two regions serve overlapping ids with different
- *   capacity and rate answers);
- * - not a place for secrets: model metadata only, never a token. The account
- *   key is a one-way hash of the credential, not the credential itself.
+ * Not a cache with a freshness policy: it never prevents a fetch, it only answers
+ * when a fetch cannot. Never shared across accounts or variants, and never holds a
+ * token — the account key is a one-way hash of the credential.
  *
  * @module dsh-qoder-connect/catalog-store
  */
@@ -56,7 +44,7 @@ function isModel(value: unknown): value is QoderModelInfo {
   return typeof row['id'] === 'string' && row['id'] !== ''
     && typeof row['name'] === 'string'
     && typeof row['contextWindow'] === 'number' && Number.isFinite(row['contextWindow'])
-    && typeof row['maxTokens'] === 'number' && Number.isFinite(row['maxTokens'])
+    && (row['maxTokens'] === undefined || (typeof row['maxTokens'] === 'number' && Number.isFinite(row['maxTokens'])))
     && typeof row['supportsImages'] === 'boolean'
 }
 
@@ -81,9 +69,8 @@ export interface QoderCatalogStoreOptions {
 /**
  * The last successful catalog per account, read once and written atomically.
  *
- * Malformed content reads as "nothing saved" rather than throwing: this file
- * is an optimization for the offline and first-seconds cases, and a corrupt one
- * must never be able to stop the plugin from serving models.
+ * Malformed content reads as "nothing saved" rather than throwing: a corrupt file
+ * must never stop the plugin from serving models.
  */
 export class QoderCatalogStore {
   private readonly path: string
@@ -131,9 +118,7 @@ export class QoderCatalogStore {
 
   /**
    * Remember a catalog for an account, replacing whatever was saved before.
-   *
-   * A failed write is swallowed: the plugin has already served these models,
-   * and losing the *memory* of them is not worth surfacing.
+   * A failed write is swallowed: the models have already been served.
    */
   set(account: string, catalog: Omit<SavedCatalog, 'account'>): void {
     const entries = this.load()

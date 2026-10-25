@@ -12,14 +12,10 @@ import { QODER_AUTH_PATH, QODER_GLOBAL_AUTH_PATH } from '../src/status-paths.ts'
 import type { QoderAuthStatus } from '../src/auth.ts'
 
 /**
- * Offline tests for the PAT route.
- *
- * Same guard shape as the probe route, and for the same reasons: the loopback
- * Host/Origin check drops DNS-rebinding pages, and the in-process key proves
- * the caller was the same-origin card, since any local process can write
- * `Host: 127.0.0.1`. This route matters more than the probe one — it writes a
- * credential to disk. The region is never a request field: `save` is a closure
- * over one variant, so the route the card called IS the variant it targets.
+ * Offline tests for the PAT route. Same guards as the probe route: the loopback
+ * Host/Origin check drops DNS-rebinding pages, and the in-process key proves the
+ * caller was the same-origin card. This route writes a credential to disk. The
+ * region is never a request field — `save` closes over one variant.
  */
 
 let server: Server | undefined
@@ -45,9 +41,17 @@ async function mount(deps?: Partial<QoderAuthRouteOptions>): Promise<{ origin: s
   const key = createAuthKey()
   const calls: unknown[] = []
   const handler = qoderAuthHandler({
-    save: async pat => {
-      calls.push(['save', pat])
+    save: async (pat, label) => {
+      calls.push(label === undefined ? ['save', pat] : ['save', pat, label])
       return { ok: true, status: configuredStatus(pat) }
+    },
+    activate: async id => {
+      calls.push(['activate', id])
+      return { ok: true, status: configuredStatus('pt-active') }
+    },
+    remove: async id => {
+      calls.push(['remove', id])
+      return { ok: true, status: configuredStatus('pt-active') }
     },
     clear: async () => { calls.push(['clear']) },
     ...deps,
@@ -73,10 +77,7 @@ async function post(
   return { status: response.status, body: await response.json() as Record<string, unknown> }
 }
 
-/**
- * POST with full control over the request headers, including `Host`, which
- * `fetch` refuses to set. Needed to exercise the rebinding guard.
- */
+/** POST with full header control, `Host` included: `fetch` refuses to set it. */
 async function postRaw(
   origin: string,
   body: unknown,
@@ -139,9 +140,8 @@ describe('PAT route guards', () => {
   })
 
   it('compares the key without treating a same-length mismatch specially', async () => {
-    // The guard's constant-time check first rejects on length, then compares
-    // equal-length keys via timingSafeEqual; either way a wrong key of any
-    // length is a plain 403, never a crash and never a partial success.
+    // The key check rejects on length first, then timingSafeEqual: a wrong key of
+    // any length is a plain 403, never a crash and never a partial success.
     const { origin, key, calls } = await mount()
     const sameLength = key === '' ? 'x' : key.slice(0, -1) + (key.endsWith('0') ? '1' : '0')
     expect(sameLength).not.toBe(key)
@@ -163,8 +163,7 @@ describe('PAT route guards', () => {
 
   it('rejects a body over the 16KB ceiling', async () => {
     const { origin, key, calls } = await mount()
-    // A PAT is a short string: the ceiling was cut down from the WorkBuddy-era
-    // credential-document size, and a runaway body must not be buffered.
+    // A PAT is a short string, so the body ceiling is small and a runaway body is never buffered.
     const { status } = await post(origin, { action: 'save-pat', pat: 'x'.repeat(20 * 1024) }, { 'X-Qoder-Auth-Key': key })
     expect(status).toBe(413)
     expect(calls).toEqual([])
@@ -179,6 +178,12 @@ describe('PAT route actions', () => {
     expect(calls).toEqual([['save', 'pt-good-1234']])
     expect(body).toMatchObject({ ok: true, status: { state: 'configured', pat: { patTail: '1234' } } })
     expect(JSON.stringify(body)).not.toContain('pt-good-1234')
+  })
+
+  it('passes an optional display label to save', async () => {
+    const { origin, key, calls } = await mount()
+    await post(origin, { action: 'save-pat', pat: 'pt-labeled', label: '  工作号  ' }, { 'X-Qoder-Auth-Key': key })
+    expect(calls).toEqual([['save', 'pt-labeled', '  工作号  ']])
   })
 
   it('refuses a save-pat with a blank token before calling save', async () => {
@@ -215,6 +220,38 @@ describe('PAT route actions', () => {
     expect(status).toBe(200)
     expect(body).toEqual({ ok: true })
     expect(calls).toEqual([['clear']])
+  })
+
+  it('activates and removes one saved entry by id', async () => {
+    const { origin, key, calls } = await mount()
+    const activated = await post(origin, { action: 'activate', id: 'id-second' }, { 'X-Qoder-Auth-Key': key })
+    expect(activated.status).toBe(200)
+    expect(activated.body).toMatchObject({ ok: true, status: { state: 'configured' } })
+    const removed = await post(origin, { action: 'remove', id: 'id-second' }, { 'X-Qoder-Auth-Key': key })
+    expect(removed.status).toBe(200)
+    expect(removed.body).toMatchObject({ ok: true })
+    expect(calls).toEqual([['activate', 'id-second'], ['remove', 'id-second']])
+  })
+
+  it('reports an unknown saved id as a stable refusal, not a transport error', async () => {
+    const { origin, key } = await mount({
+      activate: async () => ({ ok: false, error: 'qoder_unknown_pat' }) satisfies QoderAuthSaveResult,
+    })
+    const { status, body } = await post(origin, { action: 'activate', id: 'gone' }, { 'X-Qoder-Auth-Key': key })
+    expect(status).toBe(200)
+    expect(body).toEqual({ ok: false, error: 'qoder_unknown_pat' })
+  })
+
+  it('refuses activate/remove without an id before calling the host', async () => {
+    const { origin, key, calls } = await mount()
+    for (const action of ['activate', 'remove']) {
+      for (const id of [undefined, '', '   ', 42]) {
+        const { status, body } = await post(origin, { action, ...id === undefined ? {} : { id } }, { 'X-Qoder-Auth-Key': key })
+        expect(status).toBe(400)
+        expect(body.error).toBe('invalid action')
+      }
+    }
+    expect(calls).toEqual([])
   })
 
   it('answers a throwing operation as a result, not as a transport error', async () => {
@@ -259,7 +296,12 @@ describe('route identity is the variant', () => {
   }
 
   it('mounts the China path by default and the called path verbatim', () => {
-    const deps: QoderAuthRouteOptions = { save: async () => ({ ok: true, status: configuredStatus('pt-1') }), clear: async () => {} }
+    const deps: QoderAuthRouteOptions = {
+      save: async () => ({ ok: true, status: configuredStatus('pt-1') }),
+      activate: async () => ({ ok: true, status: configuredStatus('pt-1') }),
+      remove: async () => ({ ok: true, status: configuredStatus('pt-1') }),
+      clear: async () => {},
+    }
     const china = fakeCtx()
     registerQoderAuthRoute(china.ctx as never, deps, 'k')
     expect(china.registered).toEqual([{ path: QODER_AUTH_PATH, kind: 'exact' }])

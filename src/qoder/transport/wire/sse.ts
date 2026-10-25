@@ -8,7 +8,6 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import { QoderLlmError, qoderHttpError } from '../../errors.ts'
 import { QoderThinkingParser, type QoderContentSegment } from './thinking.ts'
-import { repairToolCallArguments } from './tool-arguments.ts'
 import type { QoderInnerChunk, QoderSseEnvelope } from './wire-types.ts'
 
 const doneMarker = '[DONE]'
@@ -17,6 +16,14 @@ export const defaultMaxSseBufferChars = 2 * 1024 * 1024
 export interface QoderSseOptions {
   onActivity?: () => void
   maxBufferChars?: number
+  /** One-line diagnostic sink; reports a tolerated damaged tool-call argument block. */
+  onDiag?: (message: string) => void
+  /**
+   * Called once per notice: the upstream filtered the reply, or named a finish reason this
+   * client does not know. Both end as a normal stop, so these are the only user-visible
+   * traces that the answer may be incomplete.
+   */
+  onNotice?: (notice: QoderSseNotice) => void
 }
 
 interface TextualBlockState {
@@ -39,6 +46,26 @@ function malformed(message: string): QoderLlmError {
   return new QoderLlmError(message, 'MALFORMED_RESPONSE')
 }
 
+/**
+ * Describe a completed call's arguments for the diagnostic log, never for control flow.
+ *
+ * The official client does not judge argument text at the transport layer: it concatenates
+ * the deltas, tries `JSON.parse` once at block end, and on failure hands the caller an empty
+ * input plus the raw string. The tool layer then answers `Error: Invalid parameters provided`
+ * as a tool result, so the model re-emits the call and the turn survives. Every "damaged
+ * shape" this file used to classify was a case of the transport deciding to die where the
+ * client upstream of it would not, so the judgment is gone; what remains is a log line.
+ */
+function argumentsIssue(text: string): string | undefined {
+  if (!text.trim()) return undefined
+  try {
+    JSON.parse(text)
+    return undefined
+  } catch {
+    return `${text.length} chars, not valid JSON`
+  }
+}
+
 function parseEnvelope(rawData: string): QoderSseEnvelope {
   let value: unknown
   try {
@@ -59,16 +86,9 @@ function parseEnvelope(rawData: string): QoderSseEnvelope {
   }
   if (envelope.statusCodeValue !== undefined && envelope.statusCodeValue !== 200) {
     const status = envelope.statusCodeValue
-    // Forward the envelope body into the reported message. Qoder answers a
-    // rejected chat with a 200 SSE whose first envelope carries the failure,
-    // and that body is where the real reason lives (quota exhausted, region
-    // permission, risk control, ...). Dropping it left every such rejection
-    // reading as a bare "invalid API key" with nothing to act on.
-    //
-    // The body is also handed to the classifier itself: a 401/403 envelope
-    // whose body carries the queue markers (code 10605, isQueued,
-    // queueCount, retryAfterSeconds) is a throttle, not an authorization
-    // failure, and must not send the transport into a job-token exchange.
+    // Forward the envelope body into the message: a rejected chat arrives as a 200
+    // SSE whose first envelope carries the reason. The body is also handed to the
+    // classifier, so a 401/403 carrying queue markers reads as a throttle.
     throw qoderHttpError(
       envelope.body
         ? `Qoder service returned upstream error status ${status}: ${envelope.body}`
@@ -109,15 +129,43 @@ function tokenUsage(innerChunk: QoderInnerChunk): TokenUsage | undefined {
   }
 }
 
-function finishKind(value: string | null | undefined): SuccessfulFinishKind | undefined {
+/**
+ * The finish reasons the official client treats as a filtered reply.
+ *
+ * `qodercli` classifies `content_filter`, `refusal` and `sensitive` as a refusal stop
+ * reason (`Ffo` in its bundle). The harness has no refusal kind, so the caller reports a
+ * normal stop plus a visible notice; what it must NOT do is let a filtered response carry
+ * executable tool calls, which is why {@link parseQoderSse} withholds them.
+ */
+const filteredFinishReasons: ReadonlySet<string> = new Set(['content_filter', 'refusal', 'sensitive'])
+
+/** What a caller may need to tell the user about how one stream ended. */
+export type QoderSseNotice = { kind: 'filtered', reason: string }
+
+/**
+ * Map one upstream finish reason onto the harness vocabulary.
+ *
+ * A filtered reply becomes `stop`: the official client would call it `refusal`, which the
+ * harness cannot express, and the caller adds a visible notice instead. An unrecognised
+ * reason fails the stream as non-retryable, exactly as the official chat client does
+ * (`UnsupportedFinishReasonError`, `retryable = false`); guessing a normal stop there would
+ * hide a vocabulary drift as a complete answer.
+ */
+function finishKind(
+  value: string | null | undefined,
+  onDiag?: (message: string) => void,
+): SuccessfulFinishKind | undefined {
   if (value === undefined || value === null || value === '') return undefined
   if (value === 'stop') return 'stop'
   if (value === 'length') return 'max-tokens'
-  if (value === 'tool_calls' || value === 'toolUse') return 'tool-calls'
-  if (value === 'content_filter') {
-    throw new QoderLlmError('Qoder blocked the response through its content filter.', 'PROVIDER_ERROR')
+  if (value === 'tool_calls' || value === 'toolUse' || value === 'function_call') return 'tool-calls'
+  if (filteredFinishReasons.has(value)) {
+    onDiag?.(`upstream filtered the response (${value}); reporting a normal stop`)
+    return 'stop'
   }
-  throw malformed(`Qoder returned unknown finish reason "${value}".`)
+  // `UNSUPPORTED_` is the prefix the host classifies as a non-retryable client failure, so
+  // this surfaces as a clear error instead of a retried 5xx.
+  throw new QoderLlmError(`Qoder returned unsupported finish reason "${value}".`, 'UNSUPPORTED_FINISH_REASON')
 }
 
 export async function* parseQoderSse(
@@ -136,6 +184,9 @@ export async function* parseQoderSse(
   let pendingUsage: TokenUsage | undefined
   let terminalKind: SuccessfulFinishKind = 'stop'
   let sawContent = false
+  // The notices are user-visible rows, so report each at most once per stream even when
+  // the upstream repeats the reason on several choices.
+  let filteredReason: string | undefined
   const maxBufferChars = options.maxBufferChars ?? defaultMaxSseBufferChars
 
   const closeTextual = (): StreamChunk[] => {
@@ -227,7 +278,13 @@ export async function* parseQoderSse(
         pendingUsage = tokenUsage(innerChunk) ?? pendingUsage
 
         for (const choice of innerChunk.choices ?? []) {
-          terminalKind = finishKind(choice.finish_reason) ?? terminalKind
+          if (typeof choice.finish_reason === 'string'
+            && filteredFinishReasons.has(choice.finish_reason)
+            && filteredReason === undefined) {
+            filteredReason = choice.finish_reason
+            options.onNotice?.({ kind: 'filtered', reason: choice.finish_reason })
+          }
+          terminalKind = finishKind(choice.finish_reason, options.onDiag) ?? terminalKind
           const delta = choice.delta
           if (!delta) continue
 
@@ -268,7 +325,6 @@ export async function* parseQoderSse(
                   state.id = rawCall.id
                 }
               }
-              let hasNewName = false
               if (rawCall.function?.name !== undefined) {
                 const name = rawCall.function.name
                 if (name === '' || name === null) {
@@ -278,10 +334,7 @@ export async function* parseQoderSse(
                   throw malformed('Qoder tool call has an invalid name.')
                 } else {
                   if (state.name && state.name !== name) throw malformed('Qoder changed a streamed tool-call name.')
-                  if (state.name !== name) {
-                    state.name = name
-                    hasNewName = true
-                  }
+                  state.name = name
                 }
               }
               if (rawCall.function?.arguments !== undefined) {
@@ -291,27 +344,12 @@ export async function* parseQoderSse(
                 state.arguments += rawCall.function.arguments
               }
 
-              const wasOpen = state.blockIndex !== undefined
-              for (const chunk of openToolCall(state)) yield chunk
-              if (wasOpen && state.blockIndex !== undefined && state.emittedArguments < state.arguments.length) {
-                const argumentsDelta = state.arguments.slice(state.emittedArguments)
-                state.emittedArguments = state.arguments.length
-                yield {
-                  type: 'tool-call-delta',
-                  index: state.blockIndex,
-                  id: ToolCallId(state.id),
-                  ...state.name ? { name: state.name } : {},
-                  argumentsDelta,
-                }
-              } else if (wasOpen && state.blockIndex !== undefined && hasNewName) {
-                yield {
-                  type: 'tool-call-delta',
-                  index: state.blockIndex,
-                  id: ToolCallId(state.id),
-                  name: state.name,
-                  argumentsDelta: '',
-                }
-              }
+              // Tool blocks are NOT opened while streaming. `finish_reason` arrives in a later
+              // chunk, so a call opened here would already be a dangling block when a filter
+              // is announced; the harness assembles an unclosed tool call from its deltas and
+              // then executes it (BlockAssembler only drops calls on max-tokens). Buffering the
+              // arguments until the stream ends is what makes "filtered replies carry no calls"
+              // true for the real ordering, at the cost of showing the call once it completes.
             }
           }
         }
@@ -322,25 +360,41 @@ export async function* parseQoderSse(
     reader.releaseLock()
   }
 
-  if (!sawDone) throw new QoderLlmError('SSE stream ended prematurely without [DONE].', 'TRANSPORT')
+  // Load-bearing wording: pi-ai reclassifies failures from this text, and TRANSPORT
+  // requires the exact "stream ended without" phrase with no status digits.
+  if (!sawDone) throw new QoderLlmError('Qoder SSE stream ended without [DONE].', 'TRANSPORT')
 
   for (const segment of thinkingParser.finish()) {
     for (const chunk of appendSegment(segment)) yield chunk
   }
   for (const chunk of closeTextual()) yield chunk
 
-  for (const [, state] of [...toolCalls.entries()].sort(([left], [right]) => left - right)) {
-    if (!state.id || !state.name) throw malformed('Qoder completed an unidentifiable tool call.')
+  // An unidentifiable call cannot execute at all, so it stays provider corruption unless the
+  // provider already admitted it ran out of output. The ARGUMENTS are never judged here: the
+  // official client concatenates them, parses once, and hands an unparsable payload on as an
+  // empty input plus the raw text, which the tool layer answers as an invalid-argument error
+  // so the model can retry. Sending the bytes through keeps that behavior, whatever shape.
+  //
+  // A FILTERED reply is the one case that must not carry calls: the harness plans tools from
+  // the blocks, not from the finish kind, so an emitted call would run something the upstream
+  // refused to deliver. Calls are only opened here, at the end, so skipping this loop leaves
+  // the downstream with text alone.
+  const truncated = terminalKind === 'max-tokens'
+  let emittedCalls = 0
+  if (filteredReason !== undefined && toolCalls.size > 0) {
+    options.onDiag?.(`withheld ${toolCalls.size} tool call(s): the reply was filtered (${filteredReason})`)
+  }
+  for (const [, state] of filteredReason === undefined
+    ? [...toolCalls.entries()].sort(([left], [right]) => left - right)
+    : []) {
     const normalizedArguments = state.arguments.trim() ? state.arguments : '{}'
-    let completedArguments = normalizedArguments
-    try {
-      // A completed call whose arguments pasted unescaped quotes or were cut mid-response
-      // would otherwise fail the whole turn without dispatching anything. The repair only
-      // returns text that parses as a JSON object, so anything else is still an error.
-      const repaired = repairToolCallArguments(normalizedArguments)
-      if (repaired.repairs.length > 0) completedArguments = JSON.stringify(repaired.arguments)
-    } catch {
-      throw malformed(`Qoder completed tool call "${state.name}" with malformed JSON arguments.`)
+    if (!state.id || !state.name) {
+      if (truncated) continue
+      throw malformed('Qoder completed an unidentifiable tool call.')
+    }
+    const issue = argumentsIssue(normalizedArguments)
+    if (issue !== undefined) {
+      options.onDiag?.(`tool call "${state.name}" carried unparsable arguments (${issue})`)
     }
     for (const chunk of openToolCall(state)) yield chunk
     if (state.blockIndex === undefined) throw malformed('Qoder failed to open a completed tool call.')
@@ -353,6 +407,7 @@ export async function* parseQoderSse(
         argumentsDelta: '{}',
       }
     }
+    emittedCalls += 1
     yield {
       type: 'block-end',
       index: state.blockIndex,
@@ -360,23 +415,26 @@ export async function* parseQoderSse(
         type: 'tool-call',
         id: ToolCallId(state.id),
         name: state.name,
-        // Deltas already streamed the provider's raw text; this block supersedes them, so a
-        // repaired value reaches the dispatch and the transcript through one place only.
-        arguments: completedArguments,
+        arguments: normalizedArguments,
       },
     }
   }
 
   if (pendingUsage) yield { type: 'usage', usage: pendingUsage }
-  if (!sawContent) {
+  if (!sawContent && !truncated) {
     yield {
       type: 'finish',
       reason: {
         kind: 'error',
-        failure: { message: 'Model returned a completed response with no content.', code: EMPTY_RESPONSE_CODE },
+        failure: {
+          message: filteredReason === undefined
+            ? 'Model returned a completed response with no content.'
+            : `Qoder filtered the reply (${filteredReason}) before returning any content.`,
+          code: EMPTY_RESPONSE_CODE,
+        },
       },
     }
     return
   }
-  yield { type: 'finish', reason: { kind: toolCalls.size > 0 ? 'tool-calls' : terminalKind } }
+  yield { type: 'finish', reason: { kind: emittedCalls > 0 ? 'tool-calls' : terminalKind } }
 }

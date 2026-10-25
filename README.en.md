@@ -13,15 +13,16 @@ Configure only what you use: a variant with no saved PAT shows no model group an
 
 ## Features
 
-- **PAT: save it and it works** — paste a PAT into the card and press *Save*; the token is validated live against that variant's region before anything is written, and the model group appears immediately — no DSH restart. Once signed in, *Replace PAT* (the new token overwrites only after it validates, so a mistyped paste can never strand a working credential) and *Clear PAT* are one click away.
+- **Multiple PATs, switched by hand** — each variant keeps a list of saved PATs and the card offers a select to choose the active one. Switching only changes the signing token: model toggles, context-window preferences, check-in and sidebar-quota settings are one shared configuration per variant and never follow the account. *Add PAT*, *Remove current* and *Clear all* manage the list; saving validates first, and removing or switching never touches another account's saved catalog or probe records.
+- **PAT: save it and it works** — paste a PAT into the card and press *Save*; the token is validated live against that variant's region before anything is written, and the model group appears immediately — no DSH restart. A mistyped paste can never strand a working credential.
 - **Two independent variants** — `qoder` (china) and `qoder-global` (global) keep separate credential files, routes and saved catalogs: a token minted on qoder.com does not work against the China deployment and vice versa.
-- **Three-tier model catalog (live → saved → fallback)** — the card states where the list on screen came from: *“Model list updated …”* (fetched now), *“Showing the saved model list from …”* (this account's last successful fetch, restored after a restart or a failed fetch), or *“Showing the built-in model list (not yet updated from Qoder)”* (the roster compiled into the plugin). The reason of the most recent failed fetch is shown too, and a *Refresh model list* button sits right there.
+- **Three-tier model catalog (live → saved → fallback)** — the card states where the list on screen came from: *“Model list updated …”* (fetched now), *“Showing the saved model list from …”* (this account's last successful fetch, restored after a restart or a failed fetch), or *“Showing the built-in model list (not yet updated from Qoder)”* (the roster compiled into the plugin). The reason of the most recent failed fetch is shown too, and the card's *Refresh* action re-reads the status and re-fetches the model list.
 - **One-toggle context window** — each variant card's *Context window* tab lists every model's capacity (the default and the largest declared window) and carries its own *“Use the largest declared context window”* preference (on by default): on, requests declare the maximum (e.g. Qwen3.8-Max at 1M); off, the default (200K). The two variants keep independent toggle state.
 - **Model visibility toggles & batch controls** — each variant card provides a dedicated *Model Toggles* tab (between *Context window* and *Credit details*) to freely enable or hide individual models; disabled models are hidden from the DSH model picker, keeping it tidy; includes instant search by name/ID and one-click *Enable all* / *Disable all* batch operations.
 - **Daily auto check-in & logs** — claims the daily 100 Credits automatically, **at a time you can set per variant on the card** (10:00 UTC+8 by default, the upstream's reset moment), with independent toggles and startup catch-up protection. The card features a dedicated *Check-in log* panel with audit trails, *Check in now*, *Refresh*, and *Clear logs* quick actions.
-- **Sidebar quota card + credit details** — the *“Qoder sidebar display”* card toggles a per-variant sidebar quota widget (off by default; each toggle needs its variant's PAT saved) with one shared refresh interval (default 5 min, minimum 1 min). Clicking the sidebar widget opens the *Qoder quota* panel: one row per credit package — *“Remaining / Total + bar | Expires”* — plus the cycle share and reset time. Click the same widget again to close; click the other to switch variants.
+- **Sidebar quota card + credit details** — the *“Qoder sidebar display”* card toggles a per-variant sidebar quota widget (off by default; each toggle needs its variant's PAT saved) with one shared refresh interval (default 5 min, minimum 1 min). Clicking the sidebar widget opens the *Qoder quota* panel: one row per credit package — *“Remaining / Total + bar | Expires”* — where a campaign grant (the international edition’s *SOTA Exclusive Credits*, for one) keeps its own upstream-given title and **its own expiry**. When the account reports no overall deadline (the upstream’s year-9999 sentinel), the panel states when the PAT was authorized rather than a fabricated date. Click the same widget again to close; click the other to switch variants.
 - **Rate display `x<priceFactor>`** — each model name is suffixed with the upstream-reported price multiplier (e.g. `Some Model · x0.79`, free is `x0`), spelled `x<n>` from the catalog's `price_factor`. Display only — it never changes the request; models whose rate the upstream did not report simply show no suffix.
-- **Tool-call argument recovery** — models sometimes paste quoted prose into a string value without escaping it (`…少了"两个世界"的实感。`), or a response is cut before its closing brackets. The plugin repairs the arguments and still dispatches the call instead of failing the turn. A repair is only attempted after a strict parse fails, and only used when the result parses as a JSON object; arguments that cannot be recovered still surface the provider's own error rather than invented ones.
+- **Upstream queue hints are honored** — when Qoder answers a queued or throttled request (401/403/429 body) with `retryAfterSeconds`, the plugin turns it into a local `Retry-After` header and hands it to DSH as `failure.providerRetryAfterMs`; the host retry engine can then wait until the moment the upstream asked for, instead of hammering the same still-closed window with its local backoff.
 
 ## Screenshots
 
@@ -81,7 +82,7 @@ Enable daily automatic check-in in the settings card and set each variant's own 
 
 Prerequisites:
 
-- DSH core `0.1.7-rc.1` or newer (this plugin peers on the `@deepseek-ai/*` `>=0.1.7-rc.1` line);
+- DSH core `0.2.1-rc.1` or newer (this plugin peers on the `@deepseek-ai/*` `>=0.2.1-rc.1` line);
 - Node.js `^22.19.0 || >=24.0.0` (per `package.json` engines);
 - your own Qoder account and at least one Personal Access Token.
 
@@ -94,6 +95,15 @@ dsh plugin --profile web add dsh-qoder-connect
 
 Swap the `--profile` value for the profile you use (`web` / `desktop` / `tui`, e.g. `dsh plugin --profile desktop add dsh-qoder-connect`) — data stays inside that profile, so web / desktop / tui never collide. On a terminal-only profile (TUI) there is no browser card: manage the PAT and check status through the bundled CLI instead; the settings card and sidebar widgets require Web or Desktop.
 
+> **DSH older than `0.2.1-rc.1`?** Use **[v0.2.5](https://github.com/masknull/dsh-qoder-connect/releases/tag/v0.2.5)** instead — the last release on the 0.1.7 line (DSH ≥ `0.1.7-rc.1`):
+>
+> ```sh
+> # From GitHub (recommended, pin the tag)
+> dsh plugin --profile web add github:masknull/dsh-qoder-connect#v0.2.5
+> # Or from npm
+> dsh plugin --profile web add dsh-qoder-connect@0.2.5
+> ```
+>
 > **DSH older than `0.1.7-rc.1`?** Use **[v0.2.0](https://github.com/masknull/dsh-qoder-connect/releases/tag/v0.2.0)** instead — the last release supporting the 0.1.5 line (DSH ≥ `0.1.5-rc.2`):
 >
 > ```sh
@@ -103,7 +113,7 @@ Swap the `--profile` value for the profile you use (`web` / `desktop` / `tui`, e
 > dsh plugin --profile web add dsh-qoder-connect@0.2.0
 > ```
 >
-> Upgrading from 0.1.5? This release removed the automatic migration of the old host's `settings.yaml`. To carry your old configuration over, migrate through **[v0.1.9](https://github.com/masknull/dsh-qoder-connect/releases/tag/v0.1.9)** (the first release with the data migration) first, then upgrade to this release.
+> Upgrading from 0.1.5? Newer releases removed the automatic migration of the old host's `settings.yaml`. To carry your old configuration over, migrate through **[v0.1.9](https://github.com/masknull/dsh-qoder-connect/releases/tag/v0.1.9)** (the first release with the data migration) first, then upgrade.
 
 ## Configuration
 
@@ -114,9 +124,23 @@ Swap the `--profile` value for the profile you use (`web` / `desktop` / `tui`, e
 
 (The card repeats the same guidance: *“Generate a PAT in your qoder.com account settings (Account → Personal Access Token), then paste it here.”*)
 
-### Save it on the card
+### Save and switch on the card
 
-DSH → Settings → Plugin Settings (插件设置) → the Qoder card: paste the PAT into the password field and press *Save* (*“Validating and saving…”* while it runs). The token is validated against that variant's region first — a refusal saves nothing and the card says *“That PAT was rejected — generate a new one in your account settings and try again.”*. Do this on both cards to run both groups side by side.
+DSH → Settings → Plugin Settings (插件设置) → the Qoder card: paste the PAT into the password field and press *Save* (*“Validating and saving…”* while it runs). The token is validated against that variant's region first — a refusal saves nothing and the card says *“That PAT was rejected — generate a new one in your account settings and try again.”*
+
+Each variant can hold several PATs: once a second one is saved, the account row shows a select — choosing an entry switches to it. *Add PAT* appends another (with an optional local-only label), *Remove current* deletes only the active one, and *Clear all* empties the list. **Configuration is shared**: model toggles, context-window preferences, check-in time and sidebar-quota settings belong to the variant, not to the account, and switching never changes them. Quota and check-in act on the active account. Check-in history is kept per variant, so switching does not retroactively check the new account in for today — use *Check in now* when needed. Do this on both cards to run both groups side by side.
+
+### Command line (optional)
+
+On a terminal-only profile the CLI manages the same list (`--provider` defaults to `qoder`):
+
+```bash
+dsh-qoder-connect pat set <token> --provider qoder   # validate, save, and activate
+dsh-qoder-connect pat list --provider qoder          # list saved tokens (* = active)
+dsh-qoder-connect pat use <id> --provider qoder      # switch
+dsh-qoder-connect pat rm <id> --provider qoder       # remove
+dsh-qoder-connect pat clear --provider qoder         # remove all (logout is an alias)
+```
 
 ### Environment-variable fallback
 
@@ -137,8 +161,8 @@ Everything the plugin owns lives in one data directory: `<profile>/.dsh-qoder-co
 
 ```text
 <profile>/.dsh-qoder-connect/
-├── .qoder-auth.json              # China PAT ({version:2, pat, region, savedAt})
-├── .qoder-global-auth.json       # Global PAT
+├── .qoder-auth.json              # China PAT list ({version:3, activeId, credentials:[{id,pat,region,savedAt,label?}]})
+├── .qoder-global-auth.json       # Global PAT list
 ├── checkin-status.json           # check-in status and history logs
 └── state/
     ├── .qoder-catalog.json       # China per-account saved catalog
@@ -151,13 +175,13 @@ Everything the plugin owns lives in one data directory: `<profile>/.dsh-qoder-co
 
 The directory follows the profile that declares this plugin (found under `$DSH_HOME/profiles/`), falling back to the Harness home when none can be determined; `DSH_QODER_DATA_DIR` overrides it explicitly.
 
-### Binding premise of the local web routes
+### Binding assumption for the local web routes
 
-The bundled loopback shim (`/v1/chat/completions` and friends) is bound by this process itself: it listens on `127.0.0.1` only and requires every request to carry a loopback Host/Origin plus a per-process random bearer, so it stays within the repository's control.
+The plugin's own loopback shim (`/v1/chat/completions` and friends) is bound by this process to `127.0.0.1` only, and requires a loopback Host/Origin plus the per-process bearer on every request — that surface is under this repository's control.
 
-The **status and control routes** (`web-status`, `probe-route`), however, are mounted on the host's `ctx.webServer`; the address that server listens on is decided by DeepSeek Harness and cannot be constrained from this repository. Those two routes hand back control keys (`authKey` / `probeKey`) in their responses, and anyone who can reach the port can use them to overwrite or clear the PAT, or trigger credit-spending probes. They already block DNS-rebinding and cross-origin requests with a loopback Host/Origin check — **but that check assumes the host web server binds a loopback address only.**
+The **status and control routes** (`web-status`, `probe-route`) are a different matter: they are mounted on the host's `ctx.webServer`, whose listen address DeepSeek Harness decides and this repository cannot constrain. Their responses hand back control keys (`authKey` / `probeKey`), and anyone who can reach that port can use them to overwrite or clear a PAT or to start a probe that spends credit. They do reject DNS-rebinding and cross-origin callers with a loopback Host/Origin check — but **that check only holds while the host web server binds a loopback address**.
 
-Therefore: **do not expose DSH's web interface to a LAN or the public internet** (via port forwarding, a reverse proxy, or making the host listen on `0.0.0.0`). Once exposed, those control keys become visible to others on the same network. If you genuinely need remote access, put a trusted reverse proxy in front and restrict the source yourself.
+So: **do not expose the DSH web UI to a LAN or the public internet** (no port forwarding, no reverse proxy, and do not let the host listen on `0.0.0.0`). Once exposed, those control keys are visible to the whole segment. If you genuinely need remote access, put a trusted reverse proxy in front and restrict the source.
 
 ## Development
 

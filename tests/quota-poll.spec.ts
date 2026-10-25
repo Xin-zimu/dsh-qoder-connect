@@ -15,16 +15,10 @@ import { QODER_GLOBAL_STATUS_PATH, QODER_STATUS_PATH } from '../src/status-paths
 import type { QoderWebStatus } from '../src/status-paths.ts'
 
 /**
- * The shared status poller: ONE ticker, one read per live variant, published
- * once for every surface.
- *
- * The poller is the meeting point of three surfaces — the expanded settings
- * cards, the enabled sidebar cards, and the open quota panel. Each acquires
- * its variant; the store keeps the holder counts, reads each live variant at
- * the tightest cadence its holders ask for, and publishes through a sequence
- * guard so a late answer can never roll a newer one back. These tests drive
- * the real store with a captured ticker and a stubbed fetch, so the behaviour
- * under test is the registry's, not a re-implementation.
+ * The shared status poller: ONE ticker, one read per live variant, published once
+ * for every surface. Each surface acquires its variant; the store keeps holder
+ * counts, reads each live variant at the tightest cadence its holders ask for, and
+ * publishes through a sequence guard so a late answer never rolls a newer one back.
  */
 
 /** A signed-in document whose credits identify which read produced it. */

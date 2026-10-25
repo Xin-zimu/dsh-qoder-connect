@@ -8,22 +8,13 @@ import { Context } from "@deepseek-ai/cordis";
 import { SettingsNamespace } from "@deepseek-ai/dsh-settings";
 //#region src/paths.d.ts
 /**
- * The plugin's data directory — the ONE place every file the plugin owns
- * lives.
+ * The plugin's data directory — the one place every file the plugin owns lives:
+ * `<profile>/.dsh-qoder-connect/state/` (PATs, catalogs, probe records,
+ * heartbeat, machine-id seed), so a profile never collects loose files.
  *
- * Layout: `<profile>/.dsh-qoder-connect/state/` (the profile discovered
- * the same way the credential store always did). Everything — PAT files,
- * saved catalogs, probe records, the host heartbeat, and the machine-id
- * seed — writes there, so a profile directory never collects loose
- * `.qoder-*` files and the whole plugin's footprint is one folder.
- *
- * Fallbacks, in order: `DSH_QODER_DATA_DIR` env override → the discovered
- * profile → the Harness home (a checkout running its own tests, or a host
- * loading the plugin from outside any profile).
- *
- * Split out of `auth.ts` so catalog/probe/heartbeat stores can import the
- * directory without pulling in the credential code (and its upstream
- * dependency) — these modules stay leaf-light on purpose.
+ * Resolution order: `DSH_QODER_DATA_DIR` → host-reported profile → discovered
+ * profile → Harness home. The host's report outranks discovery because it is the
+ * running profile, not an inference.
  *
  * @module dsh-qoder-connect/paths
  */
@@ -34,10 +25,8 @@ declare const QODER_DATA_DIR_ENV = "DSH_QODER_DATA_DIR";
 /**
  * The plugin's data directory: `<profile>/.dsh-qoder-connect`.
  *
- * Falls back to the Harness home when no profile can be discovered — a
- * checkout running its own tests, or a host that loads the plugin from
- * outside a profile — so the plugin always has somewhere to write, and
- * `DSH_QODER_DATA_DIR` overrides either way.
+ * Falls back to profile discovery, then to the Harness home, so the plugin
+ * always has somewhere to write; `DSH_QODER_DATA_DIR` overrides either way.
  */
 declare function qoderPluginDataDir(): string;
 //#endregion
@@ -54,28 +43,23 @@ declare const QODER_STATUS_PATH = "/plugins/dsh-qoder-connect/status";
  * Plugin-owned probe control endpoint.
  *
  * Separate from the status route because it accepts writes: the status route's
- * loopback Host/Origin guard protects against a DNS-rebinding *page*, which is
- * not the same as authorizing a state-changing action. This route therefore
- * also requires the in-process key the browser half receives with the status
- * document.
+ * loopback guard protects against a rebinding *page*, which is not the same as
+ * authorizing an action. This route also requires the in-process key.
  */
 declare const QODER_PROBE_PATH = "/plugins/dsh-qoder-connect/probe";
 /**
  * Plugin-owned PAT endpoint, one per variant.
  *
- * A POST here saves (validates and persists) a Personal Access Token, or
- * clears the stored one. Unlike the read-only status GET it is a write —
- * it persists a credential — so it also requires the in-process key the
- * browser half receives with the status document.
+ * A POST here saves (validates and persists) a Personal Access Token, or clears
+ * the stored one. A write, so it also requires the in-process key.
  */
 declare const QODER_AUTH_PATH = "/plugins/dsh-qoder-connect/auth";
 /**
  * The international (Qoder Global) variant's own triple of routes.
  *
- * Kept as separate constants rather than a computed suffix so both halves
- * reference literal strings: the browser bundle and the host bundle are built
- * independently, and a shared expression is one build-config drift away from
- * the desk asking a route the host never mounted.
+ * Separate constants rather than a computed suffix so both halves reference
+ * literal strings: the bundles are built independently, and a shared expression is
+ * one build-config drift away from asking a route the host never mounted.
  */
 declare const QODER_GLOBAL_STATUS_PATH = "/plugins/dsh-qoder-connect/global/status";
 declare const QODER_GLOBAL_PROBE_PATH = "/plugins/dsh-qoder-connect/global/probe";
@@ -83,27 +67,47 @@ declare const QODER_GLOBAL_AUTH_PATH = "/plugins/dsh-qoder-connect/global/auth";
 /**
  * One action the PAT route accepts.
  *
- * `save-pat` validates the pasted token against the variant's region and, only
- * on success, persists it; `clear` removes the stored credential. There is no
- * device flow and no credential import: the token is the whole auth surface.
+ * `save-pat` validates the pasted token against the variant's region and, only on
+ * success, appends it to the saved list and makes it active; `activate` switches
+ * entry; `remove` deletes one; `clear` removes every saved credential. There is no
+ * device flow. All are writes — `activate` changes which account signs later
+ * requests — so all require the in-process key.
  */
-type QoderAuthAction = 'save-pat' | 'clear';
+type QoderAuthAction = 'save-pat' | 'activate' | 'remove' | 'clear';
 /** Request body accepted by the PAT route. */
 interface QoderAuthRequest {
   action: QoderAuthAction;
   /** The token to validate and store; required for `save-pat`. */
   pat?: string;
+  /** Optional display label for a saved entry; `save-pat` only. */
+  label?: string;
+  /** Target saved entry; required for `activate` and `remove`. */
+  id?: string;
 }
 /** Where the credential in effect came from. */
 type QoderCredentialSource = 'card' | 'env' | 'cli';
 /**
- * Redacted summary of one variant's PAT.
- *
- * Never the token itself: the browser half displays where the credential came
- * from, when it was saved, and the last four characters — enough to tell two
- * tokens apart, not enough to misuse one.
+ * One saved PAT, redacted for the switch select: the id is a one-way hash prefix,
+ * the label is display copy, the tail the last four characters.
+ */
+interface QoderPatProfile {
+  id: string;
+  /** Optional display label supplied when the token was saved. */
+  label?: string;
+  /** Last four characters of the token. */
+  patTail?: string;
+  /** When this token was saved, epoch milliseconds. */
+  savedAtMs?: number;
+}
+/**
+ * Redacted summary of one variant's active PAT: never the token itself — source,
+ * save time, and the last four characters only.
  */
 interface QoderPatSummary {
+  /** Local id of the saved entry in effect; absent for the environment token. */
+  id?: string;
+  /** Display label of the saved entry in effect, when it carries one. */
+  label?: string;
   source: QoderCredentialSource;
   /** When the stored token was saved, epoch milliseconds; absent for env fallback. */
   savedAtMs?: number;
@@ -134,12 +138,10 @@ interface QoderWebProbeSection {
 interface QoderProbeAction {
   /**
    * `probe` spends credit on one model; `clear` drops recorded observations;
-   * `refresh` re-reads the credential and re-fetches the model catalog;
-   * `set-maximum-context-window` persists the card's maximum-window
-   * preference (one per variant section).
+   * `refresh` re-reads the credential and re-fetches the catalog;
+   * `set-maximum-context-window` persists the card's preference.
    *
-   * All are writes, which is why they share this route's in-process key
-   * and loopback guards rather than the read-only status GET.
+   * All are writes, hence this route's in-process key and loopback guards.
    */
   action: 'probe' | 'clear' | 'refresh' | 'set-maximum-context-window' | 'clear-checkin-logs' | 'checkin' | 'set-models-enabled';
   /** Target model id; required for `probe`. */
@@ -152,10 +154,8 @@ interface QoderProbeAction {
 /**
  * Where the models a card is currently showing came from.
  *
- * The plan requires the card to distinguish a live catalog from the built-in
- * fallback, and to say when the last attempt failed — otherwise a stale list is
- * indistinguishable from an offline one, and a user cannot tell whether the
- * models they see still match the upstream.
+ * A stale list must be distinguishable from an offline one, and the card must be
+ * able to say when the last attempt failed.
  */
 interface QoderWebCatalog {
   /**
@@ -178,12 +178,22 @@ interface QoderWebCreditAccount {
   size: number;
   unlimited?: true;
   /**
-   * When the package's credit expires, carried through in whatever form the
-   * upstream reported it (an ISO string or a numeric epoch-millisecond value
-   * normalized to an ISO string). Absent when the upstream reported no
-   * expiry — rendered as "no expiry", never guessed into a date.
+   * Package credit expiry, carried through in whatever form the upstream reported
+   * (an ISO string, or an epoch-ms value normalized to one). Absent when the
+   * upstream reported no expiry — never guessed into a date. The year-9999 "never"
+   * sentinel is dropped at the transport.
    */
   packageEndTime?: string;
+  /**
+   * The package's localized display titles, when the upstream named it. `packageName`
+   * remains the single-language guess for renderers that ignore this map.
+   */
+  packageNameI18n?: {
+    zh?: string | undefined;
+    en?: string | undefined;
+  };
+  /** The opaque upstream campaign code behind the same grant, when known. */
+  packageCode?: string;
 }
 /** Aggregated credit answer rendered by the plugin card. */
 interface QoderWebCredits {
@@ -203,11 +213,9 @@ interface QoderWebCredits {
 /**
  * One catalog model as the status document snapshots it.
  *
- * A plain-Qoder mirror of `src/qoder/catalog.ts`'s `QoderCatalogModel` (the
- * WorkBuddy-era billing/promotion/free fields are gone): the browser half
- * renders reasoning, price factor, and context capacity from these fields and
- * nothing else. Field names follow the Qoder catalog vocabulary so the two
- * halves cannot drift on spelling.
+ * A plain-Qoder mirror of the transport's `QoderCatalogModel`: the browser half
+ * renders reasoning, price factor, and context capacity from these fields alone.
+ * Field names follow the Qoder catalog vocabulary so the halves cannot drift.
  */
 interface QoderCatalogModelSnapshot {
   id: string;
@@ -238,6 +246,15 @@ type QoderWebStatus = {
   region?: QoderRegion;
   /** Redacted summary of the PAT in effect. */
   pat?: QoderPatSummary;
+  /**
+   * Every saved token for this variant, newest first, redacted.
+   *
+   * One entry means nothing to switch; two or more render the account select.
+   * Variant-scoped: a token minted for one region is never offered to the other.
+   */
+  patProfiles?: readonly QoderPatProfile[];
+  /** The saved entry in effect; absent when the token comes from the environment. */
+  activePatId?: string;
   credits?: QoderWebCredits;
   creditsError?: string;
   /** The models the plugin serves, as catalog snapshots. */
@@ -251,10 +268,9 @@ type QoderWebStatus = {
   /** Disabled model IDs (blacklist) for this variant. */
   disabledModels?: readonly string[];
   /**
-   * The last automatic job-token refresh the self-heal performed, epoch ms.
-   * Absent when no refresh has happened in this process. The card renders
-   * this as a visible "token auto-refreshed" notice, so an otherwise
-   * invisible recovery is observable.
+   * The last automatic job-token refresh the self-heal performed, epoch ms; absent
+   * when none happened in this process. The card renders it as a visible notice,
+   * so an otherwise invisible recovery is observable.
    */
   jobTokenRefreshedAt?: number;
   /**
@@ -269,22 +285,21 @@ type QoderWebStatus = {
   checkIn?: {
     lastDate: string;
     lastAt: number;
-    status: 'claimed' | 'already-claimed' | 'no-campaign' | 'error';
+    status: 'claimed' | 'already-claimed' | 'before-window' | 'no-campaign' | 'error';
     amount?: number | undefined;
     message?: string | undefined;
     /**
      * When the scheduler's timer is next due, epoch ms.
      *
-     * A day already claimed goes deliberately quiet, so without this the
-     * card cannot tell "scheduled and waiting" from "no timer at all" —
-     * which is exactly the doubt a missing timer created.
+     * A day already claimed goes deliberately quiet, so without this the card
+     * cannot tell "scheduled and waiting" from "no timer at all".
      */
     nextRunAt?: number | undefined;
     logs?: readonly {
       id: string;
       date: string;
       timestamp: number;
-      status: 'claimed' | 'already-claimed' | 'no-campaign' | 'error';
+      status: 'claimed' | 'already-claimed' | 'before-window' | 'no-campaign' | 'error';
       amount?: number | undefined;
       campaignKey?: string | undefined;
       message?: string | undefined;
@@ -299,16 +314,13 @@ type QoderWebStatus = {
   /**
    * No usable token, and the card may save one.
    *
-   * Its own arm rather than an optional field on the signed-in document,
-   * because the PAT key below is exactly what a signed-out card needs and a
-   * signed-in one does not: the two states ask for different actions, and a
-   * single arm would let a card offer clear and save at once.
+   * Its own arm because the PAT key below is exactly what a signed-out card
+   * needs: one shared arm would let a card offer clear and save at once.
    */
   status: 'signed-out';
   /**
    * Why no credential is usable, when that is diagnosable rather than simply
-   * "nobody signed in" — a stale WorkBuddy-era credential file being the
-   * case that matters. The card renders it in place of the generic hint.
+   * "nobody signed in". The card renders it in place of the generic hint.
    */
   reason?: string;
   /**
@@ -316,9 +328,17 @@ type QoderWebStatus = {
    * `probeKey` for why it travels with the document.
    */
   authKey?: string;
-} | {
+} |
+/**
+ * The host half refused to load, and `message` is that refusal verbatim.
+ *
+ * The card renders this instead of its body: a degraded host registers only
+ * the status route, so every other control it offered would answer 404.
+ */
+{
   status: 'error';
   message: string;
+  inactive?: true;
 };
 //#endregion
 //#region src/variants.d.ts
@@ -338,10 +358,8 @@ interface QoderVariant {
   probeFilename: string;
   /**
    * Basename of the plugin-owned saved-catalog file under the data dir.
-   *
-   * One per variant, like the probe records: the two deployments disagree about
-   * rates, windows, and even which models exist for a shared id, so a catalog
-   * saved from one must never be served as the other's.
+   * One per variant: the deployments disagree about rates, windows, and models,
+   * so a catalog saved from one must never be served as the other's.
    */
   catalogFilename: string;
   /** Same-origin status route consumed by this variant's card. */
@@ -371,12 +389,27 @@ declare const QODER_AUTH_FILENAME = ".qoder-auth.json";
 interface AuthLogger {
   warn?(...args: unknown[]): void;
 }
+/** One saved credential, as the file stores it. */
+interface QoderCredentialEntry {
+  /** Stable local id (a one-way hash prefix of the token). */
+  id: string;
+  pat: string;
+  region: QoderRegion;
+  /** When the stored token was saved, epoch milliseconds. */
+  savedAtMs?: number;
+  /** Optional display label; never sent upstream. */
+  label?: string;
+}
 /** Runtime credential, timestamps in epoch milliseconds. */
 interface QoderCredential {
+  /** Local id of the saved entry; absent for an environment token. */
+  id?: string;
   pat: string;
   region: QoderRegion;
   /** When the stored token was saved; absent for environment-sourced tokens. */
   savedAtMs?: number;
+  /** Display label, when the saved entry carries one. */
+  label?: string;
   source: QoderCredentialSource;
 }
 /** Read-only sign-in summary for status, the PAT route, and doctor output. */
@@ -390,6 +423,10 @@ interface QoderAuthStatus {
   reason?: string;
   /** Absolute path of the credential file this store owns. */
   filePath: string;
+  /** Every saved token for this variant, newest first, redacted. */
+  profiles?: readonly QoderPatProfile[];
+  /** The entry id in effect, when a saved entry is active. */
+  activeId?: string;
 }
 /** Constructor options. */
 interface QoderStoreOptions {
@@ -402,12 +439,17 @@ interface QoderStoreOptions {
 /** Last four characters of a token, for display. */
 declare function patTail(pat: string): string | undefined;
 /**
- * Stable identity key for a credential, used by probe records and saved
- * catalogs.
+ * Stable local id for one token.
  *
- * A PAT is a bearer secret, so the key is its one-way hash rather than any
- * suffix of it: surfaces that show the key (cards, JSON diagnostics) leak
- * nothing usable, while two reads of the same token still correlate locally.
+ * A one-way hash prefix rather than a suffix: surfaces showing the id leak nothing
+ * usable, while two saves of the same token still resolve to the same entry.
+ */
+declare function qoderCredentialId(pat: string): string;
+/**
+ * Stable identity key for a credential, used by probe records and saved catalogs.
+ *
+ * Wider than the local id: these keys address stored data, not UI, and 16 hex
+ * characters keep two tokens from sharing a bucket.
  */
 declare function qoderCredentialIdentity(credential: Pick<QoderCredential, 'pat'>): string;
 declare class QoderCredentialStore {
@@ -422,28 +464,57 @@ declare class QoderCredentialStore {
   /**
    * The credential currently in effect, or `undefined` when there is none.
    *
-   * Resolution order: the plugin-owned file, then the arm's environment
-   * variable (only when no file exists — a saved token always wins over a
-   * stray env), then nothing. There is no refresh and no expiry check: a PAT
-   * lives until revoked.
+   * Resolution order: the active saved entry (or the first when the pointer is
+   * stale), then the arm's environment variable (only when no saved entry
+   * exists). No refresh and no expiry check.
    */
   current(): Promise<QoderCredential | undefined>;
   /**
    * The credential, or a thrown `MISSING_CREDENTIAL` error.
    *
-   * Callers that serve requests (the shim, the catalog sweep) use this so the
-   * absence of a token surfaces as the same classified failure the transport
-   * itself raises when a saved token turns out empty.
+   * Serving callers use this so an absent token surfaces as the classified failure
+   * the transport itself raises.
    */
   resolve(): Promise<QoderCredential>;
   /** The token in effect as a bare string, rejecting when there is none. */
   patPromise(): Promise<string>;
+  /** Every saved entry (tokens included; host-side callers only). */
+  entries(): Promise<readonly QoderCredentialEntry[]>;
   /**
-   * Persist a token for this variant. The caller is responsible for having
-   * validated it against the region first (`validateApiKey` upstream).
+   * Add a token and make it active.
+   *
+   * Re-saving an existing token updates that entry instead of appending a
+   * duplicate — the id is derived from the token. The caller must have validated
+   * the token against the region first.
+   *
+   * @param pat - the token to store.
+   * @param label - optional display label for the select row.
+   * @returns the stored entry.
+   */
+  add(pat: string, label?: string): Promise<QoderCredentialEntry>;
+  /**
+   * Make one saved entry active.
+   *
+   * @param id - the entry id.
+   * @returns the activated entry, or `undefined` when no entry has that id.
+   */
+  activate(id: string): Promise<QoderCredentialEntry | undefined>;
+  /**
+   * Remove one saved entry.
+   *
+   * The active pointer moves to the first remaining entry; removing the last entry
+   * deletes the file, exactly like {@link clear}.
+   *
+   * @param id - the entry id.
+   * @returns the removed entry, or `undefined` when no entry has that id.
+   */
+  remove(id: string): Promise<QoderCredentialEntry | undefined>;
+  /**
+   * Persist a token for this variant and make it active; {@link add} behind the
+   * runtime-credential shape older call sites expect.
    */
   save(pat: string, source?: QoderCredentialSource): Promise<QoderCredential>;
-  /** Remove the stored credential. A missing file is not an error. */
+  /** Remove every stored credential. A missing file is not an error. */
   clear(): Promise<void>;
   /** Alias kept for call-site readability (`logout` is just clearing). */
   logout(): Promise<void>;
@@ -453,7 +524,7 @@ declare class QoderCredentialStore {
   private pendingLegacyReason;
   private fromEnvironment;
   private readOwn;
-  private writeOwn;
+  private writeDocument;
 }
 /**
  * The plugin-owned credential path for one variant's default filename.
@@ -463,14 +534,9 @@ declare function qoderOwnAuthPath(variant: QoderVariant): string;
 //#endregion
 //#region src/catalog.d.ts
 /**
- * Qoder model catalog: a static fallback roster captured from the transport's
- * built-in defaults, replaced by the upstream's dynamic answer once it loads.
- *
- * The row types moved here from the WorkBuddy-era upstream module: they are
- * the plugin's own model vocabulary (what the catalog stores, the adapter
- * exposes, and the card renders), while `QoderCatalogModel` in
- * `src/qoder/catalog.ts` is the upstream's. `upstream.ts` translates one into
- * the other.
+ * Qoder model catalog: a static fallback roster, replaced by the upstream's
+ * dynamic answer once it loads. These row types are the plugin's own model
+ * vocabulary; `upstream.ts` translates them to and from the transport's.
  *
  * @module dsh-qoder-connect/catalog
  */
@@ -484,8 +550,10 @@ interface QoderModelInfo {
   defaultContextWindow?: number;
   /** Selectable window sizes the upstream declares, ascending. */
   supportedContextWindows?: readonly number[];
-  /** Per-request output cap. */
-  maxTokens: number;
+  /** Output cap the provider declared; absent when it declares none. */
+  maxTokens?: number;
+  /** True only when the provider declared that cap, rather than this plugin's reserve. */
+  maxTokensDeclared?: boolean;
   /** Whether the model accepts image input. */
   supportsImages: boolean;
   /** Reasoning metadata; absent means the upstream declared none. */
@@ -514,34 +582,21 @@ interface QoderModelBilling {
   rateUnknown?: boolean;
 }
 /**
- * The built-in roster, transcribed from the transport's own `defaultModels`
- * (`src/qoder/catalog.ts`) — the Qoder model keys both regions start from
- * before the first successful discovery: `cmodel`, `auto`, `ultimate`,
- * `performance`, `efficient`, `lite`.
+ * The built-in roster, mirrored from the transport's own `defaultModels`: the
+ * model keys both regions start from before the first discovery.
  *
- * It exists so the provider registers with a usable catalog while the first
- * fetch is in flight or the endpoint is unreachable, and it is deliberately
- * *not* a promise about the upstream's current state: the discovery answer
- * replaces it at startup. No per-region roster is invented here — the
- * transport ships one shared default set, and this mirror keeps the same
- * discipline. Reasoning and rate metadata are absent because the defaults
- * declare none; those rows offer no thinking control until the upstream says
- * otherwise.
+ * It lets the provider register while the first fetch is in flight or the
+ * endpoint is unreachable; the discovery answer replaces it at startup. Reasoning
+ * and rate metadata are absent because the defaults declare none.
  */
 declare const FALLBACK_QODER_MODELS: readonly QoderModelInfo[];
 /**
  * Mutable catalog shared by the shim's `/v1/models` and the adapter.
  *
- * Visibility is separate from content. A variant with no usable credential
- * must expose *no* models rather than a fallback roster: the DSH model picker
- * drops an empty group, so an empty catalog is exactly how a provider hides
- * without touching registration. Serving the fallback to a signed-out user
- * instead offers models that can only fail (the transport throws
- * `MISSING_CREDENTIAL` on the first message), which is worse than showing
- * nothing.
- *
- * The flag defaults to visible so a directly-constructed catalog behaves as
- * it always has; the plugin runtime applies the credential gate.
+ * Visibility is separate from content: a variant with no usable credential must
+ * expose no models rather than a fallback roster, since the model picker drops an
+ * empty group — and serving models that can only fail is worse than nothing.
+ * The flag defaults to visible; the plugin runtime applies the credential gate.
  */
 declare class QoderCatalog {
   private models;
@@ -654,7 +709,10 @@ interface QoderCatalogModel {
   contextWindow?: number;
   /** Largest known capacity, independent of the effective input budget. */
   maxContextWindow?: number;
+  /** Output budget hint for the harness; may be the built-in reserve, not a provider limit. */
   maxTokens?: number;
+  /** True only when the provider declared `max_output_tokens`. */
+  maxTokensDeclared?: boolean;
   source?: string;
   isReasoning?: boolean;
   supportsEffort?: boolean;
@@ -686,17 +744,34 @@ interface QoderQuota {
   percentage: number;
   unit: string;
 }
+/**
+ * A named grant of credits that expires on its own schedule, reported in the
+ * international upstream's `dedicatedResourcePackages`.
+ */
+interface QoderDedicatedResourcePackage extends QoderQuota {
+  /** Upstream package id (`01a1426f-…`), when reported. */
+  id?: string | undefined;
+  /** Raw upstream name — usually an opaque campaign code, not display copy. */
+  name?: string | undefined;
+  /** Localized display title from `displayLabels`, when the upstream sends one. */
+  title?: {
+    zh?: string | undefined;
+    en?: string | undefined;
+  } | undefined;
+  /** This package's own expiry, ISO; not the account's cycle-level date. */
+  expiresAt?: string | undefined;
+  /** Whether the upstream says the package is currently usable. */
+  available?: boolean | undefined;
+  /** Upstream lifecycle marker (`QUOTA_DETAIL_STATUS_ACTIVE`). */
+  status?: string | undefined;
+}
 interface QoderQuotaUsage {
   userQuota?: QoderQuota | undefined;
   orgResourcePackage?: QoderQuota | undefined;
-  /**
-   * Credits granted on top of the plan — the daily campaign's 100, for one.
-   *
-   * A separate bucket upstream reports beside `userQuota`; it carries its own
-   * total and remaining, so leaving it out made the card show fewer packages
-   * than the account actually holds (two on the web, one here).
-   */
+  /** Credits granted on top of the plan, with their own total and remaining. */
   addOnQuota?: QoderQuota | undefined;
+  /** Campaign grants carrying their own expiry and display title. */
+  dedicatedResourcePackages?: readonly QoderDedicatedResourcePackage[] | undefined;
   totalUsagePercentage?: number | undefined;
   isQuotaExceeded?: boolean | undefined;
   expiresAt?: string | undefined;
@@ -747,7 +822,7 @@ interface QoderCheckInResult {
   variantId: string;
   date: string;
   timestamp: number;
-  status: 'claimed' | 'already-claimed' | 'no-campaign' | 'error';
+  status: 'claimed' | 'already-claimed' | 'before-window' | 'no-campaign' | 'error';
   amount?: number | undefined;
   campaignKey?: string | undefined;
   message?: string | undefined;
@@ -767,9 +842,8 @@ interface QoderTransport {
 //#region src/upstream.d.ts
 /**
  * The reasoning-effort vocabulary the probe sweeps and the effort map speak.
- * Mirrors the canonical order of `src/qoder/catalog.ts` (`low` … `max`).
- * `minimal` and `off` are deliberately absent: `off` is a separate capability
- * the upstream must declare, never something probing may infer.
+ * `minimal` and `off` are deliberately absent: `off` is a separate capability the
+ * upstream must declare, never something probing may infer.
  */
 type QoderEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 /** How the shim should present an upstream failure to its OpenAI client. */
@@ -777,10 +851,8 @@ type UpstreamErrorKind = 'missing_credential' | 'auth' | 'soft_rate' | 'quota_ex
 /**
  * HTTP status the shim answers each failure kind with.
  *
- * `timeout` is 408 and deliberately not 504: the harness's pi-ai classifier tests
- * `/\b5\d\d\b/` *before* its `timeout` test, so a 5xx status would be read as
- * SERVER no matter what the message says. 408 is also the honest answer for a
- * request the upstream never completed.
+ * `timeout` is 408, deliberately not 504: the harness's pi-ai classifier tests
+ * `/\b5\d\d\b/` before its `timeout` test, so a 5xx would read as SERVER.
  */
 declare const KIND_STATUS: Readonly<Record<UpstreamErrorKind, number>>;
 /** The chat-completions answer: a streaming `Response`, or a classified failure. */
@@ -792,6 +864,16 @@ type QoderChatResult = {
   status: number;
   kind: UpstreamErrorKind;
   message: string;
+  /**
+   * The upstream's own "try again in N ms" answer (Qoder's queue body carries
+   * `retryAfterSeconds`, and a plain 429 may carry `Retry-After`).
+   *
+   * It must survive this layer: the shim turns it into the `Retry-After` header
+   * and the `[retry-after=<n>s]` tag, which the adapter reads back into
+   * `failure.providerRetryAfterMs` — the only field the harness retry policy
+   * honors. Dropped here, the host can only fall back to its own backoff.
+   */
+  retryAfterMs?: number;
 };
 /** Provenance of the last successful catalog fetch. */
 interface QoderCatalogFetch {
@@ -804,8 +886,24 @@ interface QoderCreditAccount {
   remain: number;
   size: number;
   unlimited?: true;
-  /** Expiry of this package, verbatim from the upstream (ISO string). */
+  /**
+   * Expiry of this package, verbatim from the upstream (ISO string).
+   *
+   * Absent when the upstream reported no expiry — including the year-9999 "never"
+   * sentinel, which the transport drops rather than forwarding.
+   */
   packageEndTime?: string;
+  /**
+   * The package's own localized titles, when the upstream sent a real display name.
+   * The renderer picks the active language; `packageName` stays the single-language
+   * fallback.
+   */
+  packageNameI18n?: {
+    zh?: string | undefined;
+    en?: string | undefined;
+  };
+  /** Opaque upstream code for the same grant (`act-<date>-<n>`), when known. */
+  packageCode?: string;
 }
 /** The aggregated credit answer the card renders. */
 interface QoderCredits {
@@ -822,37 +920,26 @@ interface QoderCredits {
 /**
  * Normalize a billing rate label for display.
  *
- * Qoder reports a `priceFactor` number; the host spells it `x<n>` (and the
- * WorkBuddy-era saved files sometimes carried a trailing " credits"). The card
- * wants one shape: a trimmed multiplier without the suffix.
+ * Qoder reports a `priceFactor` number; the host spells it `x<n>`. The card wants
+ * one shape: a trimmed multiplier without the trailing "credits".
  */
 declare function normalizeCredits(credits: string | undefined): string | undefined;
 /**
  * Classify a raw HTTP upstream failure from status and a body excerpt.
  *
- * Status first, then phrases: a throttling body often also says "quota
- * exceeded", and reading that as an exhausted balance parks a healthy account
- * until the next billing day instead of retrying shortly.
+ * A documented result code outranks the status: Qoder answers a saturated queue
+ * or a spent daily window with 401/403, and reading either as a dead credential
+ * would park a healthy account. Status comes next, then body phrases.
  */
 declare function classifyUpstreamError(status: number, body: string): UpstreamErrorKind;
 /**
  * Map one structured transport failure onto the shim's error kind.
  *
- * The transport's taxonomy (`src/qoder/errors.ts`) codes an HTTP 402 as
- * `INVALID_REQUEST`, so the status gets the last say for the quota and auth
- * families before the code-based defaults apply.
- *
- * `RATE_LIMIT` is tested before the auth family because the upstream's queue
- * answer keeps its 401/403 status: a saturated qfmodel queue reads
- * `code: RATE_LIMIT, status: 403` (body carries 10605/isQueued/
- * retryAfterSeconds), and letting the status arm claim it reported a dead
- * credential — which the host never retries — instead of a throttle it would.
- *
- * `QUOTA` and the request family are tested before the auth family for the same
- * reason: both keep the upstream's 401/403 (see `qoderHttpError`), and the status
- * arm would call a spent daily window or a refused request a credential
- * rejection. `status === 402` is tested before the request arm so that a 402 the
- * transport coded `INVALID_REQUEST` (its 4xx fallback) still reads as a quota.
+ * Code families are tested before the status arm because the upstream keeps its
+ * 401/403 for throttles, spent windows, and refused requests alike: letting the
+ * status claim them would report a dead credential the host never retries.
+ * `status === 402` is tested before the request arm because the transport codes a
+ * 402 as `INVALID_REQUEST`.
  */
 declare function kindFromQoderFailure(failure: {
   code: string;
@@ -896,29 +983,26 @@ declare class QoderUpstreamClient {
   /** The region this client's transport serves. */
   get clientRegion(): QoderRegion;
   /**
-   * The catalog row for one model id: this client's own discovery answers
-   * first (it is the same data the upstream catalog call produced), and an
-   * externally supplied provider — the plugin's fallback roster, say — fills
-   * ids the discovery never listed.
+   * The catalog row for one model id: this client's own discovery answers first,
+   * and an externally supplied provider fills ids the discovery never listed.
    */
   catalogModelFor(id: string): QoderCatalogModel | undefined;
   /**
    * Discover this variant's models and translate them into plugin rows.
    *
-   * The raw rows stay addressable via {@link catalogModelFor}: a chat request
-   * for a discovered model must hand the transport its row, because effort
-   * support, image capability, and the output cap are all validated against
-   * it. The last successful fetch's provenance lands in {@link lastCatalog}
-   * for the status card.
+   * The raw rows stay addressable via {@link catalogModelFor}: a chat request must
+   * hand the transport its row, because effort support, image capability, and the
+   * output cap are validated against it.
    */
   fetchModels(signal?: AbortSignal): Promise<QoderModelInfo[]>;
   /**
    * The subscriber's quota answer, mapped onto the card's credit shape.
    *
-   * Qoder reports one personal quota and an optional organization resource
-   * package; each becomes a package row the card already knows how to draw.
-   * An unbounded personal allowance (`total === 0`, not exceeded) is the
-   * account's "unlimited" state.
+   * One personal quota, an optional organization package, bonus credits, and — on
+   * the international edition — campaign grants, each becoming a package row. An
+   * unbounded personal allowance (`total === 0`, not exceeded) is the "unlimited"
+   * state. A campaign grant carries its own expiry and localized title, never
+   * borrowed from the account.
    */
   fetchCredits(signal?: AbortSignal): Promise<QoderCredits>;
   /**
@@ -929,39 +1013,32 @@ declare class QoderUpstreamClient {
    * Stream one translated chat-completions request.
    *
    * The first transport chunk is pulled before the response is constructed:
-   * everything the transport can reject without touching the network — a
-   * missing or empty credential, an effort the model does not advertise, an
-   * image on a text-only model — must still be able to answer as a real HTTP
-   * status, not as a 200 whose first frame is an error. Once streaming has
-   * begun, failures degrade to the error-frame-then-`[DONE]` form the
-   * {@link ChunkEncoder} documents.
+   * everything rejectable without the network — a missing credential, an
+   * unadvertised effort, an image on a text-only model — must still answer as a
+   * real HTTP status, not a 200 whose first frame is an error. Once streaming has
+   * begun, failures degrade to the error-frame-then-`[DONE]` form.
    */
-  chatStream(bodyJson: string, signal?: AbortSignal): Promise<QoderChatResult>;
+  chatStream(bodyJson: string, signal?: AbortSignal, sessionId?: string, purpose?: GenerateOptions['purpose']): Promise<QoderChatResult>;
   /** Drive the SSE body from an already-started chunk iterator. */
   private bodyStream;
   /**
    * One minimal reasoning-effort request, as the probe sweep needs it.
    *
-   * A row that declares efforts is still checked locally, so an unlisted value
-   * costs no request. A row that declares none — the only kind detection is
-   * offered for — sends the value to the upstream and waits for its answer,
-   * because the endpoint is the only authority on spellings the catalog never
-   * lists. Either refusal is reported as an attributable 400 with code
-   * `UNSUPPORTED_REASONING_EFFORT`, and an accepted value costs exactly one
-   * streamed request, which this method ends after the first chunk arrives —
-   * see the module docs in `probe.ts`.
+   * A row that declares efforts is checked locally, so an unlisted value costs no
+   * request; a row that declares none sends the value to the upstream, the only
+   * authority on spellings the catalog never lists. Either refusal is an
+   * attributable 400 with code `UNSUPPORTED_REASONING_EFFORT`, and the stream is
+   * ended after the first chunk arrives.
    */
   probeEffort(model: string, effort: string | undefined, signal: AbortSignal): Promise<ProbeAttempt>;
 }
 /**
  * Translate one Qoder catalog row into the plugin's model-info shape.
  *
- * The Qoder vocabulary carries less than the WorkBuddy one did — no badges,
- * no promotions, no free/credits strings — so the billing section reports the
- * price factor only, spelled `x<n>`, and says so honestly when the upstream
- * reported nothing (`rateUnknown`). Context capacity comes from the effective
- * window, with the declared options kept for the card and the maximum-window
- * preference; a row with no capacity at all takes the transport's own default.
+ * The billing section reports the price factor only, spelled `x<n>`, and says so
+ * honestly when the upstream reported nothing (`rateUnknown`). Context capacity
+ * comes from the effective window, with the declared options kept for the card; a
+ * row with no capacity takes the transport's default.
  */
 declare function modelInfoOf(model: QoderCatalogModel): QoderModelInfo;
 //#endregion
@@ -994,23 +1071,18 @@ interface QoderProbeRecord {
    * The account this observation was made under, as a one-way hash of the
    * credential in effect.
    *
-   * An effort set is a fact about one account's entitlement as much as about
-   * the model: the same model id can accept different levels under a different
-   * subscription. Without this a record outlived the account that produced it,
-   * so signing out and in as someone else inherited the previous account's
-   * detected levels. Records written before this field existed carry no
-   * identity and are therefore never reused.
+   * An effort set is a fact about one account's entitlement as much as about the
+   * model, so a record must not outlive its account. Records written before this
+   * field existed carry no identity and are therefore never reused.
    */
   account?: string;
 }
 /**
  * Plugin-owned probe record path inside the plugin's state directory.
  *
- * One file per variant. The two regions serve overlapping model ids with
- * different entitlements, and {@link fingerprintModel} covers only
- * `id`/`reasoning`/`supportsImages` — never the provider — so a single shared
- * file would let one variant's observation answer for the other. The paths
- * differ; the format does not.
+ * One file per variant: the regions serve overlapping ids with different
+ * entitlements, and {@link fingerprintModel} never covers the provider, so a
+ * shared file would let one variant's observation answer for the other.
  */
 declare function qoderProbePath(filename?: string): string;
 /**
@@ -1064,6 +1136,14 @@ declare class QoderProbeStore {
   set(modelId: string, record: QoderProbeRecord): void;
   /** Drop every record; used by the card's explicit "clear" action. */
   clear(): void;
+  /**
+   * Drop every record that belongs to one account, leaving other accounts'
+   * observations intact.
+   *
+   * A saved token's detected effort levels are that account's data; a plain
+   * {@link clear} would erase the observations of every account still saved.
+   */
+  clearFor(account: string): void;
   /** Every record currently held, for status display. */
   all(): Readonly<Record<string, QoderProbeRecord>>;
   /** Build a record stamped with this store's clock, version, and account. */
@@ -1090,9 +1170,8 @@ interface QoderShim {
   baseUrl(): string;
   /**
    * The per-process shared secret the plugin's own client must carry as
-   * `Authorization: Bearer <token>`. Lives only in memory; the adapter
-   * resolves this instead of the upstream credential, because the shim
-   * resolves the real credential itself via the store.
+   * `Authorization: Bearer <token>`. Lives only in memory; the shim resolves the
+   * real credential itself via the store.
    */
   token(): string;
   /** Stop serving and destroy open connections. */
@@ -1106,18 +1185,41 @@ interface QoderShimOptions {
   /** Provider id reported as each model's `owned_by`; one per variant. */
   providerId: string;
   logger?: ShimLogger;
+  /**
+   * Override of the pending-answer keep-alive interval. Only tests shorten it;
+   * production always keeps the default, which is what the client's body clock
+   * leaves room for.
+   */
+  keepAliveMs?: number;
+  /**
+   * How long a failure may still arrive as its real HTTP status before the stream
+   * head is committed. Only tests shorten it; see {@link STREAM_GRACE_MS}.
+   */
+  graceMs?: number;
+  /**
+   * One-line diagnostic sink. The queue log the user can hand back is the only
+   * place that records when a head was committed or an answer abandoned, which is
+   * what separates a client-side clock from an upstream stall.
+   */
+  onDiag?: (message: string) => void;
 }
 /**
- * Start the loopback endpoint. Requests carry any bearer; the loopback bind
- * is the boundary, and the upstream credential comes from the store alone.
+ * Start the loopback endpoint. The upstream credential comes from the store alone;
+ * the bearer checked is the per-process shared secret.
  */
 declare function createQoderShim(options: QoderShimOptions): QoderShim;
 //#endregion
 //#region src/adapter.d.ts
 /** Default provider route owned by this bundle (the China variant). */
 declare const QODER_PROVIDER = "qoder";
-/** Provider idle ceiling while one stream read is outstanding. */
-declare const QODER_STREAM_IDLE_TIMEOUT_MS = 300000;
+/**
+ * Provider idle ceiling while one stream read is outstanding.
+ *
+ * It has to cover a queue wait, which the settings bound (up to an hour, the
+ * official client's own limit) plus room for the replay: a shorter ceiling
+ * would abort exactly the wait the user asked for.
+ */
+declare const QODER_STREAM_IDLE_TIMEOUT_MS = 3660000;
 /** Constructor dependencies. */
 interface QoderAdapterOptions {
   providerId?: string;
@@ -1132,6 +1234,8 @@ interface QoderAdapterOptions {
    * upstream left undeclared; absent means declared-set-only behavior.
    */
   observe?: (modelId: string) => QoderProbeRecord | undefined;
+  /** Configured queue-wait budget in ms, read per call to size the idle window. */
+  queueBudgetMs?: () => number;
 }
 /** What {@link createQoderAdapter} hands back. */
 interface QoderAdapter {
@@ -1140,16 +1244,11 @@ interface QoderAdapter {
   invalidate: () => void;
 }
 /**
- * Assemble the adapter. The provider's `getModels` reads the live catalog,
- * and every model's `baseUrl` is re-resolved per read so the shim's
- * ephemeral port applies from the first snapshot after startup.
+ * Assemble the adapter. `getModels` reads the live catalog and each `baseUrl` is
+ * re-resolved per read, so the shim's ephemeral port applies immediately.
  *
- * The profile is constructed by hand rather than through dsh-llm-pi-ai's
- * internal `resolveProfiles()`: that helper is not part of the package's
- * public export surface (root entry, `lib/` deep imports blocked by the
- * exports map, `src/` not shipped), so hand-assembly is the only supported
- * path and every newly required field must be adopted here explicitly —
- * `modelErrors` since 0.1.5-alpha.2 (#12).
+ * The profile is hand-built because dsh-llm-pi-ai's `resolveProfiles()` is not
+ * public, so every newly required profile field must be adopted here explicitly.
  */
 declare function createQoderAdapter(options: QoderAdapterOptions): QoderAdapter;
 //#endregion
@@ -1174,9 +1273,8 @@ interface QoderCatalogStoreOptions {
 /**
  * The last successful catalog per account, read once and written atomically.
  *
- * Malformed content reads as "nothing saved" rather than throwing: this file
- * is an optimization for the offline and first-seconds cases, and a corrupt one
- * must never be able to stop the plugin from serving models.
+ * Malformed content reads as "nothing saved" rather than throwing: a corrupt file
+ * must never stop the plugin from serving models.
  */
 declare class QoderCatalogStore {
   private readonly path;
@@ -1189,9 +1287,7 @@ declare class QoderCatalogStore {
   get(account: string): SavedCatalog | undefined;
   /**
    * Remember a catalog for an account, replacing whatever was saved before.
-   *
-   * A failed write is swallowed: the plugin has already served these models,
-   * and losing the *memory* of them is not worth surfacing.
+   * A failed write is swallowed: the models have already been served.
    */
   set(account: string, catalog: Omit<SavedCatalog, 'account'>): void;
   /** Forget one account's catalog — used when that account signs out. */
@@ -1222,11 +1318,9 @@ interface QoderProbeServiceOptions {
    * The account currently in effect, as a one-way hash of the credential, or
    * `undefined` while signed out.
    *
-   * Records are read and written against this identity, and it is re-checked
-   * after the sweep finishes: an observation produced under account A must not
-   * be stored once account B is in effect, however long the probe took. The
-   * caller's `clear()` on an account switch is not sufficient on its own,
-   * because an in-flight probe completes *after* that clear.
+   * Re-checked after the sweep finishes: an observation produced under account A
+   * must not be stored once B is in effect, and the caller's `clear()` on a switch
+   * is not enough because an in-flight probe completes after it.
    */
   account: () => string | undefined;
   sentinel?: SentinelFactory;
@@ -1248,52 +1342,56 @@ declare class QoderProbeService {
   /**
    * The record the adapter may use for this model, or `undefined`.
    *
-   * Applies the plan's precedence (§5): a declared set always wins, so a model
-   * that declares `supportedEfforts` is never answered from an observation.
+   * A declared set always wins, so a model declaring `supportedEfforts` is never
+   * answered from an observation.
    */
   recordFor(modelId: string): QoderProbeRecord | undefined;
   /**
    * Probe one model, serially.
    *
    * The authenticated manual route supplies one-request consent after UI
-   * confirmation. Other callers must pass the configured consent gate.
-   * Manual consent never changes the automatic-probing configuration.
-   * Explicit requests bypass historical results, but share an ongoing run.
+   * confirmation; other callers must pass the configured consent gate. Explicit
+   * requests bypass historical results but share an ongoing run.
    */
   probe(modelId: string, manualConsent?: boolean): Promise<QoderProbeStatus>;
 }
 //#endregion
 //#region src/auth-route.d.ts
-/** Outcome of a save attempt: stored, or refused with a stable reason. */
+/** Outcome of a save/activate/remove attempt: stored, or refused with a stable reason. */
 type QoderAuthSaveResult = {
   ok: true;
   status: QoderAuthStatus;
 } | {
   ok: false;
-  error: 'qoder_invalid_pat' | 'qoder_missing_pat';
+  error: 'qoder_invalid_pat' | 'qoder_missing_pat' | 'qoder_unknown_pat';
 };
 /** Constructor dependencies. */
 interface QoderAuthRouteOptions {
   /**
    * Validate one pasted token against this variant's region and, only on
-   * success, persist it. The route never decides validity itself.
+   * success, persist it and make it active. The route never decides validity
+   * itself.
    */
-  save: (pat: string) => Promise<QoderAuthSaveResult>;
-  /** Remove the stored credential. */
+  save: (pat: string, label?: string) => Promise<QoderAuthSaveResult>;
+  /** Switch to one already-saved token. */
+  activate: (id: string) => Promise<QoderAuthSaveResult>;
+  /** Remove one saved token; the host moves the active pointer. */
+  remove: (id: string) => Promise<QoderAuthSaveResult>;
+  /** Remove every saved token (`logout`). */
   clear: () => Promise<void>;
   /**
-   * Route path to mount. Defaults to the China variant's path so callers that
-   * only serve it keep their behaviour; the global variant passes its own.
+   * Route path to mount. Defaults to the China variant's path; the global variant
+   * passes its own.
    */
   path?: string;
 }
 /** Mint the per-process PAT control key. */
 declare function createAuthKey(): string;
 /**
- * The PAT route's handler, extracted so tests can mount it on a bare server
- * with a known key.
+ * The PAT route's handler, extracted so tests can mount it on a bare server with a
+ * known key.
  *
- * @param deps - the save/clear operations for one variant.
+ * @param deps - the save/activate/remove/clear operations for one variant.
  * @param key - the in-process control key this route requires.
  * @returns the Node request handler.
  */
@@ -1303,14 +1401,10 @@ declare function registerQoderAuthRoute(ctx: Context, deps: QoderAuthRouteOption
 //#endregion
 //#region src/host-heartbeat.d.ts
 /**
- * Host-side heartbeat: a small JSON file written into the plugin's data
- * directory once the `qoder` providers are registered. The status CLI reads it
- * to report whether the host bundle is alive, independent of the browser card.
- *
- * The browser (client) bundle cannot write files; its health is reported
- * only through `console.error` on failure (see `src/client/index.tsx`).
- * This asymmetry is intentional: the host is the load-bearing half, and
- * a missing heartbeat unambiguously means the host never started.
+ * Host-side heartbeat: a small JSON file written into the plugin's data directory
+ * once the `qoder` providers are registered. The status CLI reads it to report
+ * whether the host bundle is alive, independent of the browser card (the browser
+ * bundle cannot write files, and the host is the load-bearing half).
  *
  * @module dsh-qoder-connect/host-heartbeat
  */
@@ -1325,105 +1419,65 @@ interface QoderHostHeartbeat {
   pluginVersion: string;
   /** Epoch milliseconds when the host registered the provider. */
   registeredAt: number;
-  /** Host process PID, to distinguish a stale heartbeat after a crash. */
+  /** Host process PID. Liveness is a bare existence probe: a reused PID reads as alive. */
   pid: number;
 }
 /** Absolute path of the host heartbeat file. */
 declare function qoderHostHeartbeatPath(): string;
 /** Remove the heartbeat on plugin disposal so a stale file does not linger. */
-declare function clearHostHeartbeat(): Promise<void>;
+declare function clearHostHeartbeat(expectedPid?: number): Promise<void>;
 /** Read and validate the heartbeat; returns `undefined` when absent or malformed. */
 declare function readHostHeartbeat(): Promise<QoderHostHeartbeat | undefined>;
 /**
- * Absolute start time (epoch ms) of the process holding `pid`, or `undefined`
- * when it cannot be determined (no such PID, platform lacks a readable source).
+ * Whether the heartbeat's PID is still alive.
  *
- * - macOS / Linux: `ps -o lstart=` prints a local-time "EEE MMM DD HH:MM:SS YYYY";
- *   `Date.parse` resolves it against the local clock, which matches how
- *   `registeredAt` (a `Date.now()` absolute value) is expressed.
- * - Windows: WMI `CreationDate` is UTC (`YYYYMMDDHHMMSS.mmm+zzzz`); parsed with
- *   `Date.UTC`, again comparable to `registeredAt`.
+ * Uses Node's native `process.kill(pid, 0)` cross-platform signal probe:
+ * - Returns true on success or EPERM (process exists and is alive);
+ * - Returns false on ESRCH (process does not exist in the operating system);
+ * - Rejects non-positive or non-integer PIDs to prevent matching process groups.
  *
- * Failures return `undefined` so callers can fall back to plain PID liveness
- * rather than mis-report a running host as dead.
- */
-declare function processStartTimeMs(pid: number): number | undefined;
-/**
- * Whether the heartbeat's PID is still alive *and* still the same process that
- * registered it. A stale heartbeat (host crashed without clearing the file)
- * is distinguished from a live host by two checks:
- *
- * 1. `process.kill(pid, 0)` — the PID exists (signal 0 tests existence).
- * 2. The process holding that PID started at or before `registeredAt`. A host
- *    that registered the heartbeat must have been started before writing it,
- *    so `start <= registeredAt`; a recycled PID belongs to an unrelated process
- *    started after the host died, so `start > registeredAt` correctly reads dead.
- *
- * PID-only detection is not enough: after a crash the OS may hand the same PID
- * to an unrelated process, and the un-cleared stale heartbeat would otherwise
- * produce a false "Host running". When the process start time cannot be read
- * (e.g. unsupported platform) the check degrades to plain PID liveness.
+ * Known limitation: after a host crash, if the OS recycles and reassigns the same PID
+ * to another process before cleanup, it reads as alive until that PID exits. This trade-off
+ * is accepted because wmic was removed in Windows 11 24H2+, PowerShell child processes are
+ * fragile under restrictive sandboxes, and the status check serves only as an informational
+ * hint in the doctor CLI rather than a critical operational invariant.
  */
 declare function isHeartbeatProcessAlive(heartbeat: QoderHostHeartbeat): boolean;
 //#endregion
 //#region src/index.d.ts
 /** Stable Cordis plugin name. */
 declare const name = "llm-qoder";
-/** The model registry required before the provider can register. */
+/** The model registry the provider needs before it can register. */
 declare const inject: string[];
 /**
- * Settings namespace owning the China card's section.
+ * Settings namespace for the China card's section.
  *
- * DSH 0.1.2 dropped the `settingsNamespace()` branding function: a namespace is
- * now a nominal string, validated by the type system where it is used rather
- * than at runtime by a function call. The brand is compile-time only, so this
- * stays the plain string it always was — every comparison, descriptor lookup,
- * and `dsh` config file still sees `'qoder'`. It is cast once here so the
- * public constant carries the seam's type without pulling the brand helper
- * into this package (upstream DSH plugins, `dsh-llm-pi-ai` included, pass
- * their namespaces as plain string literals).
+ * A namespace is a nominal string checked at compile time only; the cast keeps
+ * the public constant typed without pulling the branding helper into this package.
  */
 declare const QODER_SETTINGS_NS: SettingsNamespace;
 /**
- * Settings namespace owning the global card's section.
+ * Settings namespace for the global card's section.
  *
- * One namespace per card, not one shared: the settings Plugins tab dispatches a
- * card by rendering `settings.plugin.item` with `entryKey = ns` for each
- * namespace the Host serves, and skips an entry whose key names no served
- * namespace. With a single installed section, the global card registers
- * into the slot but is never rendered — the card list is built from the Host's
- * sections, not from the slot's entries. Each card therefore needs its own
- * installed section whose namespace equals the card's slot key.
+ * One namespace per card: the Plugins tab dispatches a card per served
+ * namespace, so a single section would leave the other card registered but
+ * never rendered.
  */
 declare const QODER_GLOBAL_SETTINGS_NS: SettingsNamespace;
 /**
- * Settings namespace owning the shared quota-card section.
- *
- * One card above the two variant cards configures both sidebar quota widgets
- * (China and global) from a single place, so its toggles cannot live in
- * either variant's section — they are per-variant fields on a cross-variant
- * card. The Plugins tab dispatches by namespace, so this section is what makes
- * that card render (see {@link QODER_GLOBAL_SETTINGS_NS} for the mechanism).
+ * Settings namespace for the shared quota card, whose per-variant fields
+ * configure both sidebar widgets from one place.
  */
 declare const QODER_QUOTA_SETTINGS_NS: SettingsNamespace;
 /** Plugin configuration. */
 interface Config {
-  /**
-   * Whether the user has authorized sending probe requests about reasoning
-   * efforts. Off by default: a probe spends real credit, so nothing is sent
-   * until the user explicitly agrees.
-   */
+  /** Whether the user authorized reasoning-effort probes (each one spends real credit). */
   probeConsent?: boolean;
   /** Use the largest context window the global catalog explicitly offers. */
   useMaximumContextWindow?: boolean;
-  /** The China variant's own maximum-window preference, persisted in its section. */
+  /** The China variant's own maximum-window preference. */
   useMaximumContextWindowCN?: boolean;
-  /**
-   * Per-model context-window overrides for the global variant (model id →
-   * tokens). Kept for schema compatibility; the card no longer writes
-   * per-model overrides because the upstream honours only the default and
-   * the maximum, nothing between.
-   */
+  /** Per-model context-window overrides, global (model id → tokens); kept for schema compatibility. */
   modelContextWindows?: Record<string, number>;
   /** The China variant's per-model overrides; see {@link Config.modelContextWindows}. */
   modelContextWindowsCN?: Record<string, number>;
@@ -1443,47 +1497,98 @@ interface Config {
   checkInMinuteCN?: number;
   /** When the Global variant checks in, as minutes past midnight in UTC+8 (600 = 10:00). */
   checkInMinuteGlobal?: number;
-  /**
-   * Sidebar quota refresh interval in milliseconds. One shared value (both
-   * cards poll on it) because the two widgets hit the same rate-limited
-   * billing family; the floor guards against a typo hammering the quota
-   * endpoint, which serves no cache.
-   */
+  /** Sidebar quota refresh interval in ms, shared by both cards (same rate-limited upstream). */
   quotaPollMs?: number;
+  /**
+   * Wait out Qoder's model queue inside the plugin (default on). When off, a
+   * queue answer keeps its retry hint and is handed to the host instead.
+   */
+  queueWait?: boolean;
+  /** Upper bound of that wait, in seconds (10–3600). */
+  queueWaitSeconds?: number;
 }
 /**
- * Quota poll interval: default 5 minutes, floor 1 minute. The status route
- * performs a live upstream billing call per request with no cache, so an
- * aggressively small interval translates directly into upstream load; the
- * floor is the smallest value the UI offers rather than a silent clamp —
- * smaller staged values fail Host validation and refuse to save.
+ * Quota poll interval: default 5 minutes, floor 1 minute. The status route makes
+ * a live, uncached upstream billing call per request, so the floor is the
+ * smallest value the UI offers rather than a silent clamp.
  */
 declare const QUOTA_POLL_DEFAULT_MS = 300000;
 declare const QUOTA_POLL_MIN_MS = 60000;
+/**
+ * How long one call may wait in the model queue, in seconds.
+ *
+ * Only a floor is enforced: the wait is a budget the user owns, and the loop
+ * divides it by whatever pace the upstream reports, so a value larger than the
+ * upstream's own countdown simply spans more rounds.
+ */
+declare const QUEUE_WAIT_SECONDS_DEFAULT = 540;
+declare const QUEUE_WAIT_SECONDS_MIN = 1;
 declare const Config: z<Config>;
 /**
- * The field groups the configuration is merged from, one list per card.
- *
- * Writing the merge out by hand is what broke auto check-in: the quota group
- * grew four fields (`autoCheckInCN`, `autoCheckInGlobal`, `checkInMinuteCN`,
- * `checkInMinuteGlobal`) while the merge kept copying only the three that
- * predated them, so `current().autoCheckInCN` read `undefined` forever and the
- * scheduler saw the toggle as permanently off. The card saved it, the file
- * held it, and nothing ever acted on it.
+ * The field groups the configuration is merged from, one list per card: a field
+ * added to {@link Config} but missing here is never read.
  */
 declare const CN_SECTION_KEYS: readonly ["probeConsent", "useMaximumContextWindowCN", "modelContextWindowsCN", "disabledModelsCN"];
 declare const GLOBAL_SECTION_KEYS: readonly ["useMaximumContextWindow", "modelContextWindows", "disabledModels"];
-declare const QUOTA_SECTION_KEYS: readonly ["sidebarQuotaCN", "sidebarQuotaGlobal", "autoCheckInCN", "autoCheckInGlobal", "checkInMinuteCN", "checkInMinuteGlobal", "quotaPollMs"];
+declare const QUOTA_SECTION_KEYS: readonly ["sidebarQuotaCN", "sidebarQuotaGlobal", "autoCheckInCN", "autoCheckInGlobal", "checkInMinuteCN", "checkInMinuteGlobal", "quotaPollMs", "queueWait", "queueWaitSeconds"];
 /**
- * Start both variants: their loopback endpoints, the `qoder` and
- * `qoder-global` providers, their configuration cards, and their
- * credential-driven catalog lifecycles.
- *
- * Each variant registers unconditionally; what varies is whether its catalog is
- * *visible*. An empty catalog is how DSH hides a model group (the host filters
- * out groups with no models), which keeps a token saved after startup working
- * without re-registering the provider.
+ * Start both variants: loopback endpoints, the `qoder` and `qoder-global`
+ * providers, their cards, and their credential-driven catalog lifecycles. Each
+ * variant registers unconditionally; an empty catalog is how DSH hides a group,
+ * which keeps a token saved after startup working without re-registering.
  */
+/** One peer this plugin cannot run without: the spec and its declared range. */
+interface PeerExpectation {
+  readonly spec: string;
+  readonly range: string;
+}
+/**
+ * Read the checked peers' ranges from the manifest beside this build.
+ *
+ * @returns one expectation per peer that declares a string range; an unreadable
+ * manifest yields none, which simply skips the check rather than blocking a load
+ * on a fact it cannot establish.
+ * @internal Exported for tests.
+ */
+declare function peerExpectations(): readonly PeerExpectation[];
+/**
+ * Whether this checker can decide a range at all.
+ *
+ * Form alone is not enough: `~1`, `^1.2` and `>=abc` share the shape of a range
+ * this checker claims to enforce, yet its bound does not parse, so the
+ * comparison would pass everything without ever saying so. Callers use this to
+ * report the limit instead of enforcing nothing quietly.
+ *
+ * @internal Exported for tests.
+ */
+declare function supportsRange(range: unknown): boolean;
+/**
+ * Compare a resolved package version against a semver range. `^x.y.z`, `~x.y.z`
+ * and `>=x.y.z` are enforced; every other form returns true, because a
+ * declaration this checker cannot express must not block a working install —
+ * callers report those forms rather than treating the pass as a verdict.
+ *
+ * @internal Exported for tests; the load-time check is the only caller.
+ */
+declare function satisfiesRange(version: string, range: string): boolean;
+/**
+ * Report the first peer whose resolved copy cannot run this build.
+ *
+ * pnpm installs plugins with `autoInstallPeers: false`, so a stale
+ * `dsh-llm`/`pi-ai` beside the plugin or in the shared profile `node_modules`
+ * stays resolvable long after this build declared a floor; the first import it
+ * touches dies on an unguarded `.length` read with no trace back to the version
+ * gap. Runtime resolution is the only reliable check: `createRequire` resolves to
+ * the exact copy Node will load, and `resolve.paths` gives the same lookup order.
+ *
+ * @param require_ - resolver anchored at this module.
+ * @param expectations - peers to check, in the order they are reported.
+ * @param warn - sink for a range this checker cannot interpret, so a guard that
+ *   silently stops enforcing is visible in the host log instead of passing quiet.
+ * @returns the failure text, or undefined when every peer is usable.
+ * @internal Exported for tests; `apply` passes the real resolver and peer list.
+ */
+declare function peerVersionFailure(require_?: NodeJS.Require, expectations?: readonly PeerExpectation[], warn?: (message: string) => void): string | undefined;
 declare function apply(ctx: Context, config: Config): void;
 //#endregion
-export { CHINA_VARIANT, CN_SECTION_KEYS, Config, FALLBACK_QODER_MODELS, GLOBAL_SECTION_KEYS, GLOBAL_VARIANT, KIND_STATUS, PROBE_EFFORT_CANDIDATES, type ProbeAttempt, type ProbeOutcome, type ProbeSender, QODER_AUTH_FILENAME, QODER_AUTH_PATH, QODER_DATA_DIR_ENV, QODER_DATA_DIR_NAME, QODER_GLOBAL_AUTH_PATH, QODER_GLOBAL_PROBE_PATH, QODER_GLOBAL_SETTINGS_NS, QODER_GLOBAL_STATUS_PATH, QODER_HOST_HEARTBEAT_FILENAME, QODER_PAT_ENV_CN, QODER_PAT_ENV_GLOBAL, QODER_PROBE_FILENAME, QODER_PROBE_PATH, QODER_PROVIDER, QODER_QUOTA_SETTINGS_NS, QODER_SETTINGS_NS, QODER_STATUS_PATH, QODER_STREAM_IDLE_TIMEOUT_MS, QODER_VARIANTS, QUOTA_POLL_DEFAULT_MS, QUOTA_POLL_MIN_MS, QUOTA_SECTION_KEYS, type QoderAdapter, type QoderAuthRequest, type QoderAuthRouteOptions, type QoderAuthSaveResult, type QoderAuthStatus, QoderCatalog, type QoderCatalogFetch, type QoderCatalogModelSnapshot, QoderCatalogStore, type QoderCatalogStoreOptions, type QoderChatResult, type QoderCredential, QoderCredentialStore, type QoderCreditAccount, type QoderCredits, type QoderEffort, type QoderHostHeartbeat, type QoderModelBilling, type QoderModelInfo, type QoderModelReasoning, type QoderPatSummary, type QoderProbeAction, type QoderProbeRecord, QoderProbeService, type QoderProbeStatus, QoderProbeStore, type QoderProbeValidation, type QoderShim, QoderUpstreamClient, type QoderVariant, type QoderVariantId, type QoderWebCatalog, type QoderWebCreditAccount, type QoderWebCredits, type QoderWebProbeModel, type QoderWebProbeSection, type QoderWebStatus, type ShimLogger, type UpstreamErrorKind, apply, classifyUpstreamError, clearHostHeartbeat, createAuthKey, createQoderAdapter, createQoderShim, fingerprintModel, inject, isHeartbeatProcessAlive, kindFromQoderFailure, modelInfoOf, name, normalizeCredits, patTail, probeModel, processStartTimeMs, qoderAuthHandler, qoderCatalogPath, qoderCredentialIdentity, qoderHostHeartbeatPath, qoderOwnAuthPath, qoderPluginDataDir, qoderProbePath, randomSentinel, readHostHeartbeat, registerQoderAuthRoute, variantFor };
+export { CHINA_VARIANT, CN_SECTION_KEYS, Config, FALLBACK_QODER_MODELS, GLOBAL_SECTION_KEYS, GLOBAL_VARIANT, KIND_STATUS, PROBE_EFFORT_CANDIDATES, type ProbeAttempt, type ProbeOutcome, type ProbeSender, QODER_AUTH_FILENAME, QODER_AUTH_PATH, QODER_DATA_DIR_ENV, QODER_DATA_DIR_NAME, QODER_GLOBAL_AUTH_PATH, QODER_GLOBAL_PROBE_PATH, QODER_GLOBAL_SETTINGS_NS, QODER_GLOBAL_STATUS_PATH, QODER_HOST_HEARTBEAT_FILENAME, QODER_PAT_ENV_CN, QODER_PAT_ENV_GLOBAL, QODER_PROBE_FILENAME, QODER_PROBE_PATH, QODER_PROVIDER, QODER_QUOTA_SETTINGS_NS, QODER_SETTINGS_NS, QODER_STATUS_PATH, QODER_STREAM_IDLE_TIMEOUT_MS, QODER_VARIANTS, QUEUE_WAIT_SECONDS_DEFAULT, QUEUE_WAIT_SECONDS_MIN, QUOTA_POLL_DEFAULT_MS, QUOTA_POLL_MIN_MS, QUOTA_SECTION_KEYS, type QoderAdapter, type QoderAuthRequest, type QoderAuthRouteOptions, type QoderAuthSaveResult, type QoderAuthStatus, QoderCatalog, type QoderCatalogFetch, type QoderCatalogModelSnapshot, QoderCatalogStore, type QoderCatalogStoreOptions, type QoderChatResult, type QoderCredential, type QoderCredentialEntry, QoderCredentialStore, type QoderCreditAccount, type QoderCredits, type QoderEffort, type QoderHostHeartbeat, type QoderModelBilling, type QoderModelInfo, type QoderModelReasoning, type QoderPatProfile, type QoderPatSummary, type QoderProbeAction, type QoderProbeRecord, QoderProbeService, type QoderProbeStatus, QoderProbeStore, type QoderProbeValidation, type QoderShim, QoderUpstreamClient, type QoderVariant, type QoderVariantId, type QoderWebCatalog, type QoderWebCreditAccount, type QoderWebCredits, type QoderWebProbeModel, type QoderWebProbeSection, type QoderWebStatus, type ShimLogger, type UpstreamErrorKind, apply, classifyUpstreamError, clearHostHeartbeat, createAuthKey, createQoderAdapter, createQoderShim, fingerprintModel, inject, isHeartbeatProcessAlive, kindFromQoderFailure, modelInfoOf, name, normalizeCredits, patTail, peerExpectations, peerVersionFailure, probeModel, qoderAuthHandler, qoderCatalogPath, qoderCredentialId, qoderCredentialIdentity, qoderHostHeartbeatPath, qoderOwnAuthPath, qoderPluginDataDir, qoderProbePath, randomSentinel, readHostHeartbeat, registerQoderAuthRoute, satisfiesRange, supportsRange, variantFor };

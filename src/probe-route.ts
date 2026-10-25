@@ -1,19 +1,13 @@
 /**
  * Probe control route: the only state-changing endpoint the plugin exposes.
  *
- * Two guards, because they stop different things (see `docs/reasoning-effort-probe-plan.md`
- * §6.4 and the v0.3.1 note in AGENTS.md about their exact scope):
- *
- * 1. **Loopback Host + Origin**, shared with the status route. This drops
- *    DNS-rebinding pages, whose requests arrive addressed to the attacker's
- *    domain.
- * 2. **An in-process random key**, minted per process and handed only to the
- *    same-origin card. Loopback alone is *not* authentication — any local
- *    process can write `Host: 127.0.0.1` — so a route that spends the user's
- *    credit must prove the caller was told the key.
- *
- * The route never accepts a prompt, a model id outside the live catalog, or a
- * sentinel from the browser: a probe request is assembled entirely host-side.
+ * Two guards, because they stop different things: loopback Host + Origin, which
+ * drops DNS-rebinding pages, and an in-process random key handed only to the
+ * same-origin card. Loopback alone is not authentication (any local process can
+ * send `Host: 127.0.0.1`), so a route that spends the user's credit must prove
+ * the caller was told the key. The route never accepts a prompt, a model id
+ * outside the live catalog, or a browser sentinel: the request is assembled
+ * host-side.
  *
  * @module dsh-qoder-connect/probe-route
  */
@@ -56,10 +50,9 @@ export interface QoderProbeRouteOptions {
   /**
    * Re-read the credential and re-fetch the model catalog for this variant.
    *
-   * It lives on this route rather than the status GET because it is a write
-   * that spends a request against the upstream: the read-only status route's
-   * loopback guard protects against a rebinding *page*, which is not the same
-   * as authorizing an action. Requires the same in-process key as `probe`.
+   * On this route rather than the status GET because it is a write spending an
+   * upstream request; the status route's loopback guard only protects against a
+   * rebinding page. Requires the same in-process key as `probe`.
    */
   refresh?: () => Promise<{ state: string; reason?: string }>
   /** Persist and apply the international context-window preference. */
@@ -71,8 +64,8 @@ export interface QoderProbeRouteOptions {
   /** Trigger manual check-in for this variant. */
   checkIn?: () => Promise<{ state: string; reason?: string; amount?: number }>
   /**
-   * Route path to mount. Defaults to the CN variant's path so existing callers
-   * and tests keep their behaviour; the international variant passes its own.
+   * Route path to mount. Defaults to the CN variant's path; the international
+   * variant passes its own.
    */
   path?: string
 }

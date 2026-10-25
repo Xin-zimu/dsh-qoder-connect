@@ -23,12 +23,9 @@ import {
 } from '../src/status-paths.ts'
 
 /**
- * Two-product client behaviour. The card component and the composer control are
- * shared by both providers, so these tests cover the ways one product's state
- * could leak into the other's surface: a wrong route, a wrong title, or a PAT
- * saved for the wrong product. The auth arm is the PAT entry — the card's only
- * credential action — so the variant-specific guide line, placeholder, and
- * auth route are asserted here too.
+ * Two-product client behaviour: the card and the composer control are shared, so
+ * these cover one product's state leaking into the other — a wrong route, a wrong
+ * title, a PAT saved for the wrong product — plus the PAT entry's variant copy.
  */
 
 const t = (key: QoderSettingsKey, params: Record<string, unknown> = {}): string =>
@@ -106,12 +103,12 @@ describe('card variants', () => {
   })
 
   it('carries the PAT semantic key group in both languages', () => {
-    // The WorkBuddy-era sign-in / credential-import copy is gone; these are the
-    // keys the PAT arm renders, so a missing one is a crash at first paint.
+    // The keys the PAT arm renders: a missing one is a crash at first paint.
     const patKeys = [
       'patHeading', 'patGuide', 'patGuideAI', 'patPlaceholder', 'patPlaceholderAI',
       'patSave', 'patSaving', 'patSaved', 'patSaveFailed', 'patInvalid',
-      'patReplace', 'patClear', 'patClearing',
+      'patAdd', 'patAccounts', 'patRemove', 'patRemoving',
+      'patSwitchFailed', 'patRemoveFailed', 'patClear', 'patClearing',
       'patSourceCard', 'patSourceEnv', 'patSourceCli', 'patSavedAt', 'patTail',
     ] as const satisfies readonly QoderSettingsKey[]
     for (const key of patKeys) {
@@ -125,11 +122,9 @@ describe('plugin card per variant', () => {
   let view: ReactTestRenderer | undefined
   let statusBody: Record<string, unknown>
   /**
-   * The shared status store is module state that outlives a test, and an
-   * expanding card no longer re-reads a document that is still fresh — so each
-   * test starts the clock well past the card's minute. A publish inside the
-   * test then lands at the current time and stays fresh, which is what the
-   * dedup assertions read.
+   * The shared status store outlives a test and a fresh document is not re-read,
+   * so each test starts the clock well past the card's minute; a publish then
+   * lands at the current time, which is what the dedup assertions read.
    */
   let clock = Date.parse('2024-05-01T00:00:00.000Z')
   /** Resolvers for in-flight auth POSTs, so "validating PAT" is observable. */
@@ -146,6 +141,8 @@ describe('plugin card per variant', () => {
       status: 'signed-in',
       region: 'china',
       pat: { source: 'card', savedAtMs: Date.UTC(2026, 8, 12, 8, 30), patTail: 'abcd' },
+      patProfiles: [{ id: 'id-abcd', patTail: 'abcd', savedAtMs: Date.UTC(2026, 8, 12, 8, 30) }],
+      activePatId: 'id-abcd',
       authKey: 'auth-key',
       probeKey: 'probe-key',
       credits: { total: 40, accounts: [] },
@@ -256,7 +253,7 @@ describe('plugin card per variant', () => {
     expect(rendered).toContain('****abcd')
     // An env-sourced credential is labelled as such, so a user can tell where
     // to change it.
-    signedIn({ pat: { source: 'env', patTail: '1234' } })
+    signedIn({ pat: { source: 'env', patTail: '1234' }, patProfiles: [], activePatId: undefined })
     await press(en.refresh)
     expect(JSON.stringify(view!.toJSON())).toContain(en.patSourceEnv)
   })
@@ -329,9 +326,9 @@ describe('plugin card per variant', () => {
     expect(posts(QODER_AUTH_PATH)).toHaveLength(0)
   })
 
-  it('replaces and clears the stored PAT from the signed-in arm', async () => {    await mount()
-    // 「更换 PAT」 opens the entry over a signed-in document (no sign-out first).
-    await press(en.patReplace)
+  it('adds and clears the stored PAT from the signed-in arm', async () => {    await mount()
+    // 「添加 PAT」 opens the entry over a signed-in document (no sign-out first).
+    await press(en.patAdd)
     expect(patInputs()).toHaveLength(1)
     await typePat('a-brand-new-pat')
     await press(en.patSave)

@@ -2,17 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { QoderAuthService, expiresInToMs } from '../../src/qoder/transport/auth.ts'
 import { QoderLlmError } from '../../src/qoder/errors.ts'
-
-test('expiresInToMs reads a small value as seconds and a large one as ms', () => {
-  // OAuth's conventional unit: 3600 seconds is one hour.
-  assert.equal(expiresInToMs(3600), 3_600_000)
-  assert.equal(expiresInToMs(86_400), 86_400_000)
-  // Already-millisecond spellings (>= 1e6) pass through unchanged.
-  assert.equal(expiresInToMs(3_600_000), 3_600_000)
-  assert.equal(expiresInToMs(1_000_000), 1_000_000)
-  // Just below the threshold is still seconds.
-  assert.equal(expiresInToMs(999_999), 999_999_000)
-})
+import { qoderIdeVersion } from '../../src/qoder/transport/wire/cosy.ts'
 
 test('QoderAuthService exchanges once, resolves identity, and caches credentials', async () => {
   let exchangeCalls = 0
@@ -46,9 +36,9 @@ test('QoderAuthService exchanges once, resolves identity, and caches credentials
   assert.equal(second, first)
   assert.equal(exchangeCalls, 1)
   assert.equal(userInfoCalls, 1)
-  assert.equal(exchangeHeaders?.['user-agent'], 'qoder/1.1.47')
+  assert.equal(exchangeHeaders?.['user-agent'], `qoder/${qoderIdeVersion}`)
   assert.equal(exchangeHeaders?.['cosy-clienttype'], '5')
-  assert.equal(userInfoHeaders?.['user-agent'], 'qoder/1.1.47')
+  assert.equal(userInfoHeaders?.['user-agent'], `qoder/${qoderIdeVersion}`)
   assert.equal(userInfoHeaders?.['cosy-clienttype'], '5')
 })
 
@@ -176,12 +166,8 @@ test('QoderAuthService classifies malformed exchange JSON as a protocol failure'
 })
 
 test('QoderAuthService shares one exchange between overlapping heal attempts', async () => {
-  // Two chats rejected at the same moment used to run two overlapping
-  // exchangeFresh calls; each one's cache clear/set raced the other and, with
-  // an upstream retiring the previous job token on a new exchange, they
-  // invalidated each other's credentials — one chat recovered, the other
-  // failed (observed 2026-09-26 22:36). Overlapping heals must share one
-  // exchange.
+  // Overlapping heals must share one exchange: two concurrent exchangeFresh
+  // calls clear/set the cache and invalidate each other's job token.
   let exchangeCalls = 0
   const fetchMock = async (input: URL | Request): Promise<Response> => {
     if (String(input).includes('/jobToken/exchange')) {
@@ -206,9 +192,8 @@ test('QoderAuthService shares one exchange between overlapping heal attempts', a
 })
 
 test('QoderAuthService keeps a shared heal exchange alive when one healer aborts', async () => {
-  // The heal exchange must not run on any caller's signal: the initiating
-  // chat going away (user stop, host cancel) used to cancel the exchange that
-  // the other healers — and the cache refresh after it — were waiting on.
+  // The heal exchange must not run on any caller's signal: one chat going away
+  // would abort the exchange the other healers wait on.
   const fetchMock = async (input: URL | Request): Promise<Response> => {
     if (String(input).includes('/jobToken/exchange')) {
       await new Promise(resolve => setTimeout(resolve, 20))
@@ -230,7 +215,18 @@ test('QoderAuthService keeps a shared heal exchange alive when one healer aborts
   ))
   const joinerCredentials = await joiner
   assert.equal(joinerCredentials.authToken, 'jt-survivor')
-  // and the refreshed credential is cached for the next getCredentials caller.
+  // The refreshed credential is cached for the next getCredentials caller.
   const cached = await service.getCredentials('pt-survivor')
   assert.equal(cached.authToken, 'jt-survivor')
+})
+
+test('expiresInToMs reads a small value as seconds and a large one as ms', () => {
+  // OAuth's conventional unit: 3600 seconds is one hour.
+  assert.equal(expiresInToMs(3600), 3_600_000)
+  assert.equal(expiresInToMs(86_400), 86_400_000)
+  // Already-millisecond spellings (>= 1e6) pass through unchanged.
+  assert.equal(expiresInToMs(3_600_000), 3_600_000)
+  assert.equal(expiresInToMs(1_000_000), 1_000_000)
+  // Just below the threshold is still seconds.
+  assert.equal(expiresInToMs(999_999), 999_999_000)
 })

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: "📖 README：安装、配置与常见报错"
+    url: https://github.com/masknull/dsh-qoder-connect/blob/main/README.md
+    about: 安装、PAT 配置、额度与签到、常见报错先看 README。
+  - name: "📦 更新日志 / Releases"
+    url: https://github.com/masknull/dsh-qoder-connect/releases
+    about: 提 issue 前请先确认已升级到最新版本，很多问题在新版中已经修复。

@@ -1,5 +1,6 @@
 /** Qoder campaign inquiry and daily benefit check-in service. */
 
+import { formatUtc8Date } from '../../utc8.ts'
 import type { QoderAuthService } from './auth.ts'
 import {
   getQoderCampaignsUrl,
@@ -51,7 +52,7 @@ export interface QoderCheckInResult {
   variantId: string
   date: string
   timestamp: number
-  status: 'claimed' | 'already-claimed' | 'no-campaign' | 'error'
+  status: 'claimed' | 'already-claimed' | 'before-window' | 'no-campaign' | 'error'
   amount?: number | undefined
   campaignKey?: string | undefined
   message?: string | undefined
@@ -67,6 +68,26 @@ export interface QoderCheckInServiceOptions {
 }
 
 const defaultCheckInTimeoutMs = 15_000
+
+/**
+ * The longest span still recognised as one daily benefit window; a longer
+ * campaign is not a daily window and falls back to the calendar day.
+ */
+const DAILY_WINDOW_MAX_MS = 24 * 60 * 60_000
+
+/**
+ * Which day's benefit the campaign currently served by the upstream belongs to.
+ * Before 10:00 UTC+8 that is yesterday's window, so `CLAIMED` is not "today is done".
+ */
+type CampaignWindow =
+  /** Today's window is open; `date` is the day it belongs to. */
+  | { kind: 'open'; date: string }
+  /** Today's window has not opened yet. */
+  | { kind: 'not-open' }
+  /** The served window belongs to an earlier day; `date` names it. */
+  | { kind: 'earlier'; date: string }
+  /** No usable window bounds; the calendar day is the only signal available. */
+  | { kind: 'unknown' }
 
 export class QoderCheckInService {
   private readonly authService: QoderAuthService
@@ -91,7 +112,7 @@ export class QoderCheckInService {
       url,
       token,
       // The campaign family gates on the desktop identifier; the generic one
-      // answers 200 with an empty list (see `qoderDesktopClientType`).
+      // answers 200 with an empty list.
       headers: { 'cosy-clienttype': qoderDesktopClientType },
       signal,
       timeoutMs: this.timeoutMs,
@@ -118,19 +139,36 @@ export class QoderCheckInService {
     })
   }
 
-  private getTodayDateString(): string {
-    // Standardize date on UTC+8 (Beijing Time), which matches Qoder's 10:00 reset cycle
-    const now = new Date()
-    const utc8Time = new Date(now.getTime() + (now.getTimezoneOffset() + 480) * 60_000)
-    const y = utc8Time.getFullYear()
-    const m = String(utc8Time.getMonth() + 1).padStart(2, '0')
-    const d = String(utc8Time.getDate()).padStart(2, '0')
-    return `${y}-${m}-${d}`
+  /**
+   * Attribute the served campaign to a day, or say why it cannot be today's.
+   * The daily window runs 10:00 UTC+8 to 09:59 the next morning, so a calendar
+   * date matches the window's date for only part of the day.
+   */
+  private classifyCampaignWindow(
+    campaign: QoderCampaign,
+    nowMs: number,
+    today: string,
+  ): CampaignWindow {
+    const startAt = campaign.startAt
+    if (typeof startAt !== 'number' || !Number.isFinite(startAt) || startAt <= 0) {
+      // Nothing to attribute a status to: the calendar day is all there is.
+      return { kind: 'unknown' }
+    }
+    const endAt = campaign.endAt
+    if (typeof endAt === 'number' && Number.isFinite(endAt)) {
+      const spanMs = (endAt - startAt) * 1000
+      if (spanMs <= 0 || spanMs > DAILY_WINDOW_MAX_MS) return { kind: 'unknown' }
+    }
+    const startMs = startAt * 1000
+    if (startMs > nowMs) return { kind: 'not-open' }
+    const date = formatUtc8Date(startMs)
+    return date === today ? { kind: 'open', date } : { kind: 'earlier', date }
   }
 
   async checkIn(pat: string, signal?: AbortSignal): Promise<QoderCheckInResult> {
-    const today = this.getTodayDateString()
     const nowMs = Date.now()
+    // One instant decides both the calendar day and the window comparison.
+    const today = formatUtc8Date(nowMs)
 
     if (!pat || typeof pat !== 'string' || pat.trim() === '') {
       return {
@@ -144,7 +182,6 @@ export class QoderCheckInService {
 
     const executeWithToken = async (authToken: string): Promise<QoderCheckInResult> => {
       const campaigns = await this.fetchCampaigns(authToken, signal)
-      // Look for daily benefit campaign (actionType === 'CLAIM_BENEFIT')
       const benefitCampaign = campaigns.find(c => c.actionType === 'CLAIM_BENEFIT')
       if (!benefitCampaign) {
         return {
@@ -156,10 +193,28 @@ export class QoderCheckInService {
         }
       }
 
-      if (benefitCampaign.claimStatus === 'CLAIMED') {
+      const campaignWindow = this.classifyCampaignWindow(benefitCampaign, nowMs, today)
+      // Only today's own window may settle today; a window not yet open, or still
+      // yesterday's, claims nothing and leaves the day retryable. Driven by the
+      // campaign's own bounds, since each product states its own opening moment.
+      if (campaignWindow.kind === 'not-open' || campaignWindow.kind === 'earlier') {
         return {
           variantId: this.variantId,
           date: today,
+          timestamp: nowMs,
+          status: 'before-window',
+          campaignKey: benefitCampaign.campaignKey,
+          message: campaignWindow.kind === 'not-open'
+            ? "Today's benefit window has not opened yet"
+            : `Upstream is still serving the benefit window of ${campaignWindow.date}`,
+        }
+      }
+      const windowDate = campaignWindow.kind === 'open' ? campaignWindow.date : today
+
+      if (benefitCampaign.claimStatus === 'CLAIMED') {
+        return {
+          variantId: this.variantId,
+          date: windowDate,
           timestamp: nowMs,
           status: 'already-claimed',
           campaignKey: benefitCampaign.campaignKey,
@@ -177,7 +232,7 @@ export class QoderCheckInService {
       if (isClaimed) {
         return {
           variantId: this.variantId,
-          date: today,
+          date: windowDate,
           timestamp: nowMs,
           status: replayed ? 'already-claimed' : 'claimed',
           amount,

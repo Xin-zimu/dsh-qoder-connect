@@ -3,13 +3,16 @@ import type { UserConfig } from 'tsdown'
 
 const PLUGIN_ID = 'dsh-qoder-connect'
 
-/** Read the npm version once so the build injects it into src/version.ts. */
-const PACKAGE_VERSION = JSON.parse(
+/** Read the npm and upstream versions once so the build injects them. */
+const { version: PACKAGE_VERSION, qoderIdeVersion: QODER_IDE_VERSION } = JSON.parse(
   readFileSync(new URL('./package.json', import.meta.url), 'utf8'),
-).version as string
+) as { version: string; qoderIdeVersion: string }
 
-/** Build-time define map; `src/version.ts` reads `__DSH_QODER_VERSION__`. */
-const VERSION_DEFINE = { __DSH_QODER_VERSION__: JSON.stringify(PACKAGE_VERSION) }
+/** Build-time define map; `src/version.ts` reads `__DSH_QODER_VERSION__`, `cosy.ts` reads `__QODER_IDE_VERSION__`. */
+const VERSION_DEFINE = {
+  __DSH_QODER_VERSION__: JSON.stringify(PACKAGE_VERSION),
+  __QODER_IDE_VERSION__: JSON.stringify(QODER_IDE_VERSION),
+}
 
 const CLIENT_EXTERNALS = [
   'react',

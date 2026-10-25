@@ -9,10 +9,8 @@ import type { QoderCredentialStore } from '../src/auth.ts'
 import type { QoderUpstreamClient } from '../src/upstream.ts'
 
 /**
- * Queue, consent, deduplication and account-binding rules of the probe
- * service. The sender is injected, so nothing here touches the network; the
- * client object only has to carry the `probeEffort` shape
- * (`src/upstream.ts`) that the default sender would use.
+ * Queue, consent, deduplication and account-binding rules of the probe service.
+ * The sender is injected, so nothing here touches the network.
  */
 
 /** Undeclared but reasoning-capable: the only shape worth detecting. */

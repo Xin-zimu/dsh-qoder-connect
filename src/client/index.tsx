@@ -4,10 +4,9 @@ import { useEffect } from 'react'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type { PropsRenderSlots, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
-// The settings domain base owns the `settings.section` slot contract (and the
-// 0.1.5-only `ctx.settingsScope` augmentation) — imported for its TYPES only,
-// which is what keeps this bundle free of a runtime dependency on either
-// version's settings package.
+// The settings domain base owns the `settings.section` slot contract. Imported
+// for its TYPES only, which keeps this bundle free of a runtime dependency on
+// the settings package.
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
@@ -26,13 +25,12 @@ import type { QuotaDashboardInjected, QuotaDashboardState, QuotaDashboardProps, 
 import { injectQuotaCss } from './quota-styles.ts'
 import './quota-slots.ts'
 import './plugin-manager-slots.ts'
-import { setQuotaPollMs, setQuotaToggles, quotaSignInState, quotaPollMs, quotaStatusIsFresh, acquireLiveSurface, refreshQuotaStatus, variantOfStatusPath } from './quota-settings-store.ts'
+import { setQuotaPollMs, setQuotaToggles, quotaSignInState, quotaPollMs, quotaStatusIsFresh, acquireLiveSurface, refreshQuotaStatus, variantOfStatusPath, noteQuotaLanguage } from './quota-settings-store.ts'
+import { setActiveLanguage } from './quota-merge.ts'
 import { en, zh } from './locales.ts'
 import type { QoderSettingsKey } from './locales.ts'
 import { QODER_GLOBAL_STATUS_PATH, QODER_STATUS_PATH } from '../status-paths.ts'
 import type { QoderWebStatus } from '../status-paths.ts'
-
-/** The dashboard face's props are bound directly; no extra key props are needed. */
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -43,16 +41,9 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
   }
   interface SlotMap {
     /**
-     * One card inside the shared 《插件设置》 block that the connect plugins
-     * build on DSH 0.1.7 from `settings.section`.
-     *
-     * 0.1.7 removed the Plugins tab's card list (`settings.plugin.item`), so the
-     * three connect plugins declare this child slot under the shared container
-     * and register their own entry into it. Options: `id` (the registering
-     * plugin's package name, unique), `order` (card order). Declared by
-     * whichever plugin wins the container race — the declaration is part of the
-     * container's `children` table, so it exists exactly while the container
-     * does.
+     * One card inside the shared 《插件设置》 block. The three connect plugins
+     * declare this child slot under the shared container and register their own
+     * entry into it. Options: `id` (the plugin's package name, unique), `order`.
      */
     'plugin-settings.item': { kind: 'list'; scope: 'root' }
   }
@@ -61,21 +52,13 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 /** Stable browser-plugin name. */
 export const name = 'dsh-qoder-connect-client'
 /**
- * Client services this bundle requires BEFORE it activates.
- *
- * DSH 0.1.2 removed `@deepseek-ai/dsh-client-runtime` (the package that used to
- * hold the browser `ClientContext` alias and the `slots` service). The services
- * this card relies on now come from narrower packages: the `slots` registry
- * moved to `@deepseek-ai/dsh-client-ui-renderer`, `locale` stayed in
- * `@deepseek-ai/dsh-client-locale`, and the Plugins tab's card list
- * (`settings.plugin.item`) is declared by
- * `@deepseek-ai/dsh-client-ui-settings-plugins`. Those packages are named in
- * the package's `dsh.client.inject` list.
+ * Client services this bundle requires BEFORE it activates: `slots` comes from
+ * `@deepseek-ai/dsh-client-ui-renderer`, `locale` from
+ * `@deepseek-ai/dsh-client-locale`, all named in `dsh.client.inject`.
  */
 // `modelDirectories` reads the active session through `remote.session`.
-// Declaring that dependency at the client entry is required by the Desktop
-// renderer; without it Cordis rejects `directoryFor()` before this bundle can
-// finish registering its contributions.
+// Declaring that dependency here is required by the Desktop renderer: without it
+// Cordis rejects `directoryFor()` before this bundle can register.
 export const inject = ['slots', 'locale', 'remote', 'remote.session']
 
 /** The status routes per variant id (mirrors the host's locked route table). */
@@ -85,14 +68,9 @@ const VARIANT_STATUS: Record<string, string> = {
 }
 
 /**
- * The shared 《插件设置》 block's slot and entry ids.
- *
- * The three connect plugins must agree on these exactly: `settings.section` is
- * a `list` slot, so many blocks may coexist, but a child slot name may be
- * declared once and a list entry id may be registered once. The first plugin to
- * arrive registers the container (declaring the child slot); the others detect
- * it and attach their own entry, which is why the ids are fixed constants
- * rather than per-plugin names.
+ * The shared 《插件设置》 block's slot and entry ids. The three connect plugins must
+ * agree on these exactly: a child slot name may be declared once and a list entry
+ * id registered once, so the ids are fixed constants rather than per-plugin names.
  */
 const SHARED_SECTION_SLOT = 'settings.section'
 const SHARED_SECTION_ID = 'plugin-settings'
@@ -104,27 +82,16 @@ const SHARED_ITEM_ID = 'dsh-qoder-connect'
 const SHARED_SECTION_LABEL = '插件设置'
 
 /**
- * The plugin manager's bundle-configuration seat and this bundle's key in it.
- *
- * The sidebar's Plugins panel (the `plugins` main panel the Host's plugin
- * manager registers) renders one bundle's own configuration on the bundle's
- * detail page — between the description and the component rows — through the
- * `plugins.bundle.config` keyed slot, keyed by the bundle's npm package name.
- * The key is what the page's configuration ledger reads to decide whether the
- * configuration section shows at all, so it must spell this package's name
- * exactly; the slot itself is declared by the Host (see
- * `plugin-manager-slots.ts` for the structural restatement).
+ * The plugin manager's bundle-configuration seat and this bundle's key in it. The
+ * key must spell this package's name exactly: the page's configuration ledger reads
+ * it to decide whether the configuration section shows at all.
  */
 const PLUGIN_MANAGER_SLOT = 'plugins.bundle.config'
 const PLUGIN_MANAGER_KEY = 'dsh-qoder-connect'
 
 /**
- * The shared 《插件设置》 section the 0.1.7 card list lives in.
- *
- * It renders nothing but its child slot: every connect plugin contributes its
- * own card as one `plugin-settings.item` entry. The list wrapper mirrors the
- * list the removed Plugins tab used for the same cards (`gap: 10`, no markers),
- * so the cards keep the spacing they had on 0.1.5.
+ * The shared 《插件设置》 section: it renders nothing but its child slot, which
+ * mirrors the removed Plugins tab's list layout (`gap: 10`, no markers).
  *
  * @param props - the section's slot props (owner share plus `renderSlot`).
  * @returns the ordered card list.
@@ -140,29 +107,15 @@ function PluginSettingsSection(
 }
 
 /**
- * Register card copy, the shared quota-settings card, the two variant cards,
- * the sidebar quota cards, and the same unified card on this bundle's page in
- * the sidebar's Plugins panel.
+ * Register card copy, the shared quota-settings card, the two variant cards, the
+ * sidebar quota cards, and the same unified card on this bundle's page.
  *
- * The entire body is wrapped so that a DSH slot-API breaking change (for
- * example the rc.6→rc.7 `id`→`key` / `order`→`priority` rename) degrades
- * to a `console.error` instead of throwing into the DSH loader and raising
- * the red "Failed to load plugins" banner. The host provider keeps working:
- * the `qoder` model channel is unaffected, and `dsh-qoder-connect
- * status` reports host health via the heartbeat file.
+ * The body is wrapped so a DSH slot-API breaking change degrades to a
+ * `console.error` instead of raising the "Failed to load plugins" banner; the
+ * host provider keeps serving models regardless.
  *
- * Card ORDER: the Plugins tab dispatches `settings.plugin.item` in
- * registration order, so this entry registers the shared quota-settings card
- * first (top), then CN, then Global — the layout agreed for this feature
- * (统一设置 → CN → Global, china first).
- *
- * NOTE: the try/catch boundary of this function is mirrored (duplicated) in
- * `tests/client-fallback.spec.ts`, because the real client entry imports
- * browser-only DSH packages that cannot load in the Node test environment.
- * That test therefore does not import this function — it replicates its
- * shape. If you change the guarded body or the `console.error` message here,
- * update the mirrored `apply()` in that spec too, or the fallback test will
- * silently diverge from this real implementation.
+ * NOTE: the try/catch boundary here is mirrored in `tests/client-fallback.spec.ts`
+ * — change the guarded body or the `console.error` message and update that spec too.
  */
 export function apply(ctx: ClientContext): void {
   try {
@@ -170,17 +123,29 @@ export function apply(ctx: ClientContext): void {
     ctx.effect(() => ctx.locale.register(namespace, { zh, en }), 'dsh-qoder-connect: settings copy')
     const t = ctx.locale.bind(namespace) as QoderPluginCardInjected['t']
 
-    // 1. Shared quota-settings card. Card ORDER is priority-ascending in the
-    // Plugins tab (measured: lower priority renders first), so this card gets
-    // the lowest priority number of the three to sit above the two variant
-    // cards: 统一设置 (50) → CN (60) → Global (70).
+    // Which language a package title renders in is decided in the merge layer, so
+    // the sidebar card and the dashboard cannot label one package two ways. The
+    // bump re-renders subscribed cards on a mid-session language switch.
+    const applyLanguage = (localeId: string): void => {
+      setActiveLanguage(localeId)
+      noteQuotaLanguage()
+    }
+    applyLanguage(ctx.locale.getLocale().active)
+    ctx.effect(() => {
+      const dispose = ctx.on('locale/change', snapshot => {
+        applyLanguage(snapshot.active)
+      })
+      return () => {
+        dispose()
+      }
+    }, 'dsh-qoder-connect: package title language')
+
+    // 1. Shared quota-settings card. Card ORDER is priority-ascending, so this card
+    // gets the lowest priority of the three: 统一设置 (50) → CN (60) → Global (70).
     //
-    // The band starts at 50 deliberately: the sibling connect plugin in this
-    // workspace registers the same three seats at 10/20/30, and the ledger
-    // breaks priority ties by registration order, so equal or overlapping
-    // values interleaved the two plugins' cards instead of keeping each
-    // plugin's group together. A band no sibling uses makes the grouping
-    // independent of load order.
+    // The band starts at 50 deliberately: the sibling connect plugin registers the
+    // same three seats at 10/20/30 and ties break by registration order, so
+    // overlapping values would interleave the two plugins' cards.
     const quotaSettingsInjected: QuotaSettingsCardInjected = {
       t,
       // Read live at render: the sign-in state changes without a remount.
@@ -190,15 +155,11 @@ export function apply(ctx: ClientContext): void {
      * The bound quota settings face, filled in as soon as a host configuration
      * service becomes available (see the two `ctx.inject` callbacks below).
      *
-     * It is bound as a SERVICE ARRIVES rather than when the settings card's
-     * inject factory first runs: the factory only executes while the settings
-     * page renders, so a fresh page load read no toggles and rendered no sidebar
-     * card until the user opened settings — the exact regression the
-     * commandcode card avoids by reading its STORED fact independently of the
-     * settings page. The face's subscription mirrors every accepted snapshot
-     * (toggles + interval) into the shared store the sidebar cards and the
-     * dashboard read; a deployment with no configuration service never binds,
-     * and the sidebar cards stay hidden.
+     * It binds as a SERVICE ARRIVES rather than when the settings card's inject
+     * factory first runs: the factory only executes while the settings page
+     * renders, so a fresh page load would read no toggles and render no sidebar
+     * card. The face's subscription mirrors every accepted snapshot into the
+     * shared store; with no configuration service the sidebar cards stay hidden.
      */
     let quotaScope: QuotaSettingsScope<QuotaSection> | undefined
     const adoptQuotaScope = (scope: QuotaSettingsScope<QuotaSection>): void => {
@@ -212,18 +173,13 @@ export function apply(ctx: ClientContext): void {
       scope.subscribe(applySnapshot)
     }
 
-    // Unified Qoder plugin configuration card: merges sidebar quota settings,
-    // China variant, and Global variant into one single card titled "Qoder".
-    // The shared 《插件设置》 block dispatches its `list` entries by id
-    // (ascending order); the card rank is fixed across the three connect
-    // plugins: the first sibling takes 10, the second 20, this one 30.
+    // Unified Qoder plugin configuration card: merges sidebar quota settings, the
+    // China variant, and the Global variant into one card titled "Qoder". The shared
+    // block dispatches list entries by ascending order; this plugin takes 30.
     /**
      * The unified card's inject face, shared by its two surfaces: the shared
-     * 《插件设置》 block and this bundle's own page in the sidebar's Plugins
-     * panel. One face keeps both cards reading the same live values — the same
-     * scope, the same sign-in fact, the same `unified` layout — so a save on
-     * either surface is a save for both. The Plugins-panel registration opens
-     * the card at once; the settings block lists it collapsed.
+     * 《插件设置》 block and this bundle's own page in the Plugins panel. One face
+     * keeps both cards reading the same scope and sign-in fact.
      */
     const unifiedCardInject = (defaultOpen = false): QoderPluginCardInjected => ({
       t,
@@ -238,17 +194,16 @@ export function apply(ctx: ClientContext): void {
       ctx.slots.inject(SHARED_ITEM_SLOT, () => ctx.slots.register({ name: SHARED_ITEM_SLOT, id: SHARED_ITEM_ID, order: 30, inject: unifiedCardInject }, QoderPluginCard))
 
     /**
-     * Attach this plugin's card to the shared 《插件设置》 block, building the
-     * block first if nobody has.
+     * Attach this plugin's card to the shared 《插件设置》 block, building the block
+     * first if nobody has.
      *
-     * Backoff protocol (identical in all three connect plugins, on purpose: a
-     * `list` slot takes many entries but only ONE registration per id, and a
-     * child slot name may be declared once, so the container is a rendezvous
-     * rather than a race to be won):
+     * Backoff protocol (identical in all three connect plugins: a `list` slot takes
+     * many entries but only ONE registration per id, and a child slot name may be
+     * declared once):
      *   1. wait for the host to declare `settings.section`;
      *   2. if an entry with the shared id is already there, only attach;
-     *   3. otherwise register the container — and if a sibling won the race and
-     *      the registration throws, fall back to attaching to theirs.
+     *   3. otherwise register the container — and if a sibling won the race and the
+     *      registration throws, fall back to attaching to theirs.
      */
     const joinSharedSettingsBlock = (): void => {
       ctx.slots.inject(SHARED_SECTION_SLOT, () => {
@@ -279,20 +234,11 @@ export function apply(ctx: ClientContext): void {
     }
 
     /**
-     * Contribute the same unified card to this bundle's page in the sidebar's
-     * Plugins panel, beside its enable switch and component rows.
+     * Contribute the same unified card to this bundle's page in the Plugins panel.
      *
-     * `ctx.slots.inject` defers the factory until the Host's plugin manager
-     * declares the seat (its `main` registration commits the child table), so
-     * a deployment that ships no plugin manager — or loads it after this
-     * bundle — never throws: the callback simply never runs, and the shared
-     * 《插件设置》 block stays the single surface, exactly as before. The
-     * keyed key is this package's name, the same key the page's configuration
-     * ledger reads to decide whether the configuration section shows.
-     *
-     * Its own boundary mirrors the dashboard and footer-card ones: a slot-API
-     * breaking change degrades to a console.error instead of taking the
-     * settings block or the model channel with it.
+     * `ctx.slots.inject` defers the factory until the Host's plugin manager declares
+     * the seat, so a deployment without a plugin manager never throws — the shared
+     * 《插件设置》 block then stays the single surface.
      */
     const joinPluginManagerBlock = (): void => {
       try {
@@ -309,12 +255,9 @@ export function apply(ctx: ClientContext): void {
     }
 
     /**
-     * 插件自有配置（`<profile>/.dsh-qoder-connect/settings.json`）：两条宿主线的
-     * 读写都走宿主半的 settings face，不再经过 settingsScope / configForms。
-     *
-     * 0.1.7 的 configForms 写入会整树 reconcile + fiber 热重载（每次约
-     * 1~1.5 秒，且每次保存都刷新所有客户端镜像）；自有文件写入是本地毫秒级
-     * 原子写。卡片注册无条件进行：scope 在启动时载入，迟到也不会漏掉 UI。
+     * 插件自有配置（`<profile>/.dsh-qoder-connect/settings.json`）：读写在宿主半的
+     * settings face 上完成，不经过 settingsScope / configForms（后者每次写入都会
+     * 整树 reconcile + fiber 热重载）。卡片注册无条件进行，迟到也不会漏掉 UI。
      */
     const ownQuotaScope = new OwnQuotaSettingsScope()
     void ownQuotaScope.load()
@@ -322,13 +265,11 @@ export function apply(ctx: ClientContext): void {
     joinSharedSettingsBlock()
     joinPluginManagerBlock()
 
-    // Sidebar quota cards + the dashboard they open. Two registrations, one
-    // navigation entry — commandcode's pattern: the layout's keyed `main` slot
-    // holds the shared dashboard, each footer card selects it on click. The
-    // `layout` service is read REFLECTIVELY at click time (never a static
-    // inject — ui-layout is not this bundle's dependency), and the footer
-    // registration is gated on the layout seam so a profile without
-    // `selectPanel` never renders a dead button.
+    // Sidebar quota cards + the dashboard they open: the layout's keyed `main` slot
+    // holds the shared dashboard and each footer card selects it on click. The
+    // `layout` service is read REFLECTIVELY (ui-layout is not a dependency), and the
+    // footer registration is gated on the seam so a profile without `selectPanel`
+    // never renders a dead button.
     const QUOTA_PANEL_ID = 'qoder-quota-panel'
     const CONVERSATION_PANEL_ID = 'conversation'
     interface LayoutSelectionSeam {
@@ -342,21 +283,14 @@ export function apply(ctx: ClientContext): void {
     let quotaPanelOpen = false
     const dashboardListeners = new Set<() => void>()
     /**
-     * The observable source the dashboard reads through the inject face's
-     * `hooks` compartment. The renderer caches an inject face ONCE per entry
-     * and SPREADS it into props — a face getter is read exactly once and
-     * frozen, which is why face-carried documents/activePath went stale. The
-     * hooks channel survives: `bindInjectSources` converts each hooks member
-     * into a `use<Name>` selector hook, and the hook reads the CURRENT
-     * snapshot on every render (the same mechanism commandcode's usage store
-     * rides).
+     * The observable source the dashboard reads through the inject face's `hooks`
+     * compartment: the renderer caches an inject face ONCE and spreads it, so a face
+     * getter is frozen — only hooks read the CURRENT snapshot on every render.
      *
-     * STABILITY CONTRACT: useSyncExternalStore requires getSnapshot() to
-     * return the SAME reference between changes — a fresh object per call
-     * re-renders forever and React kills the entry (error #185, the same
-     * class of crash the settings card's unstable projection caused). So the
-     * snapshot is a CACHED object, replaced wholesale by publish(); every
-     * mutator builds the next snapshot and publishes exactly once.
+     * STABILITY CONTRACT: useSyncExternalStore requires getSnapshot() to return the
+     * SAME reference between changes; a fresh object per call re-renders forever and
+     * React kills the entry (error #185). So the snapshot is a CACHED object,
+     * replaced wholesale by publish().
      */
     let dashboardSnap: QuotaDashboardState = {
       loading: false,
@@ -387,23 +321,15 @@ export function apply(ctx: ClientContext): void {
     }
 
     /**
-     * Refresh ONE variant's document (the one the panel is showing) — not
-     * both. The earlier version fetched both routes on every panel mount, so
-     * clicking the CN card also refreshed the Global card's data and timestamp;
-     * the user ruled each click refreshes only what it shows.
+     * Refresh ONE variant's document (the one the panel is showing), not both.
      *
-     * Freshness rule (also the user's): if the shared document for THIS
-     * variant is newer than the configured interval, the fetch is SKIPPED —
-     * a click shows the cached numbers instead of re-billing upstream. A
-     * variant with NO result yet always fetches. A manual Refresh click
-     * (force=true) bypasses the freshness check: an explicit user action
-     * always re-reads.
+     * Freshness rule: when the shared document for THIS variant is newer than the
+     * configured interval the fetch is SKIPPED (a click shows cached numbers); a
+     * variant with no result yet always fetches. `force` bypasses the check for the
+     * user's own Refresh click.
      *
-     * The read itself is the SHARED one: it publishes through the store's
-     * sequence guard, so this panel, the sidebar cards and the settings cards
-     * converge on the same document — and a settings card polling the variant
-     * already keeps this panel current, which is why the panel no longer
-     * keeps a timer of its own.
+     * The read is the SHARED one, so this panel, the sidebar cards and the settings
+     * cards converge on the same document — the panel keeps no timer of its own.
      */
     const refreshDashboard = async (options: { force?: boolean } = {}): Promise<void> => {
       if (dashboardLoading) return
@@ -420,11 +346,9 @@ export function apply(ctx: ClientContext): void {
     }
 
     /**
-     * The panel's hold on its shown variant. The hold is what keeps the
-     * variant live: the shared ticker reads it at the settings interval while
-     * the panel stands — the cadence the panel's own timer used to keep — and
-     * an expanded settings card beside it tightens the read to once a minute.
-     * A variant switch moves the hold to the newly shown variant.
+     * The panel's hold on its shown variant: the shared ticker reads it at the
+     * settings interval while the panel stands, and an expanded settings card beside
+     * it tightens the read to once a minute. A variant switch moves the hold.
      */
     let dashboardHold: (() => void) | undefined
     const holdDashboardVariant = (path: string): void => {
@@ -436,21 +360,15 @@ export function apply(ctx: ClientContext): void {
       dashboardHold = undefined
     }
 
-    // Mount/unmount wrapper. A FUNCTION DECLARATION, defined before the
-    // register call that names it: the last build named a `const` from inside
-    // the slots.inject factory, which ran synchronously (ui-layout was already
-    // live) and hit the temporal dead zone — the ReferenceError was contained
-    // by the register's own try/catch, the dashboard cell never registered,
-    // and every card click threw "main panel not registered" (the dead
-    // button). Hoisted declarations cannot hit the dead zone. The child
-    // renders as JSX (not a bare function call) so its hooks stay in their
-    // own component instance.
+    // Mount/unmount wrapper. A FUNCTION DECLARATION, not a `const`: the
+    // slots.inject factory can run synchronously and hit the temporal dead zone,
+    // which silently dropped the dashboard cell. The child renders as JSX so its
+    // hooks stay in their own component instance.
     function QuotaDashboardWithLifecycle(props: QuotaDashboardProps): React.ReactNode {
       useEffect(() => {
         quotaPanelOpen = true
         // The panel holds its shown variant live and reads it at once (the
-        // freshness rule may serve the cached document); the shared ticker
-        // keeps it current from then on.
+        // freshness rule may serve the cached document).
         holdDashboardVariant(dashboardRequestedPath)
         void refreshDashboard()
         return () => {
@@ -463,24 +381,18 @@ export function apply(ctx: ClientContext): void {
 
     const panelFace = (): QuotaDashboardInjected => ({
       hooks: {
-        // Renderer converts this to the `useQuotaDashboard` selector hook
-        // (standardHookPropName capitalises the name). Its snapshots MUST be
-        // reference-stable between changes — useSyncExternalStore compares
-        // identity — so refreshDashboard publishes a fresh top-level object.
+        // Renderer converts this to the `useQuotaDashboard` selector hook; its
+        // snapshots MUST be reference-stable (useSyncExternalStore compares identity).
         quotaDashboard: dashboardSource,
       },
       t,
       statusPaths: [QODER_STATUS_PATH, QODER_GLOBAL_STATUS_PATH],
       refresh: () => {
-        // The dashboard's Refresh button is an explicit user action: it
-        // bypasses the freshness rule and re-reads the SHOWN variant only.
+        // An explicit user action: bypass the freshness rule, re-read the SHOWN variant.
         void refreshDashboard({ force: true })
       },
-      // The user switched to another variant's tab: point the dashboard at it,
-      // move the panel's hold to it, and fetch that variant when the shared
-      // store holds nothing for it (or something stale). Its sidebar card
-      // being off means no other surface ever fetched it, so without this the
-      // tab showed "save a PAT" until the user toggled a setting.
+      // The user switched tabs: point the dashboard at it, move the hold, and fetch it
+      // when the shared store holds nothing (its sidebar card may be off).
       onVariantPicked: (path: string) => {
         dashboardRequestedPath = path
         holdDashboardVariant(path)
@@ -504,8 +416,7 @@ export function apply(ctx: ClientContext): void {
 
     ctx.effect(() => injectQuotaCss(), 'dsh-qoder-connect: quota styles')
 
-    // The dashboard cell itself needs no gate: registering for a declaration
-    // that never arrives is a no-op by construction.
+    // No gate needed: registering for a declaration that never arrives is a no-op.
     try {
       ctx.slots.inject('main', () => ctx.slots.register(
         { name: 'main', key: QUOTA_PANEL_ID, locale: 'panel.qoder-quota', inject: panelFace as never },
@@ -525,9 +436,8 @@ export function apply(ctx: ClientContext): void {
           const injected: SidebarQuotaCardInjected = {
             t,
             statusPath,
-            // Toggle semantics (the user's spec): clicking the card of the
-            // variant ALREADY showing closes the panel; clicking the other
-            // variant's card switches the panel to it and keeps it open.
+            // Toggle semantics: clicking the card of the variant ALREADY showing
+            // closes the panel; clicking the other variant's card switches to it.
             open: () => {
               const current = layoutCtx.get('layout') as LayoutSelectionSeam | undefined
               if (typeof current?.selectPanel !== 'function') return
@@ -536,14 +446,9 @@ export function apply(ctx: ClientContext): void {
                 return
               }
               dashboardRequestedPath = statusPath
-              // An already-mounted panel will not re-render from selectPanel
-              // (the panel key is unchanged), so push the tab change through
-              // the revision the dashboard subscribes to. The variant switch
-              // must also FETCH the newly shown variant when the shared store
-              // holds nothing (or something stale) for it — without this,
-              // opening the panel on one variant and switching to the other
-              // showed "save a PAT" forever for a variant no surface had ever
-              // fetched (its sidebar card being off means nobody polls it).
+              // A mounted panel will not re-render from selectPanel alone, so push the
+              // tab change through the revision the dashboard subscribes to, and fetch
+              // the newly shown variant (no other surface polls it when its card is off).
               notifyDashboard()
               void refreshDashboard()
               current.selectPanel(QUOTA_PANEL_ID)
@@ -576,8 +481,8 @@ export function apply(ctx: ClientContext): void {
       }, QoderProbeControl))
     })
   } catch (error: unknown) {
-    // Degrade silently on the page: the host provider still serves models.
-    // Developers see the full cause in the browser console; users see no banner.
+    // Degrade silently on the page: the host provider still serves models, users
+    // see no banner, and the cause lands in the browser console.
     console.error('[dsh-qoder-connect] client card failed to load (host provider unaffected):', error)
   }
 }

@@ -1,19 +1,11 @@
 /**
  * The shared quota-settings card: one card above the two variant cards that
- * configures both sidebar quota widgets.
+ * configures both sidebar quota widgets. It registers into the Plugins tab's card
+ * list and writes through the settings face's revision-fenced `set`.
  *
- * Like the built-in plugin cards, it registers into the Plugins tab's card
- * list — `settings.plugin.item` on DSH 0.1.5, the shared 《插件设置》 block on
- * 0.1.7, where that list is gone — and writes through the settings face's
- * revision-fenced `set` — the same durable-write path every preference row
- * uses. A toggle commits on click: each click is one explicit user choice,
- * and the scope's ordering makes the last one win, so no staged-draft form is
- * needed for two booleans and a number.
- *
- * The two toggles gate the CN and international sidebar cards respectively;
- * the interval is one shared poll period. Toggles are disabled while their
- * variant is signed out: a quota card for an account nobody is signed into
- * would render an error forever, so the setting waits for a session.
+ * A toggle commits on click (one click is one explicit user choice), and toggles
+ * are disabled while their variant is signed out: a quota card for an account
+ * nobody is signed into would render an error forever.
  */
 
 import { useSyncExternalStore, useState, useEffect, useCallback } from 'react'
@@ -26,21 +18,13 @@ import { noteQuotaSignIn, onQuotaSettingsChange, quotaSignInState, quotaStatus, 
 import { QODER_GLOBAL_STATUS_PATH, QODER_STATUS_PATH } from '../status-paths.ts'
 
 /**
- * The settings-controller face this bundle consumes, restated locally.
+ * The settings-controller face this bundle consumes, restated locally: both host
+ * versions hand a field-identical controller, which keeps every caller below
+ * branch-free.
  *
- * DSH 0.1.5 hands a `SettingsScope<T>` (`SettingsScopeController`) to a plugin
- * that binds a namespace it registered on the Host; DSH 0.1.7 hands a
- * `ConfigFormController<T>` to a plugin that asks for its profile entry's form.
- * The two are field-for-field identical — `getSnapshot` / `subscribe` / `set` /
- * `unset` / `mutate`, over the same
- * `status`/`value`/`base`/`user`/`revision`/`writable`/`mode` snapshot — which
- * is what lets every caller below stay branch-free.
- *
- * The type is restated rather than imported: naming either host type would tie
- * this bundle's compilation to one version's settings package graph, and 0.1.7
- * does not declare the 0.1.5 name at all. A type-only import would still be a
- * cross-version dependency; a structural restatement is not (client bundle
- * purity: cross-plugin collaboration goes through services, never imports).
+ * Restated rather than imported so compilation is not tied to one version's
+ * settings package graph (client bundle purity: cross-plugin collaboration goes
+ * through services, never imports).
  */
 export interface QuotaSettingsScope<T> {
   /** @returns the current sync snapshot (stable reference until the next change). */
@@ -55,7 +39,7 @@ export interface QuotaSettingsScope<T> {
    * Queue one field write.
    * @param field - scalar field inside the section.
    * @param value - JSON-shaped value selected by the user.
-   * @returns the host-specific settlement, which this card does not read.
+   * @returns the host settlement, which this card does not read.
    */
   set: (field: string, value: unknown) => Promise<unknown>
   /**
@@ -95,6 +79,8 @@ export interface QuotaSection {
   checkInMinuteCN?: number
   checkInMinuteGlobal?: number
   quotaPollMs?: number
+  queueWait?: boolean
+  queueWaitSeconds?: number
 }
 
 export type QuotaSettingsCardProps =
@@ -110,6 +96,8 @@ const FIELDS = [
   'autoCheckInGlobal',
   'checkInMinuteGlobal',
   'quotaPollMs',
+  'queueWait',
+  'queueWaitSeconds',
 ] as const
 type Field = (typeof FIELDS)[number]
 
@@ -117,13 +105,21 @@ type Field = (typeof FIELDS)[number]
 const POLL_DEFAULT_MS = 300_000
 /** Floor the schema also enforces; mirrored here for immediate UI feedback. */
 const POLL_MIN_MS = 60_000
+/** The queue wait is a budget the user owns; only a floor is mirrored here. */
+const QUEUE_WAIT_SECONDS_DEFAULT = 540
+const QUEUE_WAIT_SECONDS_MIN = 1
 /** 10:00 UTC+8, the moment the upstream resets the daily campaign. */
 const CHECK_IN_MINUTE_DEFAULT = 600
+/**
+ * Floor the Host schema also enforces: the daily benefit window opens at 10:00,
+ * so an earlier moment can never claim. Mirrored here for immediate UI feedback.
+ */
+const EARLIEST_CHECK_IN_MINUTE = 600
 
 /** Minutes past midnight (UTC+8), split for the two number fields. */
 function splitMinutes(minutes: number): { hours: number; minutes: number } {
   const safe = Number.isFinite(minutes) ? Math.trunc(minutes) : CHECK_IN_MINUTE_DEFAULT
-  const clamped = safe < 0 || safe > 1439 ? CHECK_IN_MINUTE_DEFAULT : safe
+  const clamped = safe < EARLIEST_CHECK_IN_MINUTE || safe > 1439 ? CHECK_IN_MINUTE_DEFAULT : safe
   return { hours: Math.floor(clamped / 60), minutes: clamped % 60 }
 }
 
@@ -139,6 +135,8 @@ interface QuotaSettingsProjection {
     checkInMinuteCN: number
     checkInMinuteGlobal: number
     quotaPollMs: number
+    queueWait: boolean
+    queueWaitSeconds: number
   }
 }
 
@@ -156,6 +154,8 @@ function project(scope: QuotaSettingsScope<QuotaSection> | undefined): QuotaSett
         checkInMinuteCN: CHECK_IN_MINUTE_DEFAULT,
         checkInMinuteGlobal: CHECK_IN_MINUTE_DEFAULT,
         quotaPollMs: POLL_DEFAULT_MS,
+        queueWait: true,
+        queueWaitSeconds: QUEUE_WAIT_SECONDS_DEFAULT,
       },
     }
   }
@@ -172,6 +172,8 @@ function project(scope: QuotaSettingsScope<QuotaSection> | undefined): QuotaSett
       checkInMinuteCN: typeof value.checkInMinuteCN === 'number' ? value.checkInMinuteCN : CHECK_IN_MINUTE_DEFAULT,
       checkInMinuteGlobal: typeof value.checkInMinuteGlobal === 'number' ? value.checkInMinuteGlobal : CHECK_IN_MINUTE_DEFAULT,
       quotaPollMs: typeof value.quotaPollMs === 'number' ? value.quotaPollMs : POLL_DEFAULT_MS,
+      queueWait: value.queueWait !== false,
+      queueWaitSeconds: typeof value.queueWaitSeconds === 'number' ? value.queueWaitSeconds : QUEUE_WAIT_SECONDS_DEFAULT,
     },
   }
 }
@@ -179,13 +181,10 @@ function project(scope: QuotaSettingsScope<QuotaSection> | undefined): QuotaSett
 /**
  * Stable-reference projection cache.
  *
- * React's useSyncExternalStore requires getSnapshot() to return THE SAME
- * reference between renders unless the store actually changed. project()
- * builds a fresh object every call, which re-renders forever and crashes the
- * card with React error #185 ("maximum update depth exceeded") — exactly the
- * crash the slot ledger reported. The cache below returns the last built
- * projection until the underlying scope snapshot (or scope identity) changes,
- * which is the only thing the projection actually derives from.
+ * useSyncExternalStore requires getSnapshot() to return THE SAME reference between
+ * renders unless the store changed; project() builds a fresh object every call,
+ * which re-renders forever (React error #185). Cache until the scope snapshot or
+ * scope identity changes — the only things the projection derives from.
  */
 let cachedScope: QuotaSettingsScope<QuotaSection> | undefined
 let cachedSource: unknown
@@ -201,6 +200,8 @@ const UNAVAILABLE: QuotaSettingsProjection = {
     checkInMinuteCN: CHECK_IN_MINUTE_DEFAULT,
     checkInMinuteGlobal: CHECK_IN_MINUTE_DEFAULT,
     quotaPollMs: POLL_DEFAULT_MS,
+    queueWait: true,
+    queueWaitSeconds: QUEUE_WAIT_SECONDS_DEFAULT,
   },
 }
 
@@ -218,7 +219,9 @@ function stableProject(scope: QuotaSettingsScope<QuotaSection> | undefined): Quo
     cachedProjection.values.autoCheckInGlobal !== next.values.autoCheckInGlobal ||
     cachedProjection.values.checkInMinuteCN !== next.values.checkInMinuteCN ||
     cachedProjection.values.checkInMinuteGlobal !== next.values.checkInMinuteGlobal ||
-    cachedProjection.values.quotaPollMs !== next.values.quotaPollMs
+    cachedProjection.values.quotaPollMs !== next.values.quotaPollMs ||
+    cachedProjection.values.queueWait !== next.values.queueWait ||
+    cachedProjection.values.queueWaitSeconds !== next.values.queueWaitSeconds
   ) {
     cachedScope = scope
     cachedProjection = next
@@ -227,16 +230,18 @@ function stableProject(scope: QuotaSettingsScope<QuotaSection> | undefined): Quo
 }
 
 /** One toggle row: label, hint, and a switch drawn to the shell's proportions. */
-function ToggleRow({ label, hint, checked, disabled, disabledHint, onToggle }: {
+function ToggleRow({ label, hint, checked, disabled, disabledHint, last, onToggle }: {
   label: string
   hint: string
   checked: boolean
   disabled?: boolean
   disabledHint?: string
+  /** The final row drops the divider so the group has one closing edge. */
+  last?: boolean
   onToggle: (next: boolean) => void
 }): React.ReactNode {
   return (
-    <div style={rowStyle}>
+    <div style={last === true ? { ...rowStyle, borderBottom: 'none', paddingBottom: 0 } : rowStyle}>
       <div style={rowTextStyle}>
         <span style={labelStyle}>{label}</span>
         <span style={hintStyle}>{disabled === true && disabledHint !== undefined ? disabledHint : hint}</span>
@@ -268,12 +273,9 @@ function ToggleRow({ label, hint, checked, disabled, disabledHint, onToggle }: {
 /**
  * One time row: the moment a variant checks in, as two typeable number fields.
  *
- * Deliberately NOT `<input type="time">`: that control's segments are spinners,
- * and with an IME active (every Chinese/Japanese keyboard) the segments refuse
- * typed digits, leaving only the tiny stepper arrows — unusable for the one
- * thing this row exists to do. Two plain number fields accept typing under any
- * input method; the value is committed on blur or Enter, so a half-typed
- * field never writes a wrong moment to the host.
+ * Deliberately NOT `<input type="time">`: its segments are spinners and refuse
+ * typed digits under an IME, leaving only the stepper arrows. The value commits
+ * on blur or Enter, so a half-typed field never writes a wrong moment.
  */
 function TimeRow({ label, hint, value, disabled, onPick }: {
   label: string
@@ -286,9 +288,8 @@ function TimeRow({ label, hint, value, disabled, onPick }: {
   const [hourDraft, setHourDraft] = useState(String(split.hours))
   const [minuteDraft, setMinuteDraft] = useState(String(split.minutes).padStart(2, '0'))
 
-  // Re-seed the fields whenever the stored value changes underneath us (a
-  // save landing, another surface editing it). Editing itself does not write
-  // until commit, so this cannot fight the typist.
+  // Re-seed whenever the stored value changes underneath us (a save landing,
+  // another surface editing it). Editing itself writes nothing until commit.
   useEffect(() => {
     const next = splitMinutes(value)
     setHourDraft(String(next.hours))
@@ -300,11 +301,13 @@ function TimeRow({ label, hint, value, disabled, onPick }: {
     const parsedMinutes = Number.parseInt(minuteDraft, 10)
     const hours = Number.isFinite(parsedHours) ? Math.min(23, Math.max(0, parsedHours)) : split.hours
     const minutes = Number.isFinite(parsedMinutes) ? Math.min(59, Math.max(0, parsedMinutes)) : split.minutes
-    const next = hours * 60 + minutes
+    // A moment before the window opens can never claim, so lift it to the opening.
+    const next = Math.max(EARLIEST_CHECK_IN_MINUTE, hours * 60 + minutes)
     if (next === value) {
       // Nothing to write, but normalize what is on screen ("9" -> "09").
-      setHourDraft(String(hours))
-      setMinuteDraft(String(minutes).padStart(2, '0'))
+      const settled = splitMinutes(next)
+      setHourDraft(String(settled.hours))
+      setMinuteDraft(String(settled.minutes).padStart(2, '0'))
       return
     }
     onPick(next)
@@ -352,6 +355,62 @@ function TimeRow({ label, hint, value, disabled, onPick }: {
           style={{ ...timePartStyle, opacity: disabled === true ? 0.45 : 1 }}
         />
         <span style={hintStyle}>UTC+8</span>
+      </span>
+    </div>
+  )
+}
+
+/** One number row that accepts intermediate input before it is in range. */
+function NumberRow({ label, hint, value, min, unit, onPick }: {
+  label: string
+  hint: string
+  value: number
+  /** Floor only: the wait is a budget, not a range. */
+  min: number
+  unit: string
+  onPick: (next: number) => void
+}): React.ReactNode {
+  const [draft, setDraft] = useState(String(value))
+
+  // Re-seed whenever the stored value changes underneath us (a save landing).
+  useEffect(() => { setDraft(String(value)) }, [value])
+
+  const commit = (): void => {
+    const parsed = Number.parseInt(draft, 10)
+    if (!Number.isFinite(parsed) || parsed < min) {
+      setDraft(String(value))
+      return
+    }
+    setDraft(String(parsed))
+    if (parsed !== value) onPick(parsed)
+  }
+
+  return (
+    <div style={{ ...rowStyle, borderBottom: 'none', paddingBottom: 0 }}>
+      <div style={rowTextStyle}>
+        <span style={labelStyle}>{label}</span>
+        <span style={hintStyle}>{hint}</span>
+      </div>
+      <span style={pollFieldStyle}>
+        <input
+          type="number"
+          min={min}
+          step={1}
+          value={draft}
+          aria-label={label}
+          // Typing goes to the draft only; the stored value changes on commit,
+          // so a partially typed number is never rejected mid-keystroke.
+          onChange={event => { setDraft(event.target.value) }}
+          onBlur={commit}
+          onKeyDown={event => {
+            if (event.key === 'Enter') {
+              event.preventDefault()
+              commit()
+            }
+          }}
+          style={wideInputStyle}
+        />
+        <span style={hintStyle}>{unit}</span>
       </span>
     </div>
   )
@@ -483,7 +542,7 @@ export function QuotaSettingsContent({ t = key => key, scope, signedIn }: QuotaS
         disabled={!signed.global}
         onPick={next => write('checkInMinuteGlobal', next)}
       />
-      <div style={{ ...rowStyle, borderBottom: 'none', paddingBottom: 0 }}>
+      <div style={rowStyle}>
         <div style={rowTextStyle}>
           <span style={labelStyle}>{t('quotaPollLabel')}</span>
           <span style={hintStyle}>{t('quotaPollHint')}</span>
@@ -504,6 +563,20 @@ export function QuotaSettingsContent({ t = key => key, scope, signedIn }: QuotaS
           <span style={hintStyle}>{t('quotaPollUnit')}</span>
         </span>
       </div>
+      <ToggleRow
+        label={t('queueWaitLabel')}
+        hint={t('queueWaitHint')}
+        checked={projection.values.queueWait}
+        onToggle={next => write('queueWait', next)}
+      />
+      <NumberRow
+        label={t('queueWaitLimitLabel')}
+        hint={t('queueWaitLimitHint')}
+        value={projection.values.queueWaitSeconds}
+        min={QUEUE_WAIT_SECONDS_MIN}
+        unit={t('queueWaitUnit')}
+        onPick={next => write('queueWaitSeconds', next)}
+      />
       {projection.writable === false ? <span style={hintStyle}>{t('quotaSettingsSaveFailed')}</span> : null}
     </div>
   )
@@ -632,9 +705,8 @@ const cardBodyStyle: CSSProperties = {
   padding: '12px 0 8px',
 }
 /**
- * One settings row: NO box of its own (the bordered rows read as nested
- * cards, which the user ruled against) — rows are separated by a hairline
- * bottom rule like the settings shell's own preference lists.
+ * One settings row: NO box of its own (bordered rows read as nested cards) —
+ * rows are separated by a hairline bottom rule.
  */
 const rowStyle: CSSProperties = {
   display: 'flex',
@@ -690,3 +762,5 @@ const inputStyle: CSSProperties = {
   fontSize: 13,
   textAlign: 'right',
 }
+/** A second-wide field, left-aligned: the queue-wait limit is typed as a number. */
+const wideInputStyle: CSSProperties = { ...inputStyle, width: 110, textAlign: 'left' }

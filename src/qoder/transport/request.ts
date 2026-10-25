@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { brotliDecompressSync, gunzipSync, inflateSync } from 'node:zlib'
 import { QoderLlmError, qoderHttpError, qoderRequestId } from '../errors.ts'
 import { logParsedResponse, redactLogPayload, type QoderLogger } from './logging.ts'
-import { defaultUserAgent, qoderClientType } from './wire/cosy.ts'
+import { qoderClientType, qoderIdeVersion, qoderUserAgent } from './wire/cosy.ts'
 
 export const defaultMetadataTimeoutMs = 15_000
 export const defaultResponseHeaderTimeoutMs = 60_000
@@ -95,22 +95,20 @@ export async function readLimitedText(
     reader.releaseLock()
   }
 
-  // Decode at the byte level: a host fetch whose stack does not decompress
-  // (the Electron desktop host) yields the compressed stream verbatim, and a
-  // TextDecoder pass would destroy those bytes irreversibly. The encoding is
-  // taken from the response header; when that is missing too, the gzip magic
-  // number is the fallback signal.
+  // Decode at the byte level: a host whose fetch stack does not decompress
+  // yields the compressed stream verbatim, and TextDecoder would destroy it.
+  // Without a content-encoding header, the gzip magic number is the fallback.
   let payload = Buffer.concat(chunks.map(chunk => Buffer.from(chunk)))
   const encoding = (response.headers.get('content-encoding') ?? '').toLowerCase()
   const looksGzipped = payload.length >= 2 && payload[0] === 0x1f && payload[1] === 0x8b
   if (encoding !== '' || looksGzipped) {
     try {
       if (encoding.includes('gzip') || (encoding === '' && looksGzipped)) {
-        payload = gunzipSync(payload)
+        payload = gunzipSync(payload, { maxOutputLength: maxBytes })
       } else if (encoding.includes('br')) {
-        payload = brotliDecompressSync(payload)
+        payload = brotliDecompressSync(payload, { maxOutputLength: maxBytes })
       } else if (encoding.includes('deflate')) {
-        payload = inflateSync(payload)
+        payload = inflateSync(payload, { maxOutputLength: maxBytes })
       }
     } catch {
       throw new QoderLlmError(`${label} arrived compressed but could not be decompressed.`, 'MALFORMED_RESPONSE')
@@ -211,15 +209,19 @@ export async function openApiJsonRequest<T>(
   try {
     const headers: Record<string, string> = {
       accept: 'application/json',
-      // Keep the upstream from compressing: the Electron desktop host's fetch
-      // does not decompress the body, and a compressed stream would reach the
-      // JSON parser as binary noise. `identity` states the preference
-      // explicitly; readLimitedText decompresses as a fallback.
+      // Some hosts do not decompress, and a compressed stream would reach the
+      // JSON parser as binary noise; readLimitedText decompresses as a fallback.
       'accept-encoding': 'identity',
-      'user-agent': options.userAgent ?? defaultUserAgent,
-      'cosy-version': '1.0.1',
+      'user-agent': options.userAgent ?? qoderUserAgent,
       'cosy-clienttype': qoderClientType,
-      ...options.headers,
+      // HTTP header names are case-insensitive; keep exactly one version and user-agent header.
+      ...Object.fromEntries(Object.entries(options.headers ?? {}).filter(
+        ([name]) => {
+          const lower = name.toLowerCase()
+          return lower !== 'cosy-version' && lower !== 'user-agent'
+        },
+      )),
+      'Cosy-Version': qoderIdeVersion,
     }
     if (options.token) {
       headers.authorization = `Bearer ${options.token}`
@@ -237,8 +239,7 @@ export async function openApiJsonRequest<T>(
     const response = await fetchImpl(options.url, {
       method,
       headers,
-      // Under exactOptionalPropertyTypes RequestInit forbids an explicit
-      // `body: undefined`; omit the property when there is no payload.
+      // exactOptionalPropertyTypes forbids an explicit `body: undefined`.
       ...bodyText === undefined ? {} : { body: bodyText },
       signal: requestSignal,
     })
@@ -258,9 +259,8 @@ export async function openApiJsonRequest<T>(
 
     if (!response.ok) {
       options.logger?.error?.(`[Qoder ${options.operation}] Request failed`, redactLogPayload(text))
-      // The body rides along so a 401/403 that is really the upstream's
-      // queue answer (code 10605 / isQueued) classifies as a rate limit
-      // instead of an authorization failure — see qoderQueueSignal.
+      // The body rides along so a 401/403 that is really the queue answer
+      // classifies as a rate limit rather than an authorization failure.
       throw qoderHttpError(
         `Failed to execute Qoder ${options.operation} with status ${response.status}.`,
         response,

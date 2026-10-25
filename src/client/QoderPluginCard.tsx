@@ -21,6 +21,7 @@ import type {
   QoderWebStatus,
 } from '../status-paths.ts'
 import type { QoderSettingsKey } from './locales.ts'
+import { accountDisplayName, formatPercentText, usedPercentText } from './quota-merge.ts'
 import { QuotaSettingsContent, type QuotaSection, type QuotaSettingsScope } from './QuotaSettingsCard.tsx'
 import {
   acquireLiveCard,
@@ -41,20 +42,14 @@ export interface QoderPluginCardInjected {
   scope?: QuotaSettingsScope<QuotaSection> | undefined
   /** Sign-in state per variant; a toggle is disabled when its variant is out. */
   signedIn?: () => { cn: boolean; global: boolean }
-  /**
-   * Which product variant this card instance renders.
-   */
+  /** Which product variant this card instance renders. */
   variant?: QoderCardVariant
-  /**
-   * Whether to render as the unified Qoder card (merging quota settings + CN + Global with tabs).
-   */
+  /** Render as the unified Qoder card (quota settings + CN + Global with tabs). */
   unified?: boolean
   /**
-   * Whether the card starts expanded. The shared 《插件设置》 block lists its
-   * cards collapsed; this bundle's page in the sidebar's Plugins panel has
-   * room for the whole configuration, so that registration opens the card at
-   * once. The fold state stays the viewer's afterwards — the two surfaces do
-   * not share it.
+   * Whether the card starts expanded. The shared block lists its cards collapsed;
+   * the Plugins-panel page has room for the whole configuration and opens at once.
+   * The fold state stays per surface.
    */
   defaultOpen?: boolean
 }
@@ -111,10 +106,8 @@ export type QoderPluginCardProps =
   & Partial<QoderPluginCardInjected>
 
 /*
- * Styling mirrors the Settings panel's own plugin card (`.YyYd_a_card` in the
- * client bundle) rather than inventing a look: the same tokens, the same
- * geometry, and the same hover/open treatment. The values here are that rule's
- * values, so a card from this plugin sits in the list beside a built-in one
+ * Styling mirrors the Settings panel's own plugin card rather than inventing a
+ * look: the same tokens and geometry, so this card sits beside a built-in one
  * without reading as a different kind of object.
  */
 const cardStyle: CSSProperties = {
@@ -122,14 +115,10 @@ const cardStyle: CSSProperties = {
   /*
    * Border as longhands, never the `border` shorthand.
    *
-   * The hover and open states below override the colour, and React applies an
-   * override by assigning the property and clearing it by assigning `''`. That
-   * clear is what breaks a shorthand: the shorthand was expanded by the CSSOM
-   * into longhands, React then considers `border` unchanged and never re-applies
-   * it, and clearing `border-color` leaves the whole border unset — so it falls
-   * back to `currentColor` and the card grows a near-black outline. Declaring the
-   * three longhands keeps the colour always present in the style object, so React
-   * assigns a value on every render instead of ever clearing one.
+   * The hover and open states override the colour, and React clears an override by
+   * assigning `''`. That clear breaks a shorthand: React then considers `border`
+   * unchanged, clearing `border-color` leaves the whole border unset, and it falls
+   * back to `currentColor`. Longhands keep the colour always present.
    */
   borderWidth: '0.5px',
   borderStyle: 'solid',
@@ -162,13 +151,9 @@ const headerStyle: CSSProperties = {
   appearance: 'none',
 }
 /**
- * The built-in header's keyboard focus ring.
- *
- * `:focus-visible` is what makes the ring appear for keyboard navigation but not
- * for a mouse click, and an inline style cannot express a pseudo-class — so the
- * component tracks it and applies this instead. Without it the header falls back
- * to the browser's own outline, which is the black box that used to appear on
- * focus where the built-in card shows a brand-coloured ring.
+ * The built-in header's keyboard focus ring, applied by tracking `:focus-visible`
+ * (an inline style cannot express a pseudo-class). Without it the header falls
+ * back to the browser's own black outline.
  */
 const headerFocusStyle: CSSProperties = {
   outline: '2px solid var(--dsw-alias-brand-primary)',
@@ -179,13 +164,9 @@ const nameStyle: CSSProperties = { fontSize: 15, lineHeight: 1.4, fontWeight: 60
 const descriptionStyle: CSSProperties = { fontSize: 13, lineHeight: 1.5, color: 'var(--dsw-alias-label-tertiary)' }
 
 /**
- * The disclosure chevron, drawn to match the Settings panel's own card.
- *
- * The built-in card renders `IconChevronDownOutline14` from the client's shared
- * icon catalog, which the shell seeds into the module table. This plugin does
- * not request that catalog, so the same outline is drawn here from the same path
- * data: the text `⌄` glyph this replaces had a different shape, weight, and
- * baseline from the icon the cards beside it use.
+ * The disclosure chevron, drawn to match the Settings panel's own card: this plugin
+ * does not request the shell's icon catalog, so the same outline is drawn here from
+ * the same path data.
  */
 function ChevronDownIcon(): ReactElement {
   return (
@@ -262,10 +243,33 @@ const contextPickerRowStyle: CSSProperties = {
 }
 const progressTrackStyle: CSSProperties = { height: 8, overflow: 'hidden', borderRadius: 999, background: 'var(--dsw-alias-bg-layer-2, rgba(0, 0, 0, 0.08))' }
 
+/** Switch styles for model toggles, matching the quota settings card. */
+const switchStyle: CSSProperties = {
+  flex: 'none',
+  display: 'flex',
+  width: 36,
+  height: 20,
+  borderRadius: 10,
+  borderWidth: '1px',
+  borderStyle: 'solid',
+  borderColor: 'var(--dsw-alias-border-l2)',
+  padding: 1,
+  cursor: 'pointer',
+  alignItems: 'center',
+  transition: 'background .16s',
+}
+const knobStyle: CSSProperties = {
+  display: 'block',
+  width: 16,
+  height: 16,
+  borderRadius: '50%',
+  background: 'var(--dsw-alias-bg-layer-1, #fff)',
+  boxShadow: '0 1px 2px rgba(0,0,0,0.2)',
+}
+
 /**
- * The PAT entry row: the password field takes the row's flexible width, the
- * Save button keeps its own, and the whole block sits inside the card body
- * without a nested box (the same rule the settings rows follow).
+ * The PAT entry row: the password field takes the flexible width, the Save button
+ * keeps its own, and the block sits inside the card body without a nested box.
  */
 const patRowStyle: CSSProperties = { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }
 const patInputStyle: CSSProperties = {
@@ -284,10 +288,47 @@ const patInputStyle: CSSProperties = {
   lineHeight: 1.5,
 }
 
+/** The saved-PAT select: same field skin, sized so the toolbar stays one row. */
+const patSelectStyle: CSSProperties = {
+  boxSizing: 'border-box',
+  flex: '0 1 180px',
+  maxWidth: 180,
+  minWidth: 110,
+  padding: '6px 10px',
+  borderWidth: '1px',
+  borderStyle: 'solid',
+  borderColor: 'var(--dsw-alias-border-l2)',
+  borderRadius: 8,
+  background: 'var(--dsw-alias-bg-layer-2)',
+  color: 'var(--dsw-alias-label-primary)',
+  font: 'inherit',
+  fontSize: 13,
+  lineHeight: 1.5,
+}
+
 /**
- * Tab strip for the card body. Kept visually light — a full pill would compete
- * with the section headings, and the card is already the densest surface the
- * plugin owns.
+ * One account toolbar: the active-account select and its actions share a single
+ * row. The select itself carries the account's identity; the non-signed-in states
+ * keep a status row, because there the status IS the information.
+ */
+const accountToolbarStyle: CSSProperties = { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', paddingTop: 6 }
+/** Provenance line under the toolbar; its refresh action sits at the far end. */
+const accountMetaRowStyle: CSSProperties = { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginTop: 8 }
+const accountStatusRowStyle: CSSProperties = { display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', paddingTop: 6 }
+/** Inline field label; the select carries the value, so this stays quiet. */
+const accountFieldLabelStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 6,
+  fontSize: 13,
+  lineHeight: 1.5,
+  color: 'var(--dsw-alias-label-tertiary)',
+  whiteSpace: 'nowrap',
+}
+
+/**
+ * Tab strip for the card body, kept visually light: a full pill would compete with
+ * the section headings on the densest surface the plugin owns.
  */
 const tabBarStyle: CSSProperties = {
   display: 'flex',
@@ -315,8 +356,8 @@ const tabPanelStyle: CSSProperties = { display: 'flex', flexDirection: 'column',
 
 /**
  * Primary action of the inline confirmation and of the PAT save. Fill and text
- * colour come from the theme as a pair: `brand-primary` is a light accent here,
- * so pairing it with a hardcoded white would render white-on-white.
+ * colour come from the theme as a pair: `brand-primary` is a light accent, so a
+ * hardcoded white would render white-on-white.
  */
 const primaryButtonStyle: CSSProperties = {
   ...buttonStyle,
@@ -327,7 +368,7 @@ const primaryButtonStyle: CSSProperties = {
   color: 'var(--dsw-alias-label-primary-foreground)',
 }
 
-/* ---- Segmented Tab Switcher styles (Figure 1) ---- */
+/* ---- Segmented tab switcher styles ---- */
 const segmentedContainerStyle: CSSProperties = {
   display: 'flex',
   alignItems: 'center',
@@ -376,10 +417,9 @@ function progressFillStyle(percent: number): CSSProperties {
 }
 
 /**
- * Status dot colour. Takes `'loading'` as well as the document's own states:
- * before the first response the card knows nothing about the account, so it must
- * not borrow the signed-out grey — that would read as "nothing is wrong, nobody
- * is signed in" when the truth is "not read yet".
+ * Status dot colour. Takes `'loading'` too: before the first response the card must
+ * not borrow the signed-out grey, which would read as "nobody is signed in" rather
+ * than "not read yet".
  */
 function dotStyle(status: 'loading' | QoderWebStatus['status']): CSSProperties {
   const color = status === 'signed-in'
@@ -392,10 +432,6 @@ function dotStyle(status: 'loading' | QoderWebStatus['status']): CSSProperties {
 
 function formatNumber(value: number): string {
   return new Intl.NumberFormat(undefined).format(value)
-}
-
-function formatPercent(value: number): string {
-  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(value)
 }
 
 function formatTime(ms: number): string {
@@ -417,11 +453,10 @@ function patSourceText(source: QoderCredentialSource, t: QoderPluginCardInjected
 /**
  * One billing package as a labeled progress bar.
  *
- * A package whose allowance the upstream never reported (`size` not positive)
- * has no percentage to state. It must not fall back to 100%: the plugin would be
- * claiming a full quota it knows nothing about, which is the opposite of the
- * honest "remaining N" line printed below it. Unknown size therefore renders the
- * percent slot as unknown copy and an unfilled, indeterminate track.
+ * A package whose allowance the upstream never reported (`size` not positive) has
+ * no percentage to state, and must not fall back to 100%: that would claim a full
+ * quota it knows nothing about. Unknown size renders unknown copy and an unfilled
+ * track.
  */
 function CreditBar({ label, remain, size, unlimited, packageEndTime, t }: {
   label: string
@@ -447,9 +482,8 @@ function CreditBar({ label, remain, size, unlimited, packageEndTime, t }: {
           role="progressbar"
           aria-label={label}
           /*
-           * "Uncapped" is not "100% remaining", so the range attributes are
-           * omitted and no fill is drawn: an uncapped quota has no proportion
-           * to state, and a full bar would assert one.
+           * "Uncapped" is not "100% remaining": no range attributes and no fill,
+           * since an uncapped quota has no proportion to state.
            */
           aria-valuetext={quotaText}
         />
@@ -465,11 +499,14 @@ function CreditBar({ label, remain, size, unlimited, packageEndTime, t }: {
   const percent = sizeKnown ? (remain / size) * 100 : undefined
   const display = percent === undefined
     ? t('percentUnknown')
-    : t('percentRemaining', { percent: formatPercent(percent) })
+    : t('percentRemaining', { percent: formatPercentText(percent) })
+  // The label carries the same used-percentage suffix the sidebar card prints,
+  // read from the same helper.
+  const usedPercent = usedPercentText(remain, size)
   return (
     <div style={quotaGroupStyle}>
       <div style={quotaLabelStyle}>
-        <span>{label}</span>
+        <span>{label}{usedPercent === undefined ? null : t('quotaPackageUsed', { percent: usedPercent })}</span>
         <span>{display}</span>
       </div>
       <div
@@ -477,9 +514,8 @@ function CreditBar({ label, remain, size, unlimited, packageEndTime, t }: {
         role="progressbar"
         aria-label={label}
         /*
-         * No numeric value when the size is unknown: the range attributes are
-         * omitted so assistive technology reports an indeterminate bar rather
-         * than a second, louder repeat of the false 100%.
+         * No numeric value when the size is unknown, so assistive technology
+         * reports an indeterminate bar instead of a false 100%.
          */
         {...percent === undefined
           ? { 'aria-valuetext': detail }
@@ -500,18 +536,11 @@ function maxDeclaredWindow(model: QoderCatalogModelSnapshot): number | undefined
 }
 
 /**
- * Context capacity, listed in full.
+ * Context capacity, listed in full, largest first — capacity is reference data you
+ * scan by model, so hiding most of it behind a hover makes the common lookup hard.
  *
- * Every model the upstream reports a capacity for, largest first. A one-line
- * summary with the exceptions on hover was tried and rejected: capacity is
- * reference data you scan by model, and hiding most of it behind a hover made
- * the common case (a model you already have in mind) the hard one to look up.
- *
- * Purely a report of the upstream's own numbers — the middle alternatives the
- * upstream lists between the default and the maximum are display-only (the
- * upstream honours the default and the maximum, nothing between), so the only
- * control is the maximum-window preference below, which flips every eligible
- * model between its default and its largest declared window.
+ * A pure report of the upstream's numbers: the middle alternatives it lists are
+ * display-only, and the only control is the maximum-window preference below.
  */
 function ContextTable({ models, t, useMaximumContextWindow, disabled, onUseMaximumContextWindow }: {
   models: readonly QoderCatalogModelSnapshot[] | undefined
@@ -522,8 +551,7 @@ function ContextTable({ models, t, useMaximumContextWindow, disabled, onUseMaxim
 }): React.ReactNode {
   const known = (models ?? [])
     .filter(model => model.contextWindow !== undefined)
-    // Largest first: the big windows are the ones a user reaches for, and the
-    // small ones are then easy to spot at the end.
+    // Largest first: the big windows are the ones a user reaches for.
     .sort((a, b) => (b.contextWindow as number) - (a.contextWindow as number))
   const canSelectMaximum = known.some(model => {
     const max = maxDeclaredWindow(model)
@@ -533,39 +561,100 @@ function ContextTable({ models, t, useMaximumContextWindow, disabled, onUseMaxim
   if (known.length === 0 && !showPreference) return null
   return (
     <div style={quotaListStyle}>
-      <h3 style={quotaTitleStyle}>{t('contextHeading')}</h3>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <h3 style={quotaTitleStyle}>{t('contextHeading')}</h3>
+        <p style={descriptionStyle}>{t('contextSubtitle')}</p>
+      </div>
       {showPreference && onUseMaximumContextWindow !== undefined ? (
-        <label style={contextPreferenceStyle}>
-          <input
-            type="checkbox"
-            checked={useMaximumContextWindow === true}
-            disabled={disabled}
-            onChange={event => { onUseMaximumContextWindow(event.currentTarget.checked) }}
-          />
-          <span style={contextPreferenceCopyStyle}>
-            <span>{t('useMaximumContextWindow')}</span>
-            <span style={modelRateStyle}>{t('useMaximumContextWindowHint')}</span>
-          </span>
-        </label>
-      ) : null}
-      {known.map(model => {
-        const capacity = model.contextWindow as number
-        const max = maxDeclaredWindow(model)
-        const alternative = max !== undefined && max > capacity ? max : undefined
-        return (
-          <div key={model.id} style={quotaLabelStyle}>
-            <span>{model.name}</span>
-            <span style={contextPickerRowStyle}>
-              <span>{formatTokens(capacity)}</span>
-              {alternative !== undefined
-                ? <span style={modelRateStyle}>{t('contextUpTo', { size: formatTokens(alternative) })}</span>
-                : model.defaultContextWindow !== undefined && model.defaultContextWindow < capacity
-                  ? <span style={modelRateStyle}>{t('contextDefault', { size: formatTokens(model.defaultContextWindow) })}</span>
-                  : null}
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: '10px 12px',
+          borderRadius: 8,
+          background: 'var(--dsw-alias-bg-layer-2)',
+          border: '.5px solid var(--dsw-alias-border-l4)',
+          gap: 12,
+        }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, flex: 1 }}>
+            <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--dsw-alias-label-primary)' }}>
+              {t('useMaximumContextWindow')}
+            </span>
+            <span style={{ fontSize: 12, color: 'var(--dsw-alias-label-tertiary)', lineHeight: 1.5 }}>
+              {t('useMaximumContextWindowHint')}
             </span>
           </div>
-        )
-      })}
+          <button
+            type="button"
+            role="switch"
+            aria-checked={useMaximumContextWindow === true}
+            disabled={disabled}
+            aria-label={t('useMaximumContextWindow')}
+            onClick={() => { if (!disabled) onUseMaximumContextWindow(!(useMaximumContextWindow === true)) }}
+            style={{
+              ...switchStyle,
+              background: useMaximumContextWindow === true ? 'var(--dsw-alias-brand-primary)' : 'var(--dsw-alias-bg-layer-3, rgba(127,127,127,0.2))',
+              justifyContent: useMaximumContextWindow === true ? 'flex-end' : 'flex-start',
+              opacity: disabled === true ? 0.45 : 1,
+              cursor: disabled === true ? 'not-allowed' : 'pointer',
+            }}
+          >
+            <span style={knobStyle} />
+          </button>
+        </div>
+      ) : null}
+      {known.length > 0 ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {known.map(model => {
+            const capacity = model.contextWindow as number
+            const max = maxDeclaredWindow(model)
+            const alternative = max !== undefined && max > capacity ? max : undefined
+            return (
+              <div key={model.id} style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: '10px 12px',
+                borderRadius: 8,
+                background: 'var(--dsw-alias-bg-layer-2)',
+                border: '.5px solid var(--dsw-alias-border-l4)',
+                gap: 12,
+              }}>
+                <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, flex: 1 }}>
+                  <span style={{ fontWeight: 500, fontSize: 13, color: 'var(--dsw-alias-label-primary)' }}>
+                    {model.name}
+                    {(() => {
+                      const rate = modelRateLabel(model)
+                      return rate ? (
+                        <span style={{ fontSize: 12, color: 'var(--dsw-alias-label-tertiary)', fontWeight: 400, marginLeft: 6 }}>
+                          · {rate}
+                        </span>
+                      ) : null
+                    })()}
+                  </span>
+                  <span style={{ fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' }}>
+                    {model.id}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+                  <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--dsw-alias-label-primary)' }}>
+                    {formatTokens(capacity)}
+                  </span>
+                  {alternative !== undefined
+                    ? <span style={{ fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }}>
+                        {t('contextUpTo', { size: formatTokens(alternative) })}
+                      </span>
+                    : model.defaultContextWindow !== undefined && model.defaultContextWindow < capacity
+                      ? <span style={{ fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }}>
+                          {t('contextDefault', { size: formatTokens(model.defaultContextWindow) })}
+                        </span>
+                      : null}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -576,9 +665,17 @@ function formatTokens(tokens: number): string {
   return String(tokens)
 }
 
-/**
- * Model visibility table with individual toggle switches and batch enable/disable controls.
- */
+/** The rate label appended to a model name, like "x0" or "x1.5". */
+function modelRateLabel(model: QoderCatalogModelSnapshot): string | undefined {
+  const factor = model.priceFactor
+  if (factor === undefined) return undefined
+  if (factor === 0) return 'x0'
+  if (factor === 1) return 'x1'
+  const formatted = Number.isInteger(factor) ? String(factor) : String(factor)
+  return `x${formatted}`
+}
+
+/** Model visibility table: per-model switches plus batch enable/disable and search. */
 function ModelSwitchTable({
   models,
   disabledModels = [],
@@ -624,7 +721,8 @@ function ModelSwitchTable({
   }
 
   const handleBatch = (enabled: boolean): void => {
-    const targets = Array.from(selected)
+    const availableIds = new Set((models ?? []).map(m => m.id))
+    const targets = Array.from(selected).filter(id => availableIds.has(id))
     if (targets.length === 0) return
     onSetModelsEnabled(targets, enabled)
     setSelected(new Set())
@@ -715,9 +813,10 @@ function ModelSwitchTable({
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'space-between',
-                  padding: '8px 10px',
-                  borderRadius: 6,
+                  padding: '10px 12px',
+                  borderRadius: 8,
                   background: 'var(--dsw-alias-bg-layer-2)',
+                  border: '.5px solid var(--dsw-alias-border-l4)',
                   gap: 12,
                   opacity: isModelEnabled ? 1 : 0.65,
                 }}
@@ -732,6 +831,14 @@ function ModelSwitchTable({
                   <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
                     <span style={{ fontWeight: 500, fontSize: 13, color: 'var(--dsw-alias-label-primary)' }}>
                       {model.name}
+                      {(() => {
+                        const rate = modelRateLabel(model)
+                        return rate ? (
+                          <span style={{ fontSize: 12, color: 'var(--dsw-alias-label-tertiary)', fontWeight: 400, marginLeft: 6 }}>
+                            · {rate}
+                          </span>
+                        ) : null
+                      })()}
                     </span>
                     <span style={{ fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' }}>
                       {model.id}
@@ -740,17 +847,26 @@ function ModelSwitchTable({
                 </div>
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: disabled ? 'not-allowed' : 'pointer', userSelect: 'none' }}>
-                    <input
-                      type="checkbox"
-                      checked={isModelEnabled}
-                      disabled={disabled}
-                      onChange={event => { onSetModelsEnabled([model.id], event.currentTarget.checked) }}
-                    />
-                    <span style={{ fontSize: 12, color: isModelEnabled ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-label-tertiary)' }}>
-                      {isModelEnabled ? t('modelsEnabled') : t('modelsDisabled')}
-                    </span>
-                  </label>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={isModelEnabled}
+                    disabled={disabled}
+                    aria-label={model.name}
+                    onClick={() => { if (!disabled) onSetModelsEnabled([model.id], !isModelEnabled) }}
+                    style={{
+                      ...switchStyle,
+                      background: isModelEnabled ? 'var(--dsw-alias-brand-primary)' : 'var(--dsw-alias-bg-layer-3, rgba(127,127,127,0.2))',
+                      justifyContent: isModelEnabled ? 'flex-end' : 'flex-start',
+                      opacity: disabled === true ? 0.45 : 1,
+                      cursor: disabled === true ? 'not-allowed' : 'pointer',
+                    }}
+                  >
+                    <span style={knobStyle} />
+                  </button>
+                  <span style={{ fontSize: 12, color: isModelEnabled ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-label-tertiary)', minWidth: '4em', textAlign: 'right' }}>
+                    {isModelEnabled ? t('modelsEnabled') : t('modelsDisabled')}
+                  </span>
                 </div>
               </div>
             )
@@ -850,7 +966,7 @@ function CheckInLogTable({
                     ? 'var(--dsw-alias-status-success, #52c41a)'
                     : log.status === 'already-claimed'
                       ? 'var(--dsw-alias-status-info, #1890ff)'
-                      : log.status === 'no-campaign'
+                      : log.status === 'no-campaign' || log.status === 'before-window'
                         ? 'var(--dsw-alias-label-tertiary, #999)'
                         : 'var(--dsw-alias-status-error, #f5222d)',
                 }} />
@@ -861,11 +977,19 @@ function CheckInLogTable({
                       ? t('autoCheckInStatusAlready')
                       : log.status === 'no-campaign'
                         ? t('autoCheckInStatusNoCampaign')
-                        : t('autoCheckInStatusError', { message: log.message ?? '' })}
+                        : log.status === 'before-window'
+                          ? t('autoCheckInStatusBeforeWindow')
+                          : t('autoCheckInStatusError', { message: log.message ?? '' })}
                 </span>
               </span>
-              <span style={{ flex: 1, textAlign: 'right', fontWeight: 600, color: log.amount ? 'var(--dsw-alias-brand-primary)' : 'inherit' }}>
-                {log.amount ? `+${log.amount}` : '-'}
+              <span style={{ flex: 1, textAlign: 'right', fontWeight: 600, color: log.status === 'claimed' ? 'var(--dsw-alias-brand-primary)' : 'inherit' }}>
+                {/*
+                  The column is "credits obtained", so only a `claimed` row may fill
+                  it: `already-claimed` and the scheduler's no-op rows obtained
+                  nothing by this action, so keying the cell off `amount` alone
+                  printed a phantom "+100" on them.
+                */}
+                {log.status === 'claimed' ? `+${log.amount ?? 100}` : '-'}
               </span>
             </div>
           ))}
@@ -892,8 +1016,12 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
   const [headerFocused, setHeaderFocused] = useState(false)
   const [busy, setBusy] = useState(false)
   const [patDraft, setPatDraft] = useState('')
+  /** Optional display label for the token being added; local only. */
+  const [patLabelDraft, setPatLabelDraft] = useState('')
   const [replacing, setReplacing] = useState(false)
   const [patBusy, setPatBusy] = useState(false)
+  /** Which PAT write is in flight, so each control shows its own progress copy. */
+  const [patAction, setPatAction] = useState<'save' | 'clear' | 'switch' | 'remove'>()
   const [patError, setPatError] = useState<string>()
   const [patNotice, setPatNotice] = useState<string>()
   const patInput = useRef<HTMLInputElement>(null)
@@ -903,6 +1031,8 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
   const [checkInNotice, setCheckInNotice] = useState<string>()
   /** A write action's failure, reported on the same line as a read failure. */
   const [writeFailure, setWriteFailure] = useState<string>()
+  /** Transient acknowledgement for the copy button on the inactive-host card. */
+  const [copiedInactive, setCopiedInactive] = useState(false)
   const mounted = useRef(true)
   const manualControllers = useRef(new Set<AbortController>())
 
@@ -925,12 +1055,9 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
    * The shown variant's shared read state.
    *
    * The document and the last read failure arrive through ONE revision bump,
-   * whichever surface read them: the shared poller reads each live variant
-   * once for every surface that shows it, so this card expanded here and the
-   * same card in the plugin-manager panel cost one request a minute between
-   * them, not two. Before the first document lands a failed read shows as an
-   * error document; beside a document already on screen it shows as a notice
-   * under the account row, exactly as the per-card fetch did.
+   * whichever surface read them, so this card here and in the plugin-manager panel
+   * cost one request a minute between them. Before the first document lands a
+   * failed read shows as an error document; beside an existing one, as a notice.
    */
   useSyncExternalStore(onQuotaSettingsChange, quotaSettingsRevision)
   const readFailure = quotaReadFailure(currentVariant.id)
@@ -945,15 +1072,15 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
       : undefined
 
   const authKey = status === undefined || status.status === 'error' ? undefined : status.authKey
+  /** The saved-token list for the select; an env-only sign-in has none. */
+  const savedPats = status?.status === 'signed-in' ? status.patProfiles ?? [] : []
 
   /**
    * Force one shared read of the shown variant.
    *
-   * The store's read always starts its own request — an explicit read must be
-   * able to postdate the write or the click that precedes it — and publishes
-   * for every surface of the variant, so a manual refresh here updates the
-   * sidebar cards and the quota panel too. A successful read also clears a
-   * write action's notice, exactly as the per-card fetch did.
+   * The store's read always starts its own request (an explicit read must postdate
+   * the write or click before it) and publishes for every surface of the variant, so
+   * a manual refresh here updates the sidebar cards and the quota panel too.
    */
   const refresh = useCallback(async (): Promise<boolean> => {
     const ok = await refreshQuotaStatus(currentVariant.id)
@@ -962,13 +1089,9 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
   }, [currentVariant.id])
 
   /**
-   * The expanded card is a poll holder of the shown variant.
-   *
-   * The shared ticker reads the variant once a minute while any card holds it
-   * and parks it on a signed-out document (nothing changes without a PAT);
-   * collapsing or unmounting releases the demand. Opening re-reads at once
-   * only when the shared document is past its minute — a second card opening
-   * beside a live one shows the numbers already on screen.
+   * The expanded card is a poll holder of the shown variant: the shared ticker reads
+   * it once a minute while any card holds it and parks it on a signed-out document.
+   * Opening re-reads at once only when the shared document is past its minute.
    */
   useEffect(() => {
     if (!open) return undefined
@@ -976,9 +1099,8 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
   }, [open, currentVariant.id])
 
   /**
-   * Opening (or switching variant) clears the transient entry state — a
-   * discarded draft must not wait for the user on the next open. The document
-   * itself is shared state now and stays on screen while the card re-opens.
+   * Opening (or switching variant) clears the transient entry state, so a discarded
+   * draft never waits for the user. The document itself is shared and stays.
    */
   useEffect(() => {
     if (!open) return
@@ -998,40 +1120,36 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
   }
 
   /**
-   * Ask the host to re-read the credential and re-fetch this variant's catalog.
-   *
-   * Shares the probe route's key and guards: it is a write that spends an
-   * upstream request, so it does not belong on the read-only status GET. A
-   * failure is surfaced through the refreshed document's `catalog.error` rather
-   * than thrown away, so the reason survives the round trip.
+   * One refresh for the signed-in account block: re-fetch the catalog when a probe
+   * key exists, and always re-read the status — a failed catalog call must not hold
+   * the quota answer hostage.
    */
-  const refreshModels = useCallback(async (): Promise<void> => {
+  const refreshAll = useCallback(async (): Promise<void> => {
     const key = status?.status === 'signed-in' ? status.probeKey : undefined
-    if (key === undefined) return
     setBusy(true)
     const controller = trackController()
     try {
-      const response = await fetch(currentVariant.probePath, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Qoder-Probe-Key': key },
-        credentials: 'same-origin',
-        signal: controller.signal,
-        body: JSON.stringify({ action: 'refresh' } satisfies QoderProbeAction),
-      })
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      if (key !== undefined) {
+        const response = await fetch(currentVariant.probePath, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Qoder-Probe-Key': key },
+          credentials: 'same-origin',
+          signal: controller.signal,
+          body: JSON.stringify({ action: 'refresh' } satisfies QoderProbeAction),
+        })
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      }
     } catch (error: unknown) {
       if (mounted.current && controller.signal.aborted !== true) {
         setWriteFailure(error instanceof Error ? error.message : t('requestFailed'))
       }
-      manualControllers.current.delete(controller)
-      return
     } finally {
-      if (mounted.current) setBusy(false)
-    }
-    try {
-      await refresh()
-    } finally {
-      manualControllers.current.delete(controller)
+      try {
+        await refresh()
+      } finally {
+        manualControllers.current.delete(controller)
+        if (mounted.current) setBusy(false)
+      }
     }
   }, [currentVariant.probePath, refresh, status, t, trackController])
 
@@ -1057,6 +1175,8 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
         setCheckInNotice(t('autoCheckInStatusAlready'))
       } else if (result.state === 'no-campaign') {
         setCheckInNotice(t('autoCheckInStatusNoCampaign'))
+      } else if (result.state === 'before-window') {
+        setCheckInNotice(t('autoCheckInStatusBeforeWindow'))
       } else if (result.reason) {
         setCheckInNotice(t('autoCheckInStatusError', { message: result.reason }))
       }
@@ -1108,9 +1228,8 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
   /**
    * Run one probe-route control action and refresh the card's state afterwards.
    *
-   * The key travels in a header, not the body: it authorizes the write, and
-   * the host never accepts a prompt, a sentinel, or a model outside its own
-   * catalog from here.
+   * The key travels in a header, not the body: it authorizes the write, and the host
+   * never accepts a prompt, a sentinel, or a model outside its own catalog here.
    */
   const control = useCallback(async (action: QoderProbeAction): Promise<void> => {
     const key = status?.status === 'signed-in' ? status.probeKey : undefined
@@ -1151,18 +1270,18 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
   }, [currentVariant.probePath, refresh, status, t, trackController])
 
   /**
-   * Validate and store the pasted PAT (or overwrite the stored one).
+   * Validate and store the pasted PAT, then make it the active account.
    *
-   * The PAT route answers both outcomes as 200 with `ok` carrying the verdict —
-   * a refused token is an answer, not a transport failure — so the card checks
-   * `ok` and translates the stable `qoder_invalid_pat` / `qoder_missing_pat`
-   * codes into the re-generate prompt. The route is variant-fixed: the token
-   * this card saves can only ever be validated and stored for this product.
+   * Saving is additive: an already-saved token updates its own entry (the id derives
+   * from the token), a new one is appended and activated. Only a validated token is
+   * written, so a mistyped paste can never strand the working credential.
    */
   const savePat = useCallback(async (): Promise<void> => {
     const key = authKey
     const pat = patDraft.trim()
+    const label = patLabelDraft.trim()
     if (key === undefined || pat === '' || patBusy) return
+    setPatAction('save')
     setPatBusy(true)
     setPatError(undefined)
     setPatNotice(undefined)
@@ -1173,7 +1292,7 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
         headers: { 'Content-Type': 'application/json', 'X-Qoder-Auth-Key': key },
         credentials: 'same-origin',
         signal: controller.signal,
-        body: JSON.stringify({ action: 'save-pat', pat }),
+        body: JSON.stringify({ action: 'save-pat', pat, ...label === '' ? {} : { label } }),
       })
       const value: unknown = await response.json().catch(() => undefined)
       const record = typeof value === 'object' && value !== null ? value as Record<string, unknown> : {}
@@ -1189,6 +1308,7 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
         return
       }
       setPatDraft('')
+      setPatLabelDraft('')
       setReplacing(false)
       setPatNotice(t('patSaved'))
       noteQuotaSignIn(currentVariant.id, true)
@@ -1201,18 +1321,31 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
       }
     } finally {
       manualControllers.current.delete(controller)
-      if (mounted.current) setPatBusy(false)
+      if (mounted.current) {
+        setPatBusy(false)
+        setPatAction(undefined)
+      }
     }
-  }, [authKey, currentVariant.authPath, patBusy, patDraft, refresh, t, trackController])
+  }, [authKey, currentVariant.authPath, patBusy, patDraft, patLabelDraft, refresh, t, trackController])
 
-  /** Remove the stored PAT; the host answer is `{ ok: true }`, then the card re-reads. */
-  const clearPat = useCallback(async (): Promise<void> => {
+  /**
+   * One authenticated write against this variant's PAT route.
+   *
+   * `activate`, `remove`, and `clear` answer the same `{ok, status}` shape a save
+   * does; one helper keeps the guards, error handling and post-write re-read
+   * together.
+   */
+  const patWrite = useCallback(async (
+    body: Record<string, unknown>,
+    failure: (message: string) => string,
+    action: 'clear' | 'switch' | 'remove',
+  ): Promise<boolean> => {
     const key = authKey
-    if (key === undefined || patBusy) return
+    if (key === undefined || patBusy) return false
+    setPatAction(action)
     setPatBusy(true)
     setPatError(undefined)
     setPatNotice(undefined)
-    setReplacing(false)
     const controller = trackController()
     try {
       const response = await fetch(currentVariant.authPath, {
@@ -1220,42 +1353,68 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
         headers: { 'Content-Type': 'application/json', 'X-Qoder-Auth-Key': key },
         credentials: 'same-origin',
         signal: controller.signal,
-        body: JSON.stringify({ action: 'clear' }),
+        body: JSON.stringify(body),
       })
       const value: unknown = await response.json().catch(() => undefined)
       const record = typeof value === 'object' && value !== null ? value as Record<string, unknown> : {}
       if (!response.ok || record['ok'] !== true) {
         const detail = typeof record['error'] === 'string' ? record['error'] : `HTTP ${response.status}`
-        setPatError(t('patSaveFailed', { message: detail }))
-        return
+        setPatError(failure(detail))
+        return false
       }
-      setPatDraft('')
-      // Publish the outcome as an authoritative fact: every surface shows the
-      // signed-out document at once, and a read that started before the clear
-      // can no longer roll the screens back.
-      noteQuotaStatus(currentVariant.id, { status: 'signed-out', authKey: key })
+      // Removing the last token signs the variant out. Publish that before the
+      // re-read: a failed refresh must not leave a dead account on screen.
+      const status = record['status']
+      if (typeof status === 'object' && status !== null
+        && (status as Record<string, unknown>)['state'] === 'missing') {
+        noteQuotaStatus(currentVariant.id, { status: 'signed-out', authKey: key })
+      }
       await refresh()
+      return true
     } catch (error: unknown) {
       if (mounted.current && controller.signal.aborted !== true) {
-        setPatError(t('patSaveFailed', {
-          message: error instanceof Error ? error.message : t('requestFailed'),
-        }))
+        setPatError(failure(error instanceof Error ? error.message : t('requestFailed')))
       }
+      return false
     } finally {
       manualControllers.current.delete(controller)
-      if (mounted.current) setPatBusy(false)
+      if (mounted.current) {
+        setPatBusy(false)
+        setPatAction(undefined)
+      }
     }
-  }, [authKey, currentVariant.authPath, patBusy, refresh, t, trackController])
+  }, [authKey, currentVariant.authPath, currentVariant.id, patBusy, refresh, t, trackController])
+
+  /** Remove every saved PAT; the host answer is `{ ok: true }`, then the card re-reads. */
+  const clearPat = useCallback(async (): Promise<void> => {
+    const key = authKey
+    const ok = await patWrite({ action: 'clear' }, message => t('patSaveFailed', { message }), 'clear')
+    if (!ok) return
+    setPatDraft('')
+    setReplacing(false)
+    // Publish the outcome as an authoritative fact: a read that started before the
+    // clear can no longer roll the screens back.
+    if (key !== undefined) noteQuotaStatus(currentVariant.id, { status: 'signed-out', authKey: key })
+  }, [authKey, currentVariant.id, patWrite, t])
+
+  /** Make one saved entry active; the model group follows on the refresh. */
+  const switchPat = useCallback(async (id: string): Promise<void> => {
+    await patWrite({ action: 'activate', id }, message => t('patSwitchFailed', { message }), 'switch')
+  }, [patWrite, t])
+
+  /** Remove one saved entry; removing the last one signs the variant out. */
+  const removePat = useCallback(async (id: string): Promise<void> => {
+    await patWrite({ action: 'remove', id }, message => t('patRemoveFailed', { message }), 'remove')
+  }, [patWrite, t])
 
   /**
-   * 更换 PAT: open the entry over the signed-in document, pre-cleared and
-   * focused. Unlike the removed device-flow switch this needs no sign-out
-   * first — saving validates the new token and overwrites the stored one
-   * only on success, so a mistyped paste can never strand the working
-   * credential.
+   * Add PAT: open the entry over the signed-in document, pre-cleared and focused.
+   * Saving appends the new token only on success, so adding a second account never
+   * risks the working one.
    */
-  const beginReplace = useCallback((): void => {
+  const beginAddPat = useCallback((): void => {
     setPatDraft('')
+    setPatLabelDraft('')
     setPatError(undefined)
     setPatNotice(undefined)
     setReplacing(true)
@@ -1299,6 +1458,7 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
             onClick={() => {
               setReplacing(false)
               setPatDraft('')
+              setPatLabelDraft('')
               setPatError(undefined)
             }}
           >
@@ -1306,13 +1466,45 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
           </button>
         ) : null}
       </div>
-      {patError === undefined ? null : <p style={errorStyle}>{patError}</p>}
-      {patNotice === undefined ? null : <p style={bodyStyle}>{patNotice}</p>}
+      {replacing ? (
+        <input
+          type="text"
+          value={patLabelDraft}
+          maxLength={48}
+          placeholder={t('patLabelPlaceholder')}
+          aria-label={t('patLabelPlaceholder')}
+          disabled={patBusy}
+          onChange={event => { setPatLabelDraft(event.target.value) }}
+          style={patInputStyle}
+        />
+      ) : null}
     </div>
   )
 
   const cardTitle = isUnified ? t('unifiedTitle') : t(currentVariant.titleKey)
   const cardIntro = isUnified ? t('unifiedIntro') : t(currentVariant.introKey)
+
+  /**
+   * The host half declined to load, and this document is how it says so.
+   *
+   * Its message is the load-time failure verbatim, so nothing here guesses at a
+   * cause. The card header stays as-is — the block belongs to the host, and
+   * collapsing it is still the user's call — while the body it would normally
+   * fill is replaced: every control there belongs to machinery that never
+   * started, so offering them would only produce 404s.
+   */
+  const inactiveMessage = status?.status === 'error' && status.inactive === true ? status.message : undefined
+  /** No status route at all: an older build, or a host that dropped the entry. */
+  const hostMissing = readFailure?.kind === 'transport' && readFailure.status === 404
+  /** Nothing known yet: render neither the body nor the refusal before the first read lands. */
+  const statusUnknown = status === undefined && readFailure === undefined
+  const inactiveNotice = inactiveMessage !== undefined || hostMissing
+    ? {
+      title: inactiveMessage === undefined ? t('hostMissingTitle') : t('inactiveTitle'),
+      body: inactiveMessage === undefined ? t('hostMissingBody') : inactiveMessage,
+      hint: inactiveMessage === undefined ? t('hostMissingHint') : t('inactiveHint'),
+    }
+    : undefined
 
   const label = status === undefined
     ? t('loading')
@@ -1322,11 +1514,16 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
         ? t('requestFailed')
         : t('signedOut')
 
-  const patSummaryLine = (pat: NonNullable<Extract<QoderWebStatus, { status: 'signed-in' }>['pat']>): React.ReactNode => {
+  /**
+   * The token's provenance line: the account itself is named by the toolbar above,
+   * so this keeps only where the token came from and when it was saved.
+   */
+  const patSummaryLine = (
+    pat: NonNullable<Extract<QoderWebStatus, { status: 'signed-in' }>['pat']>,
+  ): React.ReactNode => {
     const parts = [
       patSourceText(pat.source, t),
       pat.savedAtMs === undefined ? null : t('patSavedAt', { time: formatTime(pat.savedAtMs) }),
-      pat.patTail === undefined ? null : t('patTail', { tail: `****${pat.patTail}` }),
     ].filter(part => part !== null)
     return <p style={bodyStyle}>{parts.join(' · ')}</p>
   }
@@ -1375,11 +1572,35 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
       </button>
       {open ? (
         <div style={cardBodyStyle}>
+          {inactiveNotice !== undefined ? (
+            <>
+              <p style={{ ...bodyStyle, fontWeight: 600 }}>{inactiveNotice.title}</p>
+              <p style={{ ...bodyStyle, wordBreak: 'break-word' }}>{inactiveNotice.body}</p>
+              <p style={bodyStyle}>{inactiveNotice.hint}</p>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <button
+                  type="button"
+                  style={buttonStyle}
+                  onClick={() => {
+                    const text = [inactiveNotice.title, '', inactiveNotice.body, '', inactiveNotice.hint].join('\n')
+                    void navigator.clipboard?.writeText(text).then(() => {
+                      setCopiedInactive(true)
+                      window.setTimeout(() => setCopiedInactive(false), 1600)
+                    }).catch(() => setCopiedInactive(false))
+                  }}
+                >
+                  {copiedInactive ? t('copied') : t('copyReport')}
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
           {isUnified ? (
             <>
-              {/* Top section: Qoder 侧栏设置 */}
-              <QuotaSettingsContent t={t} scope={scope} signedIn={signedIn} />
-              {/* Segmented Tab Switcher (Figure 1) */}
+              {/* Top section: Qoder 侧栏设置。 Held back until the first read
+                  lands so a refusal cannot flash toggles on its way in. */}
+              {statusUnknown ? null : <QuotaSettingsContent t={t} scope={scope} signedIn={signedIn} />}
+              {/* Segmented tab switcher: China / Global version selection */}
               <div style={segmentedContainerStyle} role="tablist" aria-label="Qoder Version Selection">
                 <button
                   type="button"
@@ -1405,26 +1626,22 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
             </>
           ) : null}
 
-          <h3 style={quotaTitleStyle}>{t('accountHeading')}</h3>
-          <div style={rowStyle}>
-            <div style={statusStyle} role="status" aria-busy={status === undefined}>
-              <span aria-hidden="true" style={dotStyle(status === undefined ? 'loading' : status.status)} />
-              <span>{label}</span>
-            </div>
-            <button type="button" style={buttonStyle} disabled={busy} onClick={() => { void manualRefresh() }}>
-              {busy ? t('refreshing') : t('refresh')}
-            </button>
-            {status?.status !== 'signed-in' || status.authKey === undefined
-              ? null
-              : <>
-                  <button type="button" style={buttonStyle} disabled={busy || patBusy} onClick={beginReplace}>
-                    {t('patReplace')}
-                  </button>
-                  <button type="button" style={buttonStyle} disabled={busy || patBusy} onClick={() => { void clearPat() }}>
-                    {patBusy ? t('patClearing') : t('patClear')}
-                  </button>
-                </>}
-          </div>
+          {status?.status !== 'signed-in'
+            ? <div style={accountStatusRowStyle}>
+                <div style={statusStyle} role="status" aria-busy={status === undefined}>
+                  <span aria-hidden="true" style={dotStyle(status === undefined ? 'loading' : status.status)} />
+                  <span>{label}</span>
+                </div>
+                <button
+                  type="button"
+                  style={{ ...buttonStyle, marginLeft: 'auto' }}
+                  disabled={busy}
+                  onClick={() => { void manualRefresh() }}
+                >
+                  {busy ? t('refreshing') : t('refresh')}
+                </button>
+              </div>
+            : null}
           {readFailure === undefined && writeFailure === undefined || signedInState === undefined
             ? null
             : <p style={errorStyle}>{t('statusRefreshFailed', {
@@ -1434,25 +1651,88 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
             })}</p>}
           {status?.status === 'signed-in'
             ? <>
-                {status.pat === undefined ? null : patSummaryLine(status.pat)}
+                <div style={accountToolbarStyle}>
+                  <label
+                    style={accountFieldLabelStyle}
+                    {...savedPats.length > 0 ? { htmlFor: `qoder-pat-select-${currentVariant.id}` } : {}}
+                  >
+                    <span aria-hidden="true" style={dotStyle('signed-in')} />
+                    {t('patAccounts')}
+                  </label>
+                  {savedPats.length > 0
+                    ? <select
+                        id={`qoder-pat-select-${currentVariant.id}`}
+                        value={status.activePatId ?? ''}
+                        disabled={busy || patBusy}
+                        onChange={event => {
+                          const id = event.target.value
+                          if (id !== '') void switchPat(id)
+                        }}
+                        style={patSelectStyle}
+                      >
+                        {savedPats.map(profile => (
+                          <option key={profile.id} value={profile.id}>
+                            {profile.label ?? (profile.patTail === undefined ? profile.id : `****${profile.patTail}`)}
+                          </option>
+                        ))}
+                      </select>
+                    : <span style={bodyStyle}>
+                        {status.pat?.patTail === undefined ? t('signedIn') : `****${status.pat.patTail}`}
+                      </span>}
+                  {status.authKey === undefined
+                    ? null
+                    : <>
+                        <button type="button" style={buttonStyle} disabled={busy || patBusy} onClick={beginAddPat}>
+                          {patBusy && patAction === 'save' ? t('patSaving') : t('patAdd')}
+                        </button>
+                        {savedPats.length > 1
+                          ? <button
+                              type="button"
+                              style={buttonStyle}
+                              disabled={busy || patBusy || status.activePatId === undefined}
+                              onClick={() => {
+                                const id = status.activePatId
+                                if (id !== undefined) void removePat(id)
+                              }}
+                            >
+                              {patBusy && patAction === 'remove' ? t('patRemoving') : t('patRemove')}
+                            </button>
+                          : null}
+                        {savedPats.length > 0
+                          ? <button type="button" style={buttonStyle} disabled={busy || patBusy} onClick={() => { void clearPat() }}>
+                              {patBusy && patAction === 'clear' ? t('patClearing') : t('patClear')}
+                            </button>
+                          : null}
+                      </>}
+                </div>
+                <div style={accountMetaRowStyle}>
+                  {status.pat === undefined ? null : patSummaryLine(status.pat)}
+                </div>
                 {replacing ? patEntry() : null}
+                {patError === undefined ? null : <p style={errorStyle}>{patError}</p>}
+                {patNotice === undefined ? null : <p style={bodyStyle}>{patNotice}</p>}
                 {status.jobTokenRefreshedAt === undefined
                   ? null
                   : <p style={bodyStyle}>{t('jobTokenRefreshed', { time: formatTime(status.jobTokenRefreshedAt) })}</p>}
-                {status.catalog === undefined
-                  ? null
-                  : <div style={rowStyle}>
-                      <span style={bodyStyle}>
+                <div style={accountMetaRowStyle}>
+                  {status.catalog === undefined
+                    ? null
+                    : <span style={bodyStyle}>
                         {status.catalog.source === 'live' && status.catalog.fetchedAt !== undefined
                           ? t('catalogLive', { time: formatTime(status.catalog.fetchedAt) })
                           : status.catalog.source === 'saved' && status.catalog.fetchedAt !== undefined
                             ? t('catalogSaved', { time: formatTime(status.catalog.fetchedAt) })
                             : t('catalogFallback')}
-                      </span>
-                      <button type="button" style={buttonStyle} disabled={busy} onClick={() => { void refreshModels() }}>
-                        {busy ? t('refreshingModels') : t('refreshModels')}
-                      </button>
-                    </div>}
+                      </span>}
+                  <button
+                    type="button"
+                    style={{ ...buttonStyle, marginLeft: 'auto' }}
+                    disabled={busy}
+                    onClick={() => { void refreshAll() }}
+                  >
+                    {busy ? t('refreshing') : t('refresh')}
+                  </button>
+                </div>
                 {status.catalog?.error === undefined
                   ? null
                   : <p style={errorStyle}>{t('catalogError', { message: status.catalog.error })}</p>}
@@ -1479,11 +1759,19 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
                           <h3 style={quotaTitleStyle}>{t('creditsHeading')}</h3>
                           <span style={bodyStyle}>{status.credits.unlimited === true
                             ? t('creditsTotalUnlimited')
-                            : t('creditsUsed', { percent: formatPercent(status.credits.total) })}</span>
+                            : t('creditsUsed', { percent: formatPercentText(status.credits.total) })}</span>
                         </div>
                         {status.credits.cycleResetTime === undefined ? null : (
                           <p style={descriptionStyle}>
                             {t('cycleResetAt', { time: formatCycleReset(status.credits.cycleResetTime) })}
+                          </p>
+                        )}
+                        {/* No account-wide expiry to state (the transport drops
+                            Qoder's year-9999 "never" sentinel)? Say what the card
+                            DOES know: when this PAT was authorized. */}
+                        {status.credits.cycleResetTime !== undefined || status.pat?.savedAtMs === undefined ? null : (
+                          <p style={descriptionStyle}>
+                            {t('patAuthorizedAt', { time: formatTime(status.pat.savedAtMs) })}
                           </p>
                         )}
                       </div>
@@ -1504,6 +1792,7 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
                 ) : tab === 'models' ? (
                   <div style={tabPanelStyle}>
                     <ModelSwitchTable
+                      key={activeVariantId}
                       models={status.models}
                       disabledModels={status.disabledModels}
                       t={t}
@@ -1523,7 +1812,7 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
                           .map((account, index) => (
                             <CreditBar
                               key={`${account.packageName}-${String(index)}`}
-                              label={account.packageName}
+                              label={accountDisplayName(account)}
                               remain={account.remain}
                               size={account.size}
                               unlimited={account.unlimited}
@@ -1559,9 +1848,13 @@ export function QoderPluginCard(props: QoderPluginCardProps) {
                   {status.reason ?? t(currentVariant.signedOutKey)}
                 </p>
                 {authKey === undefined ? null : patEntry()}
+                {patError === undefined ? null : <p style={errorStyle}>{patError}</p>}
+                {patNotice === undefined ? null : <p style={bodyStyle}>{patNotice}</p>}
               </>
             : null}
           {status?.status === 'error' ? <p style={errorStyle}>{status.message}</p> : null}
+            </>
+          )}
         </div>
       ) : null}
     </li>

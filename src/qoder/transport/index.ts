@@ -6,6 +6,8 @@ import type { QoderAccountInfo } from '../account.ts'
 import type { QoderCatalogModel } from '../catalog.ts'
 import type { QoderRegion } from '../region.ts'
 import type { QoderCheckInResult } from './checkin.ts'
+import type { QoderQueueWait } from './chat.ts'
+import type { QoderSseNotice } from './wire/sse.ts'
 import { DefaultQoderTransport, defaultStreamIdleTimeoutMs } from './default-transport.ts'
 import { defaultResponseHeaderTimeoutMs } from './request.ts'
 import type { QoderLogger } from './logging.ts'
@@ -37,21 +39,33 @@ export interface QoderTransportOptions {
   /** Whether prior assistant reasoning content is preserved across turns. */
   preserveThinking?: boolean
   /**
-   * Called once per successful re-auth refresh, right after a fresh job token
-   * was exchanged and accepted following a 401 rejection. The plugin host
-   * surfaces this as a visible "token auto-refreshed" notice on its card.
+   * Called once per successful re-auth refresh, after a fresh job token was
+   * exchanged and accepted following a 401 rejection.
    */
-  onJobTokenRefreshed?: (info: { region: QoderRegion; at: number }) => void
+  onJobTokenRefreshed?: (info: { region: QoderRegion; at: number; sessionId?: string | undefined }) => void
   /**
-   * Called once per unresolved self-heal failure: the transport exchanged a
-   * fresh job token, retried the chat, and the upstream rejected it anyway.
-   *
-   * The success notice alone left this case silent — the user saw only a bare
-   * authorization failure with no sign that the plugin had already tried to
-   * recover. Reported at most once per outage (reset when a later chat is
-   * accepted), so a long rejection storm does not print a row per retry.
+   * Called once per unresolved self-heal failure (refreshed token rejected too),
+   * and at most once per outage, reset when a later chat is accepted.
    */
-  onJobTokenRefreshFailed?: (info: { region: QoderRegion; at: number; status?: number }) => void
+  onJobTokenRefreshFailed?: (info: { region: QoderRegion; at: number; status?: number; sessionId?: string | undefined }) => void
+  /** Called once per queue poll round, so the conversation can show progress. */
+  onQueueWait?: (info: QoderQueueWait) => void
+  /** Create an observer owned by one stream, including its internal replays. */
+  createQueueWaitHandler?: (options: GenerateOptions) => (info: QoderQueueWait) => void
+  /**
+   * Create the per-stream notice sink. A filtered or unrecognised ending is reported as a
+   * normal stop, so this is the only channel that can tell the user the answer may be
+   * incomplete.
+   */
+  createNoticeHandler?: (options: GenerateOptions) => ((notice: QoderSseNotice) => void)
+  /** Called when one stream raises a notice; the per-stream handler wins. */
+  onNotice?: (notice: QoderSseNotice) => void
+  /** Budget for one chat call's queue wait; read per call so settings apply live. */
+  queueWaitBudgetMs?: () => number
+  /** One-line diagnostic sink (chat vs queue decisions). */
+  onDiag?: (message: string) => void
+  /** Whether to poll out a queue answer; false hands the failure to the host with its hint. */
+  queueWait?: () => boolean
 }
 
 export function createQoderTransport(options: QoderTransportOptions): QoderTransport {

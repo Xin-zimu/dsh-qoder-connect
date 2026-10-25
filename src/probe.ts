@@ -2,20 +2,10 @@
  * The reasoning-effort probe: decide whether a model's `reasoning_effort`
  * parameter is actually validated, and if so which canonical values it accepts.
  *
- * Implements `docs/reasoning-effort-probe-plan.md` §4. The order matters and is
- * not an optimization:
- *
- * 1. **Baseline** (no `reasoning_effort`) proves the model, credential, and
- *    request shape work at all, so a later rejection can be attributed.
- * 2. **Sentinel** (a fresh random, impossible-to-collide value) answers the one
- *    question a per-level sweep cannot: does the upstream validate the field?
- *    A model that accepts the sentinel answers 200 to *everything*, so its
- *    per-level results would be uniformly false positives.
- * 3. **Levels**, only after the sentinel was refused.
- *
- * The result is an observation, never a capability claim. Even a fully
- * successful sweep means "the upstream accepted these spellings", not "these
- * spellings change how the model thinks".
+ * The stage order is load-bearing, not an optimization: baseline (no effort) proves
+ * the request path works; a random sentinel asks the one question a per-level sweep
+ * cannot — does the upstream validate the field at all; levels are tested only after
+ * the sentinel was refused. The result is an observation, never a capability claim.
  *
  * @module dsh-qoder-connect/probe
  */
@@ -74,14 +64,12 @@ export type ProbeOutcome =
   | { validation: 'unknown'; efforts: readonly []; requests: number; reason: string }
 
 /**
- * The code a refused effort arrives under, wherever it was refused
- * (`src/qoder/transport/wire/serialize.ts` for a declared row, `probeEffort`
- * for a refusal the endpoint issued itself).
+ * The code a refused effort arrives under, wherever it was refused (the
+ * transport's serializer for a declared row, `probeEffort` for an endpoint
+ * refusal).
  *
- * Only a row that declares efforts can be refused locally. An undeclared row —
- * the only kind a sweep is offered for — sends every candidate to the wire and
- * lets the sentinel measure the endpoint rather than this plugin's own reading
- * of the catalog.
+ * Only a declared row can be refused locally; an undeclared one sends every
+ * candidate to the wire so the sentinel measures the endpoint, not the catalog.
  */
 const INVALID_EFFORT_CODE = 'UNSUPPORTED_REASONING_EFFORT'
 
@@ -132,8 +120,8 @@ export async function probeModel(options: {
     }
   }
 
-  // 1. Baseline: proves the request path itself is sound. Without this a 400
-  //    on the sentinel could just as well be an unrelated request problem.
+  // 1. Baseline: proves the request path itself is sound, so a later rejection is
+  //    attributable.
   const baseline = await attempt(undefined)
   if (!isAcceptance(baseline)) {
     return { validation: 'unknown', efforts: [], requests, reason: unknownReason('baseline', baseline) }
@@ -144,9 +132,9 @@ export async function probeModel(options: {
   const probe = sentinel()
   const sentinelAttempt = await attempt(probe)
   if (isAcceptance(sentinelAttempt)) {
-    // The upstream took a value that cannot exist. Any per-level acceptance
-    // would be equally meaningless, so stop here rather than spend more
-    // requests producing false positives.
+    // The upstream took a value that cannot exist, so any per-level acceptance
+    // would be equally meaningless; stop rather than spend requests on false
+    // positives.
     return { validation: 'non-validating', efforts: [], requests }
   }
   if (!isEffortRejection(sentinelAttempt)) {

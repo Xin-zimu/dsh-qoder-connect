@@ -9,6 +9,7 @@ import {
 } from './endpoints.ts'
 import type {
   QoderAccountInfo,
+  QoderDedicatedResourcePackage,
   QoderQuota,
   QoderQuotaUsage,
   QoderSubscriberFeatureAllowed,
@@ -54,11 +55,23 @@ interface RawUsageInfo {
   orgResourcePackage?: RawQuota
   /** Bonus credits granted beside the plan (the daily campaign's 100). */
   addOnQuota?: RawQuota
+  /** Campaign grants that carry their own total, expiry, and localized title. */
+  dedicatedResourcePackages?: RawDedicatedPackage[]
   totalUsagePercentage?: number
   isQuotaExceeded?: boolean
   expiresAt?: number | string
   userType?: string
   upgradeUrl?: string
+}
+
+/** One `dedicatedResourcePackages` entry as the upstream spells it. */
+interface RawDedicatedPackage extends RawQuota {
+  id?: string
+  name?: string
+  description?: string
+  expiresAt?: number | string
+  status?: string
+  displayLabels?: { dimension?: string; value?: string; valueI18n?: Record<string, string> }[]
 }
 
 function normalizeQuota(raw?: RawQuota): QoderQuota | undefined {
@@ -91,13 +104,82 @@ function normalizeQuota(raw?: RawQuota): QoderQuota | undefined {
 function normalizeExpiresAt(rawExpires?: number | string): string | undefined {
   if (rawExpires === undefined || rawExpires === null) return undefined
   if (typeof rawExpires === 'number' && rawExpires > 0) {
-    return new Date(rawExpires).toISOString()
+    return toExpiryIso(rawExpires)
   }
   if (typeof rawExpires === 'string' && rawExpires.length > 0) {
     const parsed = Date.parse(rawExpires)
-    if (!Number.isNaN(parsed) && parsed > 0) return new Date(parsed).toISOString()
+    if (!Number.isNaN(parsed) && parsed > 0) return toExpiryIso(parsed)
   }
   return undefined
+}
+
+/**
+ * The year at which Qoder stops naming a date and means "never": the year-9999
+ * sentinel is a valid timestamp, so it must be read as no expiry at all.
+ */
+const NEVER_EXPIRY_YEAR = 9999
+
+/** ISO instant for a parsed expiry, or undefined for the "never" sentinel. */
+function toExpiryIso(atMs: number): string | undefined {
+  return new Date(atMs).getUTCFullYear() >= NEVER_EXPIRY_YEAR ? undefined : new Date(atMs).toISOString()
+}
+
+/** Localized `displayLabels` values, keyed by bare language (`zh` / `en`). */
+function labelI18n(raw: Record<string, string> | undefined): { zh?: string; en?: string } {
+  const out: { zh?: string; en?: string } = {}
+  if (!raw || typeof raw !== 'object') return out
+  for (const [key, value] of Object.entries(raw)) {
+    const text = asString(value)
+    if (text === undefined) continue
+    const language = key.slice(0, 2).toLowerCase()
+    if (language === 'zh') out.zh = text
+    else if (language === 'en') out.en = text
+  }
+  return out
+}
+
+/**
+ * One campaign grant. `name` is an opaque code; the human copy lives in
+ * `displayLabels` under `dimension: 'title'`, which labels the row.
+ */
+function normalizeDedicatedPackage(raw: RawDedicatedPackage): QoderDedicatedResourcePackage | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const quota = normalizeQuota(raw)
+  if (quota === undefined) return undefined
+  const labels = Array.isArray(raw.displayLabels) ? raw.displayLabels : []
+  const title = labels.find(label => label?.dimension === 'title')
+  const id = asString(raw.id)
+  const name = asString(raw.name)
+  const status = asString(raw.status)
+  const expiresAt = normalizeExpiresAt(raw.expiresAt)
+  return {
+    ...quota,
+    ...id === undefined ? {} : { id },
+    ...name === undefined ? {} : { name },
+    ...title === undefined ? {} : (() => {
+      const parsed = labelI18n(title.valueI18n)
+      // An empty i18n map still has the plain `value` the upstream sent.
+      const fallback = asString(title.value)
+      if (parsed.zh === undefined && parsed.en === undefined && fallback === undefined) return {}
+      return {
+        title: {
+          ...parsed.zh !== undefined ? { zh: parsed.zh } : (fallback !== undefined ? { zh: fallback } : {}),
+          ...parsed.en !== undefined ? { en: parsed.en } : (fallback !== undefined ? { en: fallback } : {}),
+        },
+      }
+    })(),
+    ...expiresAt === undefined ? {} : { expiresAt },
+    ...typeof raw.available === 'boolean' ? { available: raw.available } : {},
+    ...status === undefined ? {} : { status },
+  }
+}
+
+function normalizeDedicatedPackages(raw: RawDedicatedPackage[] | undefined): QoderDedicatedResourcePackage[] | undefined {
+  if (!Array.isArray(raw)) return undefined
+  const packages = raw
+    .map(entry => normalizeDedicatedPackage(entry))
+    .filter((entry): entry is QoderDedicatedResourcePackage => entry !== undefined)
+  return packages.length > 0 ? packages : undefined
 }
 
 function asString(value: unknown): string | undefined {
@@ -248,9 +330,8 @@ export class QoderUsageReader {
     try {
       return await this.loadAccountWith(pat, signal, cacheKey)
     } catch (error) {
-      // The cached job token can outlive the upstream's acceptance of it; one
-      // fresh exchange self-heals that window instead of surfacing the card's
-      // quota read as an auth failure until the next credential save.
+      // A cached job token can outlive the upstream's acceptance of it; one fresh
+      // exchange self-heals that window instead of surfacing an auth failure.
       if (!isQoderAuthRejection(error) || signal.aborted) throw error
       this.logger?.warn?.('[Qoder Account] Usage read rejected as unauthorized; exchanging a fresh job token and retrying once')
     }
@@ -315,6 +396,10 @@ export class QoderUsageReader {
       userQuota: normalizeQuota(data.userQuota),
       orgResourcePackage: normalizeQuota(data.orgResourcePackage),
       addOnQuota: normalizeQuota(data.addOnQuota),
+      ...(() => {
+        const packages = normalizeDedicatedPackages(data.dedicatedResourcePackages)
+        return packages === undefined ? {} : { dedicatedResourcePackages: packages }
+      })(),
       totalUsagePercentage: typeof data.totalUsagePercentage === 'number' ? data.totalUsagePercentage : undefined,
       isQuotaExceeded: typeof data.isQuotaExceeded === 'boolean' ? data.isQuotaExceeded : false,
       expiresAt: normalizeExpiresAt(data.expiresAt),

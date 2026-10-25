@@ -1,14 +1,11 @@
 /**
- * Probe orchestration: the serial queue, the consent gate, and the bridge from
- * an observation to what the adapter may expose.
+ * Probe orchestration: the serial queue, the consent gate, and the bridge from an
+ * observation to what the adapter may expose.
  *
- * Kept separate from {@link module:dsh-qoder-connect/probe} so the protocol
- * stays a pure function of one model's responses, while queueing, persistence,
- * and policy live here. Two rules from `docs/reasoning-effort-probe-plan.md`
- * §3.3 are structural rather than advisory:
- *
- * - one probe at a time (a user's real chat must not contend with a sweep),
- * - nothing at all happens without explicit consent.
+ * Separate from {@link module:dsh-qoder-connect/probe} so the protocol stays a
+ * pure function of one model's responses. Two structural rules: one probe at a
+ * time (a real chat must not contend with a sweep), and nothing at all without
+ * explicit consent.
  *
  * @module dsh-qoder-connect/probe-service
  */
@@ -36,11 +33,9 @@ export interface QoderProbeServiceOptions {
    * The account currently in effect, as a one-way hash of the credential, or
    * `undefined` while signed out.
    *
-   * Records are read and written against this identity, and it is re-checked
-   * after the sweep finishes: an observation produced under account A must not
-   * be stored once account B is in effect, however long the probe took. The
-   * caller's `clear()` on an account switch is not sufficient on its own,
-   * because an in-flight probe completes *after* that clear.
+   * Re-checked after the sweep finishes: an observation produced under account A
+   * must not be stored once B is in effect, and the caller's `clear()` on a switch
+   * is not enough because an in-flight probe completes after it.
    */
   account: () => string | undefined
   sentinel?: SentinelFactory
@@ -70,8 +65,8 @@ export class QoderProbeService {
   /**
    * The record the adapter may use for this model, or `undefined`.
    *
-   * Applies the plan's precedence (§5): a declared set always wins, so a model
-   * that declares `supportedEfforts` is never answered from an observation.
+   * A declared set always wins, so a model declaring `supportedEfforts` is never
+   * answered from an observation.
    */
   recordFor(modelId: string): QoderProbeRecord | undefined {
     const info = this.options.catalog.current().find(model => model.id === modelId)
@@ -90,9 +85,8 @@ export class QoderProbeService {
    * Probe one model, serially.
    *
    * The authenticated manual route supplies one-request consent after UI
-   * confirmation. Other callers must pass the configured consent gate.
-   * Manual consent never changes the automatic-probing configuration.
-   * Explicit requests bypass historical results, but share an ongoing run.
+   * confirmation; other callers must pass the configured consent gate. Explicit
+   * requests bypass historical results but share an ongoing run.
    */
   async probe(modelId: string, manualConsent = false): Promise<QoderProbeStatus> {
     if (!manualConsent && !this.options.consent()) {
@@ -122,10 +116,8 @@ export class QoderProbeService {
         return { state: 'ok', validation: cached.validation, efforts: cached.efforts, requests: 0 }
       }
 
-      // The account this sweep is being run for. Captured before the requests
-      // and re-checked before the write-back: a probe can outlive the account
-      // it started under (a switch, or a manual refresh, clears records while
-      // the sweep is still talking to the upstream), and storing the result
+      // The account this sweep runs for. Captured before the requests and
+      // re-checked before write-back: a probe can outlive its account, and storing
       // afterwards would resurrect the previous account's answer.
       const activeAccount = this.options.account()
       if (activeAccount !== account) return { state: 'unavailable', reason: 'account changed before detection' }

@@ -6,15 +6,10 @@ import { en } from '../src/client/locales.ts'
 import { QODER_PROBE_PATH, QODER_STATUS_PATH } from '../src/status-paths.ts'
 
 /**
- * Composer-entry tests. The interaction these pin down:
- *
- * - the inline label is a *static* feature name, never a state readout (the
- *   verified levels belong to the model dropdown, not to composer chrome);
- * - a hover/focus tooltip carries the state and the click's purpose;
- * - the confirmation is an in-page bubble, not `window.confirm` — and cancelling
- *   it sends nothing, because probing spends the user's credit;
- * - a detection is authorized by the document's `probeKey` (header
- *   `X-Qoder-Probe-Key`) and never sent while a sweep is running.
+ * Composer-entry behaviour: the label is a static feature name (never a state
+ * readout), the tooltip carries state and purpose, the confirmation is an in-page
+ * bubble whose Cancel sends nothing (probing spends credit), and a detection is
+ * authorized by `X-Qoder-Probe-Key` and never sent while a sweep runs.
  */
 
 describe('Composer model probe', () => {
@@ -58,10 +53,8 @@ describe('Composer model probe', () => {
     select('qoder', 'qoder-thinking-pro')
     request.mockReset().mockImplementation(async (_url: string, init?: RequestInit) => {
       if (init?.method !== 'POST') return { ok: true, json: async () => statusBody }
-      // A successful detection writes a result that the next status read
-      // reports, the way the host does. Without that the control would refresh
-      // and see the same candidate list, and there would be no outcome to
-      // announce.
+      // A successful detection writes a result the next status read reports: without
+      // that the control would refresh and see the same candidate list again.
       const probed = JSON.parse(String(init.body)) as { model: string }
       const probe = statusBody['probe'] as Record<string, unknown>
       probe['candidates'] = (probe['candidates'] as string[]).filter(id => id !== probed.model)
@@ -184,9 +177,8 @@ describe('Composer model probe', () => {
   })
 
   it('does not announce a result that predates this page', async () => {
-    // The note is for "you just ran a detection, here is the outcome". A result
-    // already on record came from somewhere else — another conversation, the
-    // settings card, a sweep — so a fresh mount reports it in the tooltip only.
+    // The note is for "you just ran a detection"; a result already on record came from
+    // elsewhere and is reported in the tooltip only.
     probeStatus({
       candidates: [],
       results: [{ id: 'qoder-thinking-pro', name: 'Qoder Thinking Pro', validation: 'validating', efforts: ['low', 'high'], probedAt: Date.now() }],
@@ -370,15 +362,12 @@ describe('Composer model probe', () => {
   })
 
   it('still announces when a poll delivers a result mid-flight', async () => {
-    // The 60s reconcile poll can land while the user's own probe is running.
-    // That used to consume the "I started this" flag, so the real outcome was
-    // filed as read and no note appeared.
+    // The 60s reconcile poll can land mid-flight; it must not consume the "I started this" flag.
     await mount()
     await act(async () => { button()[0]!.props.onClick() })
     const detect = button().find(node => node.children.join('') === en.probeConfirmAction)!
 
-    // A poll lands mid-flight reporting another model's result — the
-    // interference that used to consume the "I started this" flag.
+    // A poll landing mid-flight with another model's result: the same interference.
     statusBody['probe'] = {
       ...(statusBody['probe'] as Record<string, unknown>),
       results: [{ id: 'auto', name: 'auto', validation: 'validating', efforts: ['low'], probedAt: Date.now() }],
