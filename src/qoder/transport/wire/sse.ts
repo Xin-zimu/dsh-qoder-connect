@@ -8,6 +8,7 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import { QoderLlmError, qoderHttpError } from '../../errors.ts'
 import { QoderThinkingParser, type QoderContentSegment } from './thinking.ts'
+import { repairToolCallArguments } from './tool-arguments.ts'
 import type { QoderInnerChunk, QoderSseEnvelope } from './wire-types.ts'
 
 const doneMarker = '[DONE]'
@@ -331,8 +332,13 @@ export async function* parseQoderSse(
   for (const [, state] of [...toolCalls.entries()].sort(([left], [right]) => left - right)) {
     if (!state.id || !state.name) throw malformed('Qoder completed an unidentifiable tool call.')
     const normalizedArguments = state.arguments.trim() ? state.arguments : '{}'
+    let completedArguments = normalizedArguments
     try {
-      JSON.parse(normalizedArguments)
+      // A completed call whose arguments pasted unescaped quotes or were cut mid-response
+      // would otherwise fail the whole turn without dispatching anything. The repair only
+      // returns text that parses as a JSON object, so anything else is still an error.
+      const repaired = repairToolCallArguments(normalizedArguments)
+      if (repaired.repairs.length > 0) completedArguments = JSON.stringify(repaired.arguments)
     } catch {
       throw malformed(`Qoder completed tool call "${state.name}" with malformed JSON arguments.`)
     }
@@ -354,7 +360,9 @@ export async function* parseQoderSse(
         type: 'tool-call',
         id: ToolCallId(state.id),
         name: state.name,
-        arguments: normalizedArguments,
+        // Deltas already streamed the provider's raw text; this block supersedes them, so a
+        // repaired value reaches the dispatch and the transcript through one place only.
+        arguments: completedArguments,
       },
     }
   }

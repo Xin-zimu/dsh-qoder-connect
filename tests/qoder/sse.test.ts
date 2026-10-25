@@ -151,6 +151,26 @@ test('parseQoderSse accepts a reasoning-only response', async () => {
   assert.equal((chunks.at(-1) as { reason: { kind: string } }).reason.kind, 'stop')
 })
 
+test('parseQoderSse repairs unescaped prose quotes in completed tool calls', async () => {
+  // A live Qoder turn streamed `但少了"两个人在两个世界"的实感。` unescaped and failed the
+  // whole turn with "malformed JSON arguments"; the call must still be dispatched.
+  const args = '{"questions": [{"id": "worlds", "question": "双频道这块，你要哪种关系？", "options": [{"label": "单频道", "description": "只有一个长门。更神秘，但少了"两个人在两个世界"的实感。"}]}]}'
+  const chunks = []
+  for await (const chunk of parseQoderSse(streamOf([
+    data({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-prose', function: { name: 'ask_user_question', arguments: args.slice(0, 40) } }] } }] }),
+    data({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: args.slice(40) } }] }, finish_reason: 'tool_calls' }] }),
+    done,
+  ]))) chunks.push(chunk)
+
+  const blockEnd = chunks.find(chunk => chunk.type === 'block-end')
+  assert.equal(blockEnd?.type, 'block-end')
+  // The block supersedes the deltas, so the repaired arguments arrive through it.
+  const block = (blockEnd as { block: { arguments: string } }).block
+  const parsed = JSON.parse(block.arguments) as { questions: Array<{ options: Array<{ description: string }> }> }
+  assert.equal(parsed.questions[0]?.options[0]?.description, '只有一个长门。更神秘，但少了"两个人在两个世界"的实感。')
+  assert.equal((chunks.at(-1) as { reason: { kind: string } }).reason.kind, 'tool-calls')
+})
+
 test('parseQoderSse rejects malformed tool calls and unknown finish reasons', async () => {
   const invalidStreams = [
     [
